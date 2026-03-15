@@ -89,8 +89,9 @@ flowchart LR
 ## 4. 运行态数据与事实源
 ### 4.1 控制平面
 - SQLite：`var/state/collections.db`
+- Redis：`docker-compose.yml` 中的 `redis` 服务，本地 `run_server.ps1` 默认会自动拉起；只承担运行态热镜像，不是断点恢复的真源。
 - 主要表：
-  - `task_runtime_state`：任务状态机快照，包含 `task_id`、`status`、`progress`、`probe_payload_json`、`book_options_json`、结果路径等。
+  - `task_runtime_state`：任务状态机快照，包含 `task_id`、`status`、`progress`、`probe_payload_json`、`recovery_payload_json`、`book_options_json`、结果路径等。
   - `video_collections`、`collection_episodes`：合集与分集绑定。
   - `task_manual_collection_bindings`：人工归档合集绑定。
   - `file_metadata`、`file_probe_cache`：上传复用与探测缓存。
@@ -125,6 +126,13 @@ stateDiagram-v2
     PROBING --> PROCESSING
     PROCESSING --> COMPLETED
     PROCESSING --> FAILED
+    PROBING --> MANUAL_RETRY_REQUIRED
+    PROCESSING --> MANUAL_RETRY_REQUIRED
+    PROBING --> FATAL
+    PROCESSING --> FATAL
+    FAILED --> QUEUED: retry
+    MANUAL_RETRY_REQUIRED --> QUEUED: retry
+    FATAL --> QUEUED: retry
     QUEUED --> DEDUPED
     PROBING --> DEDUPED
     QUEUED --> CANCELLED
@@ -141,7 +149,28 @@ stateDiagram-v2
   - 对远端视频，probe 可以从下载关键路径摘出，先进入处理链路，再后台补写标题与探测 payload。
 - 服务重启可恢复：
   - `TaskQueueManager.restorePersistedTasks()` 会把 SQLite 中的活跃任务恢复成运行时投影。
-  - `PROBING/PROCESSING` 中断任务回退为 `QUEUED` 重新排队。
+  - Java 控制面新增 `TaskRuntimeRecoveryService`，会读取 Python 写出的 `intermediates/rt/s/<stage>/stage_state.json`，并把 `MANUAL_RETRY_REQUIRED/FATAL` 投影回 `TaskQueueManager` 的阻塞态。
+  - `task_runtime_state.recovery_payload_json` 持久化保存 `stage / checkpoint / retry_mode / required_action / retry_entry_point / retry_strategy / operator_action / action_hint`，让控制面、移动端接口和人工排障共享同一份恢复语义。
+  - 对没有阻塞指令的 `PROBING/PROCESSING` 中断任务，仍回退为 `QUEUED` 重新排队。
+  - Python 侧 Phase2A/Phase2B 新增 `intermediates/rt/` 运行态提交真源：
+    - `Phase2A` 以截图优化 chunk 为提交边界，已提交 chunk 重启后直接回填恢复，不再重复跑 CV worker。
+    - `Phase2B` 以单次 LLM 调用为提交边界，详细请求/响应先落本地 manifest/part/commit，再由可选 Redis 仅同步热状态。
+  - Python gRPC 阶段入口现在通过 `RuntimeStageSession` 同步写 `intermediates/rt/s/<stage>/stage_state.json`：
+    - `DownloadVideo`、`TranscribeVideo`、`ProcessStage1`、`AnalyzeSemanticUnits`、`AssembleRichText`、`AnalyzeWithVL` 会把关键 checkpoint、完成度、错误分类和核心产物路径写入阶段状态。
+    - `RuntimeStageSession` 统一封装：
+      - 软/硬心跳发射；
+      - 阶段 snapshot 更新；
+      - runtime checkpoint 持久化；
+      - 失败分类后的 `retry_mode / required_action / retry_entry_point` 语义；
+      - 面向机器消费的 `retry_strategy / operator_action / action_hint` 语义。
+    - 阶段级 state 的 ownership 收敛到 gRPC 入口；`markdown_enhancer`、`vl_material_generator` 等内层模块只保留 chunk/LLM-call 级恢复写入，不再重复写 `phase2a/phase2b` 阶段状态。
+    - `TranscribeVideo` 在返回成功前会先 flush 异步字幕写盘，再把阶段标记为完成，避免“响应成功但字幕文件尚未真正提交”的假完成。
+    - Java 侧不再只会“统一重排队”：
+      - worker 失败后会先查询最新阶段状态；若 Python 已明确标记 `MANUAL_RETRY_REQUIRED/FATAL`，任务直接停在阻塞态，不再伪装成普通 `FAILED`。
+      - `TaskProcessingWorker` 的失败广播跟随 `TaskQueueManager` 最终状态，不再硬编码把阻塞任务推成 `FAILED`。
+      - `/api/mobile/tasks/{taskId}/retry` 与 `/api/tasks/{taskId}/retry` 显式暴露人工修复后的续跑入口，`retry` 会清空 `recoveryPayload` 并重新入队。
+      - `/api/mobile/tasks`、`/api/mobile/tasks/{taskId}` 与 `/api/tasks/{taskId}` 会透出 `blocked / recoveryStage / recoveryCheckpoint / retryMode / requiredAction / retryEntryPoint / retryStrategy / operatorAction / actionHint`，让前端与运维看到的是可执行语义而不只是状态标签。
+      - `TaskStatusPresentationService` 统一承接状态分类与 recovery payload 投影，HTTP controller 与 `TaskWebSocketHandler` 不再各自维护一套 `blocked/statusCategory/recovery*` 拼装逻辑。
 
 ### 5.3 实时通道
 - WebSocket 入口：`/ws/tasks`

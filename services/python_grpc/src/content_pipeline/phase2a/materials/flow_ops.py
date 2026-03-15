@@ -578,20 +578,50 @@ async def optimize_screenshots_batch_mode(
             completed_tasks = 0
 
             for chunk_id, chunk in enumerate(chunks):
+                if generator._restore_screenshot_chunk_if_committed(
+                    video_path=video_path,
+                    mode="streaming",
+                    chunk_index=chunk_id,
+                    chunk=chunk,
+                ):
+                    generator._commit_screenshot_chunk_runtime(
+                        video_path=video_path,
+                        mode="streaming",
+                        chunk_index=chunk_id,
+                        chunk=chunk,
+                    )
+                    continue
+                if generator._restore_screenshot_chunk_if_committed(
+                    video_path=video_path,
+                    mode="batch",
+                    chunk_index=chunk_id,
+                    chunk=chunk,
+                ):
+                    continue
                 chunk_t0 = time.perf_counter()
 
                 chunk_profile = str(chunk.get("prefetch_profile", "default") or "default")
                 chunk_sample_rate = max(1, int(chunk.get("prefetch_sample_rate", sample_rate) or sample_rate))
                 chunk_target_height = max(0, int(chunk.get("prefetch_target_height", target_height) or target_height))
-                registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
-                    generator._prefetch_union_frames_to_registry_sync,
-                    extractor,
-                    SharedFrameRegistry,
-                    chunk["union_start"],
-                    chunk["union_end"],
-                    chunk_sample_rate,
-                    chunk_target_height,
-                )
+                try:
+                    registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
+                        generator._prefetch_union_frames_to_registry_sync,
+                        extractor,
+                        SharedFrameRegistry,
+                        chunk["union_start"],
+                        chunk["union_end"],
+                        chunk_sample_rate,
+                        chunk_target_height,
+                    )
+                except Exception as prefetch_error:
+                    generator._mark_screenshot_chunk_runtime_error(
+                        video_path=video_path,
+                        mode="batch",
+                        chunk_index=chunk_id,
+                        chunk=chunk,
+                        error=prefetch_error,
+                    )
+                    raise
                 registry_snapshot = getattr(registry, "snapshot", lambda: {})() if registry is not None else {}
 
                 _emit_prefetch_monitor(
@@ -612,6 +642,12 @@ async def optimize_screenshots_batch_mode(
 
                 try:
                     if not ts_to_shm_ref:
+                        generator._commit_screenshot_chunk_runtime(
+                            video_path=video_path,
+                            mode="batch",
+                            chunk_index=chunk_id,
+                            chunk=chunk,
+                        )
                         logger.warning(
                             f"⚠️ [Batch Mode] Chunk {chunk_id + 1}/{len(chunks)} 预读失败，跳过该 chunk 的 CV 优化"
                         )
@@ -665,6 +701,21 @@ async def optimize_screenshots_batch_mode(
                         f"prefetch={prefetch_ms:.1f}ms, register={register_ms:.1f}ms, "
                         f"submitted={len(futures)}, profile={chunk_profile}, total={chunk_total_ms:.1f}ms"
                     )
+                    generator._commit_screenshot_chunk_runtime(
+                        video_path=video_path,
+                        mode="batch",
+                        chunk_index=chunk_id,
+                        chunk=chunk,
+                    )
+                except Exception as chunk_error:
+                    generator._mark_screenshot_chunk_runtime_error(
+                        video_path=video_path,
+                        mode="batch",
+                        chunk_index=chunk_id,
+                        chunk=chunk,
+                        error=chunk_error,
+                    )
+                    raise
                 finally:
                     # cleanup chunk SHM：确保异常情况下也不会泄漏
                     if registry is not None:
@@ -825,6 +876,15 @@ async def optimize_screenshots_streaming_pipeline(
                     if ctx.get("closed") and ctx.get("pending", 0) <= 0:
                         active_chunks.popleft()
                         try:
+                            generator._commit_screenshot_chunk_runtime(
+                                video_path=video_path,
+                                mode="streaming",
+                                chunk_index=int(ctx.get("chunk_id", 0) or 0),
+                                chunk=ctx.get("chunk", {}),
+                            )
+                        except Exception as commit_error:
+                            logger.warning("[Streaming Pipeline] Commit screenshot chunk failed: %s", commit_error)
+                        try:
                             cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
                             logger.info(
                                 "[SHM ChunkCleanup] mode=streaming chunk=%s/%s reason=completed frames=%s shm_mb=%.2f budget_mb=%.2f",
@@ -878,6 +938,15 @@ async def optimize_screenshots_streaming_pipeline(
                 while len(active_chunks) >= overlap_buffers:
                     if not pending:
                         ctx = active_chunks.popleft()
+                        try:
+                            generator._commit_screenshot_chunk_runtime(
+                                video_path=video_path,
+                                mode="streaming",
+                                chunk_index=int(ctx.get("chunk_id", 0) or 0),
+                                chunk=ctx.get("chunk", {}),
+                            )
+                        except Exception as commit_error:
+                            logger.warning("[Streaming Pipeline] Commit screenshot chunk before overlap evict failed: %s", commit_error)
                         try:
                             cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
                             logger.info(
@@ -935,7 +1004,20 @@ async def optimize_screenshots_streaming_pipeline(
                                     window["req"] = original_request
                                 else:
                                     window["req"] = updated_request
+                        generator._commit_screenshot_chunk_runtime(
+                            video_path=video_path,
+                            mode="streaming",
+                            chunk_index=chunk_id,
+                            chunk=chunk,
+                        )
                         continue
+                    generator._mark_screenshot_chunk_runtime_error(
+                        video_path=video_path,
+                        mode="streaming",
+                        chunk_index=chunk_id,
+                        chunk=chunk,
+                        error=error,
+                    )
                     raise
                 registry_snapshot = getattr(registry, "snapshot", lambda: {})() if registry is not None else {}
 
@@ -956,6 +1038,12 @@ async def optimize_screenshots_streaming_pipeline(
                 )
 
                 if not ts_to_shm_ref:
+                    generator._commit_screenshot_chunk_runtime(
+                        video_path=video_path,
+                        mode="streaming",
+                        chunk_index=chunk_id,
+                        chunk=chunk,
+                    )
                     logger.warning(
                         f"⚠️ [Streaming Pipeline] Chunk {chunk_id + 1}/{len(chunks)} 预读失败，跳过该 chunk 的 CV 优化"
                     )
@@ -969,6 +1057,7 @@ async def optimize_screenshots_streaming_pipeline(
 
                 chunk_ctx = {
                     "chunk_id": chunk_id,
+                    "chunk": chunk,
                     "registry": registry,
                     "submitted": 0,
                     "completed": 0,
@@ -1036,6 +1125,12 @@ async def optimize_screenshots_streaming_pipeline(
             while active_chunks:
                 ctx = active_chunks.popleft()
                 try:
+                    generator._commit_screenshot_chunk_runtime(
+                        video_path=video_path,
+                        mode="streaming",
+                        chunk_index=int(ctx.get("chunk_id", 0) or 0),
+                        chunk=ctx.get("chunk", {}),
+                    )
                     cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
                     logger.info(
                         "[SHM ChunkCleanup] mode=streaming chunk=%s/%s reason=final_drain frames=%s shm_mb=%.2f budget_mb=%.2f",
@@ -1062,6 +1157,12 @@ async def optimize_screenshots_streaming_pipeline(
                     while active_chunks:
                         ctx = active_chunks.popleft()
                         try:
+                            generator._commit_screenshot_chunk_runtime(
+                                video_path=video_path,
+                                mode="streaming",
+                                chunk_index=int(ctx.get("chunk_id", 0) or 0),
+                                chunk=ctx.get("chunk", {}),
+                            )
                             cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
                             logger.info(
                                 "[SHM ChunkCleanup] mode=streaming chunk=%s/%s reason=finally_cleanup frames=%s shm_mb=%.2f budget_mb=%.2f",

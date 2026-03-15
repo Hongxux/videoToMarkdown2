@@ -36,6 +36,10 @@ from typing import Dict, List, Optional, Any, Tuple, Callable, Awaitable
 from services.python_grpc.src.common.utils.numbers import safe_float
 from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
 from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
+from services.python_grpc.src.common.utils.runtime_recovery_store import (
+    RuntimeRecoveryStore,
+    build_screenshot_chunk_fingerprint,
+)
 from services.python_grpc.src.content_pipeline.shared.subtitle.subtitle_repository import SubtitleRepository
 from services.python_grpc.src.content_pipeline.infra.runtime.vl_interval_utils import (
     normalize_intervals,
@@ -366,6 +370,8 @@ class VLMaterialGenerator:
         
         self.config = config
         self.enabled = config.get("enabled", False)
+        self._runtime_store: Optional[RuntimeRecoveryStore] = None
+        self._runtime_output_dir = ""
         self.screenshot_config = config.get("screenshot_optimization", {})
         self.fallback_config = config.get("fallback", {})
         self.best_frame_vision_select_enabled = bool(
@@ -6442,6 +6448,7 @@ class VLMaterialGenerator:
         result = VLGenerationResult()
         resolved_output_dir = str(output_dir or Path(video_path).parent)
         self._current_subtitle_output_dir = resolved_output_dir
+        self._prepare_runtime_store_for_output_dir(resolved_output_dir)
         
         if not self.enabled:
             result.success = False
@@ -7869,6 +7876,194 @@ class VLMaterialGenerator:
         results = await asyncio.gather(*futures, return_exceptions=True)
         pids = sorted({r for r in results if isinstance(r, int)})
         logger.info(f"🔥 [Warmup] tasks={warmup_n}, unique_pids={pids}")
+
+    def _prepare_runtime_store_for_output_dir(self, output_dir: str) -> None:
+        """按输出目录初始化 Phase2A 运行态恢复存储。"""
+        resolved_output_dir = str(output_dir or "").strip()
+        if not resolved_output_dir:
+            self._runtime_store = None
+            self._runtime_output_dir = ""
+            return
+        if self._runtime_store is not None and self._runtime_output_dir == resolved_output_dir:
+            return
+        try:
+            self._runtime_store = RuntimeRecoveryStore(
+                output_dir=resolved_output_dir,
+                task_id=Path(resolved_output_dir).name,
+            )
+            self._runtime_output_dir = resolved_output_dir
+        except Exception as exc:
+            logger.warning(f"Failed to prepare phase2a runtime recovery store: {exc}")
+            self._runtime_store = None
+            self._runtime_output_dir = resolved_output_dir
+
+    @staticmethod
+    def _build_screenshot_request_runtime_key(req: Dict[str, Any]) -> str:
+        screenshot_id = str(req.get("screenshot_id", "") or "").strip()
+        if screenshot_id:
+            return f"id:{screenshot_id}"
+        unit_id = str(req.get("semantic_unit_id", "") or "").strip()
+        label = str(req.get("label", "") or "").strip()
+        original_ts = safe_float(req.get("_original_timestamp", req.get("timestamp_sec", 0.0)), 0.0)
+        return f"fallback:{unit_id}|{label}|{original_ts:.6f}"
+
+    def _serialize_screenshot_request_runtime_update(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "request_key": self._build_screenshot_request_runtime_key(req),
+            "timestamp_sec": float(safe_float(req.get("timestamp_sec", 0.0), 0.0)),
+            "_optimized": bool(req.get("_optimized", False)),
+            "_original_timestamp": float(safe_float(req.get("_original_timestamp", req.get("timestamp_sec", 0.0)), 0.0)),
+            "_cv_quality_score": float(safe_float(req.get("_cv_quality_score", 0.0), 0.0)),
+            "_cv_candidate_screenshots": self._normalize_cv_candidate_screenshots(
+                req.get("_cv_candidate_screenshots"),
+                fallback_timestamp=safe_float(req.get("timestamp_sec", 0.0), 0.0),
+                fallback_score=safe_float(req.get("_cv_quality_score", 0.0), 0.0),
+            ),
+            "_cv_static_island_threshold_ms": float(
+                safe_float(
+                    req.get("_cv_static_island_threshold_ms", self._resolve_screenshot_static_island_threshold_ms()),
+                    self._resolve_screenshot_static_island_threshold_ms(),
+                )
+            ),
+        }
+
+    def _apply_screenshot_request_runtime_update(self, req: Dict[str, Any], update: Dict[str, Any]) -> None:
+        if not isinstance(req, dict) or not isinstance(update, dict):
+            return
+        req["timestamp_sec"] = float(safe_float(update.get("timestamp_sec", req.get("timestamp_sec", 0.0)), 0.0))
+        req["_optimized"] = bool(update.get("_optimized", False))
+        req["_original_timestamp"] = float(
+            safe_float(update.get("_original_timestamp", req.get("_original_timestamp", req.get("timestamp_sec", 0.0))), 0.0)
+        )
+        req["_cv_quality_score"] = float(safe_float(update.get("_cv_quality_score", req.get("_cv_quality_score", 0.0)), 0.0))
+        req["_cv_candidate_screenshots"] = self._normalize_cv_candidate_screenshots(
+            update.get("_cv_candidate_screenshots"),
+            fallback_timestamp=safe_float(req.get("timestamp_sec", 0.0), 0.0),
+            fallback_score=safe_float(req.get("_cv_quality_score", 0.0), 0.0),
+        )
+        req["_cv_static_island_threshold_ms"] = float(
+            safe_float(
+                update.get("_cv_static_island_threshold_ms", req.get("_cv_static_island_threshold_ms", self._resolve_screenshot_static_island_threshold_ms())),
+                self._resolve_screenshot_static_island_threshold_ms(),
+            )
+        )
+
+    def _restore_screenshot_chunk_if_committed(
+        self,
+        *,
+        video_path: str,
+        mode: str,
+        chunk_index: int,
+        chunk: Dict[str, Any],
+    ) -> bool:
+        if self._runtime_store is None:
+            return False
+        chunk_id = self._runtime_store.build_chunk_id(chunk_index=chunk_index, prefix="ss")
+        input_fingerprint = build_screenshot_chunk_fingerprint(
+            video_path=video_path,
+            mode=mode,
+            chunk=chunk,
+        )
+        restored = self._runtime_store.load_committed_chunk_payload(
+            stage="phase2a",
+            chunk_id=chunk_id,
+            input_fingerprint=input_fingerprint,
+        )
+        if restored is None:
+            return False
+        request_update_map = {}
+        for item in list(restored.get("result_payload", {}).get("request_updates", []) or []):
+            if not isinstance(item, dict):
+                continue
+            request_update_map[str(item.get("request_key", "") or "")] = item
+        restored_count = 0
+        for window in list(chunk.get("windows", []) or []):
+            if not isinstance(window, dict):
+                continue
+            req = window.get("req")
+            if not isinstance(req, dict):
+                continue
+            update = request_update_map.get(self._build_screenshot_request_runtime_key(req))
+            if update is None:
+                continue
+            self._apply_screenshot_request_runtime_update(req, update)
+            restored_count += 1
+        if restored_count > 0:
+            logger.info(
+                "[Phase2A Runtime] restored committed screenshot chunk: chunk=%s restored=%s/%s mode=%s",
+                chunk_id,
+                restored_count,
+                len(list(chunk.get("windows", []) or [])),
+                mode,
+            )
+        return restored_count > 0
+
+    def _commit_screenshot_chunk_runtime(
+        self,
+        *,
+        video_path: str,
+        mode: str,
+        chunk_index: int,
+        chunk: Dict[str, Any],
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        chunk_id = self._runtime_store.build_chunk_id(chunk_index=chunk_index, prefix="ss")
+        input_fingerprint = build_screenshot_chunk_fingerprint(
+            video_path=video_path,
+            mode=mode,
+            chunk=chunk,
+        )
+        request_updates = []
+        for window in list(chunk.get("windows", []) or []):
+            if not isinstance(window, dict):
+                continue
+            req = window.get("req")
+            if not isinstance(req, dict):
+                continue
+            request_updates.append(self._serialize_screenshot_request_runtime_update(req))
+        self._runtime_store.commit_chunk_payload(
+            stage="phase2a",
+            chunk_id=chunk_id,
+            input_fingerprint=input_fingerprint,
+            result_payload={"request_updates": request_updates},
+            metadata={
+                "mode": mode,
+                "window_count": len(list(chunk.get("windows", []) or [])),
+                "union_start": float(chunk.get("union_start", 0.0) or 0.0),
+                "union_end": float(chunk.get("union_end", 0.0) or 0.0),
+            },
+        )
+
+    def _mark_screenshot_chunk_runtime_error(
+        self,
+        *,
+        video_path: str,
+        mode: str,
+        chunk_index: int,
+        chunk: Dict[str, Any],
+        error: Exception,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        chunk_id = self._runtime_store.build_chunk_id(chunk_index=chunk_index, prefix="ss")
+        input_fingerprint = build_screenshot_chunk_fingerprint(
+            video_path=video_path,
+            mode=mode,
+            chunk=chunk,
+        )
+        self._runtime_store.fail_chunk_payload(
+            stage="phase2a",
+            chunk_id=chunk_id,
+            input_fingerprint=input_fingerprint,
+            error=error,
+            metadata={
+                "mode": mode,
+                "window_count": len(list(chunk.get("windows", []) or [])),
+                "union_start": float(chunk.get("union_start", 0.0) or 0.0),
+                "union_end": float(chunk.get("union_end", 0.0) or 0.0),
+            },
+        )
 
     def _apply_selection_result(self, *, req: Dict[str, Any], original_ts: float, unit_id: str, result: Any) -> None:
         """

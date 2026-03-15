@@ -1,5 +1,92 @@
 ﻿# 架构升级记录
 
+## 2026-03-15 run_server.ps1 auto-starts Docker Redis and wires Python runtime recovery mirror
+- Date: 2026-03-15
+- Background:
+  - 本地 `run_server.ps1` 只会直接启动 Python gRPC 进程，运行态恢复虽然已经支持 `TASK_RUNTIME_REDIS_*`，但 Redis 容器需要手工先启动，脚本本身也不会自动注入 Redis URL。
+  - `docker-compose.yml` 之前没有显式 `redis` 服务，因此即使想统一用 `docker compose up -d redis` 也没有标准入口。
+- First principles:
+  - 既然 Redis 在当前方案里承担的是“热状态镜像”而不是业务真源，本地启动脚本就应该把它当成标准依赖自动拉起，避免人为漏启动导致恢复能力静默降级。
+  - 脚本必须同时保证“容器起来了”和“应用真的拿到了 Redis 配置”，否则只是多起一个容器，没有投入使用。
+- Reusable leverage:
+  - 复用 Python `RuntimeRecoveryStore` 现有的 `TASK_RUNTIME_REDIS_ENABLED / TASK_RUNTIME_REDIS_URL / TASK_RUNTIME_REDIS_PREFIX` 开关，不改恢复层代码。
+  - 复用 `docker compose` 作为本地依赖管理入口，不新加第二套 PowerShell 容器编排逻辑。
+- Decisions:
+  - Decision 1: 在 `docker-compose.yml` 新增 `redis` 服务，统一容器名 `v2m-redis`，并直接固化 `appendonly yes`、`appendfsync everysec`、`save ""`、`maxmemory-policy noeviction`、`./var/redis:/data` 和健康检查。
+  - Decision 2: `python-grpc` 容器在 compose 模式下默认注入 `TASK_RUNTIME_REDIS_ENABLED=1`、`TASK_RUNTIME_REDIS_URL=redis://redis:6379/0`、`TASK_RUNTIME_REDIS_PREFIX=rt`，并依赖 `redis` 健康。
+  - Decision 3: `run_server.ps1` 默认在本地启动 Python 前先确保 Docker 引擎 ready；若引擎未启动，则自动拉起 Docker Desktop，再执行 `docker compose up -d redis`。
+  - Decision 4: `run_server.ps1` 在 Redis ready 后自动向当前 Python 进程注入 `TASK_RUNTIME_REDIS_ENABLED / TASK_RUNTIME_REDIS_URL / TASK_RUNTIME_REDIS_PREFIX`；如需跳过，可显式传 `-SkipRedis`。
+- Call-chain change:
+  - Before: `run_server.ps1 -> python main.py`，Redis 是否存在取决于人工先手工启动容器和设置环境变量。
+  - After: `run_server.ps1 -> ensure docker engine -> docker compose up -d redis -> wait healthy -> export TASK_RUNTIME_REDIS_* -> python main.py`
+- Performance comparison:
+  - 测试方式：对比本地启动链路中“手工干预步骤数量”和“Redis 可用性确认方式”。
+  - 测试数据：
+    - 改造前：至少需要 2 个手工步骤，先起 Docker Redis，再手工设置运行态环境变量。
+    - 改造后：默认 0 个额外手工步骤；脚本内会等待 `v2m-redis` 健康后再启动 Python。
+    - 行为收益：本地恢复热镜像从“容易漏配的可选步骤”收敛成“默认随服务一起可用的标准依赖”。
+- Verification:
+  - `docker compose config --services`
+  - `powershell` 语法解析 `run_server.ps1`
+  - `docker compose up -d redis`
+  - `docker inspect --format "name={{.Name}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}" v2m-redis`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Files:
+  - `docker-compose.yml`
+  - `run_server.ps1`
+  - `docs/architecture/upgrade-log.md`
+
+## 2026-03-15 Java control-plane consumes runtime recovery directives and exposes manual retry
+- Date: 2026-03-15
+- Background:
+  - Python 侧已经能把 `MANUAL_RETRY_REQUIRED / FATAL` 与 `retry_mode / required_action / retry_entry_point` 写进 `intermediates/rt/s/<stage>/stage_state.json`，但 Java 控制面仍只认识 `FAILED`。
+  - 结果是 worker 失败后会把原本需要人工修复的任务继续包装成普通失败，重启后也只会统一重排队，移动端无法明确知道“为什么停住、从哪里继续”。
+- First principles:
+  - 断点恢复不只是 Python 侧能写状态，还必须让控制平面消费这份状态，并把“自动继续”和“必须人工介入”分开。
+  - 人工重试必须是显式状态机动作，而不是运维手工改库或整单重提。
+- Reusable leverage:
+  - 复用既有 `task_runtime_state` 表与 `TaskStateRepository`，不新建第二套恢复索引表。
+  - 复用 Python 已落地的 `stage_state.json` 与 `RuntimeStageSession` 语义，不重写恢复协议。
+  - 复用 `TaskQueueManager` 现有状态机、`TaskProcessingWorker` 现有失败收敛点、`MobileMarkdownController` 现有任务资源面。
+- Decisions:
+  - Decision 1: `task_runtime_state` 新增 `recovery_payload_json`，控制面持久化保存 `stage/checkpoint/retry_mode/required_action/retry_entry_point/retry_strategy/operator_action/action_hint`。
+  - Decision 2: 新增 `TaskRuntimeRecoveryService`，在 Java 侧扫描任务目录中的 `intermediates/rt/s/*/stage_state.json`，把最新阻塞指令提升为 `TaskQueueManager` 的一等状态。
+  - Decision 3: `TaskQueueManager` 状态机新增 `MANUAL_RETRY_REQUIRED`、`FATAL` 与 `RETRY` 事件；重启恢复和运行期失败都会优先消费 recovery directive，而不是一律回退成普通 `FAILED/QUEUED`。
+  - Decision 4: `TaskProcessingWorker` 失败广播改为跟随 `TaskQueueManager` 最终状态，避免把阻塞任务错误广播成 `FAILED`。
+  - Decision 5: `MobileMarkdownController` 与 `VideoProcessingController` 新增 `POST /tasks/{taskId}/retry`，并在任务详情/列表中透出 `blocked / recoveryStage / recoveryCheckpoint / retryMode / requiredAction / retryEntryPoint / retryStrategy / operatorAction / actionHint`。
+  - Decision 6: 新增 `TaskStatusPresentationService`，把状态分类与 recovery payload 投影从 controller/WebSocket 业务代码中抽离，统一 `blocked/statusCategory/recovery*` 输出契约。
+- Call-chain change:
+  - Before: `Python stage_state.json -> Java ignore -> worker failTask -> FAILED -> 重启后统一 QUEUED -> 人工只能整单重试`
+  - After: `Python stage_state.json -> TaskRuntimeRecoveryService -> TaskQueueManager(MANUAL_RETRY_REQUIRED/FATAL) -> API/WebSocket 透出恢复语义 -> 人工修复 -> POST /tasks/{taskId}/retry -> QUEUED`
+- Performance comparison:
+  - 测试方式：对比“阻塞态任务是否继续进入运行队列”和“人工修复后是否需要整单重提”两个控制面动作路径，并用 3 个定向 Java 单测覆盖状态机、worker 广播、移动端接口。
+  - 测试数据：
+    - 改造前：阻塞原因只存在 Python 侧运行态，Java 失败后仍进入普通失败/重排队路径；人工需要重新提交整单或手工排查日志。
+    - 改造后：阻塞任务在 Java 控制面直接停在 `MANUAL_RETRY_REQUIRED/FATAL`，不会继续占用运行队列；人工修复后通过 `retry` 事件原任务继续入队，不再生成新任务链路。
+    - 行为收益：恢复路径从“整单重提 + 再次探测/再入队”收敛为“原 taskId 续跑 + 明确 checkpoint”，控制面误调度次数从至少 1 次降为 0 次。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests test-compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=MobileMarkdownControllerRecoveryStatusTest,TaskStatusPresentationServiceTest,TaskWebSocketHandlerRecoveryStatusTest" surefire:test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskRuntimeRecoveryService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStatusPresentationService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/DatabaseInitializer.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/queue/TaskQueueManagerStateMachineTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerRecoveryStatusTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerRecoveryStatusTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskStatusPresentationServiceTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandlerRecoveryStatusTest.java`
+  - `docs/architecture/overview.md`
+  - `docs/architecture/upgrade-log.md`
+  - `docs/architecture/error-fixes.md`
+
 ## 2026-03-14 Web submit accept path switches to strict minimal durability, worker-side normalization and dedupe
 - Date: 2026-03-14
 - Background:
@@ -12327,3 +12414,198 @@ body` and task metadata is still present.
 - 验证
   - `powershell.exe -Command "mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q"`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 23. 2026-03-14 Phase2A/Phase2B 运行态恢复真源落地（本地 commit + 可选 Redis 热状态）
+- 背景
+  - 现有 Java 控制面重启后只会把活跃任务回退为 `QUEUED` 重排队，Python 计算面虽然已有 `resume_state/resume_from_step`、`semantic_units_phase2a.json`、`phase2b_llm_trace.jsonl` 等杠杆，但它们还不足以回答“当前 chunk/当前 LLM 调用是否已经安全提交”。
+  - 第一性原理：断电恢复的真正边界不是“运行中状态”，而是“已提交状态”。只要最后一个安全提交点可验证，剩余部分就能局部重跑，而不需要整单重跑。
+- 复用杠杆
+  - 复用杠杆1：复用 `async_disk_writer` 既有异步写盘队列与 `flush_async_json_writes(scope_key)`，把长响应 part 写盘纳入统一提交屏障。
+  - 复用杠杆2：复用 Phase2B 既有每次调用 trace 落点 `markdown_enhancer._write_llm_trace_record(...)`，避免新建第二套 LLM 审计入口。
+  - 复用杠杆3：复用 Phase2A 既有 `build_screenshot_prefetch_chunks(...)` 与 chunk 内 `req` 原地更新语义，不改截图优化算法，只给每个 chunk 增加提交/恢复协议。
+- 本次升级
+  - 新增 `services/python_grpc/src/common/utils/runtime_recovery_store.py`：
+    - 统一管理 `intermediates/rt/` 运行态目录。
+    - 提供 `manifest.json / commit.json / error.json` 协议。
+    - 对 `Phase2B` 以 `LLM call` 为提交边界，对 `Phase2A` 以 `screenshot chunk` 为提交边界。
+    - 可选把状态镜像到 Redis `Hash/Stream`；Redis 不再承载长正文，只保存热状态、索引与事件。
+  - 强化 `async_disk_writer`：
+    - 原子写盘从“写临时文件 + rename”升级为“写临时文件 + flush + fsync + rename + 父目录 fsync”，降低断电后 rename 丢失风险。
+  - Phase2B `MarkdownEnhancer` 接入可恢复 LLM 调用：
+    - 按 `step_name/unit_id/model/system_prompt/user_prompt` 计算稳定 `input_fingerprint`。
+    - 命中已提交 attempt 时，直接复用本地响应 part 重组结果，不再重新请求远端 LLM。
+    - 未命中时，先写 request/manifest，再执行调用；响应按 part 落盘并在全部 part flush 完成后写 `commit.json`。
+  - Phase2A `VLMaterialGenerator + flow_ops` 接入 screenshot chunk 提交：
+    - 每个 chunk 按 `video + mode + union window + request identity` 计算稳定 fingerprint。
+    - 已提交 chunk 在恢复时直接把已优化 `timestamp_sec/_cv_quality_score/_cv_candidate_screenshots` 回填到请求对象并跳过 worker 执行。
+    - prefetch 失败、chunk 失败会落 `error.json`，后续可按 chunk 粒度重跑。
+  - gRPC 阶段入口补齐阶段级运行态镜像：
+    - `DownloadVideo`、`TranscribeVideo`、`ProcessStage1`、`AnalyzeSemanticUnits`、`AssembleRichText` 在关键 hard checkpoint 同步写 `intermediates/rt/s/<stage>/stage_state.json`。
+    - 阶段状态写入统一复用 `RuntimeRecoveryStore.update_stage_state(...)`，状态值与错误分类对齐 `EXECUTING/COMPLETED/AUTO_RETRY_WAIT/MANUAL_RETRY_REQUIRED/FATAL`。
+    - `Stage1` 额外复用 `run_pipeline(..., progress_callback=...)` 既有事件，把 step 级完成点同步映射到阶段运行态，避免只在最终返回时才知道进度。
+    - `TranscribeVideo` 新增“异步写盘 flush 完成后再标记 `COMPLETED`”的提交屏障，避免字幕只进入异步队列但尚未真正落盘时被误判为安全恢复点。
+- 设计取舍
+  - 没有把 Redis 作为真源。原因是 AOF 仍存在最后 1 秒丢失窗口，且长响应写入 Redis 会放大内存与淘汰策略风险；因此本地 `commit.json` 才是最终提交判据。
+  - 没有尝试“mid-flight 续跑”。远端 LLM 调用、CV worker、SHM registry 都不具备安全的中途恢复语义，因此只从最后一个已提交 chunk/LLM call 继续。
+  - screenshot chunk 恢复 fingerprint 明确使用 `_original_timestamp` 优先于当前 `timestamp_sec`，避免“首次优化后 timestamp 被改写，导致下次恢复 fingerprint 漂移”的错误复用。
+  - LLM 响应路径做了短键目录收敛（`intermediates/rt/s/<stage>/c/<chunk>/l/<llm_call>/aNNN/p/`），避免 Windows 长路径在恢复目录中再次触发 `FileNotFoundError/WinError 3`。
+- 性能与恢复收益
+  - 对比1：Phase2B 已提交调用恢复。
+    - 测试方式：同一 `step_name/unit_id/system_prompt/user_prompt` 执行两次 `_execute_recoverable_llm_call(...)`。
+    - 测试数据：`structured_text/SU200`，单次响应 `"复用恢复成功"`。
+    - 对比结果：首次运行远端调用次数 `1`，第二次恢复命中本地 commit，远端调用次数 `0`。
+  - 对比2：Phase2A 已提交 chunk 恢复。
+    - 测试方式：先提交一个已优化 screenshot chunk，再用同一视频与同一请求 identity 做恢复。
+    - 测试数据：`shot_001/SU300/head` 单请求 chunk。
+    - 对比结果：恢复时直接回填 `timestamp_sec=9.5` 与 `_optimized=true`，不再进入 worker 执行。
+  - 对比3：长响应分块提交。
+    - 测试方式：使用 40 次重复文本构造长响应并把 `max_part_bytes` 降到 `64`。
+    - 测试数据：`"这是一段很长的输出。"` × 40。
+    - 对比结果：单次响应被拆分为多个 part，恢复时可按 part 重组并校验 `response_hash`，不需要整条重新请求。
+  - 对比4：阶段级恢复判定加速。
+    - 测试方式：直接写入 `stage_state.json` 的 `running/completed/failed` 三类 checkpoint，并验证状态码与错误分类是否保持一致。
+    - 测试数据：`stage1_response_ready` 正常完成、`phase2b_failed + 429 rate limit exceeded` 失败两条样例。
+    - 对比结果：阶段入口可以在不扫描完整业务日志的情况下直接拿到最近 checkpoint、完成度与错误类别，后续恢复协调只需再对账本地 commit 产物。
+  - 对比5：转录阶段提交边界收紧。
+    - 测试方式：在 `TranscribeVideo` 返回成功前强制执行 `flush_async_json_writes(scope_key=output_dir)` 并校验 `subtitles.txt` 存在且大小大于 0。
+    - 测试数据：同一视频的 `subtitles.txt` 异步写盘链路。
+    - 对比结果：从“写入队列即视为完成”收紧为“文件真正落盘后才视为完成”，断电恢复时不会把空文件/缺文件误判为已完成。
+- 验证
+  - `python -m py_compile services/python_grpc/src/common/utils/async_disk_writer.py services/python_grpc/src/common/utils/runtime_recovery_store.py services/python_grpc/src/server/runtime_stage_state.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py tests/test_runtime_recovery_store.py tests/test_grpc_runtime_stage_state.py`
+  - `pytest tests/test_runtime_recovery_store.py -q`（通过，5 passed）
+  - `pytest tests/test_grpc_runtime_stage_state.py -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -q -k llm_trace_jsonl --maxfail=1`（当前环境因系统临时目录 `C:\\Users\\HongXU\\AppData\\Local\\Temp\\pytest-of-HongXU` 权限拒绝在 fixture setup 阶段失败，非本次功能逻辑回归）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 24. 2026-03-15 阶段运行态横切层收敛（RuntimeStageSession + 人工重试语义补齐）
+- 背景
+  - 运行态恢复能力虽然已经落地，但阶段级状态写入仍然散落在 `grpc_service_impl.py` 业务代码里：
+    - 每个阶段都在重复维护 soft-state 字典、线程、watchdog emit、runtime checkpoint 三套样板；
+    - `AnalyzeWithVL` 只有 watchdog，没有统一的 `stage_state.json`；
+    - `markdown_enhancer`、`vl_material_generator` 等内层模块仍直接写 `phase2b/phase2a` 阶段状态，导致阶段 ownership 不清晰。
+  - 第一性原理上，这类能力属于横切关注点，不应继续夹在业务分支里；否则每新增一个阶段，都要复制一遍状态线程和失败分类逻辑。
+- 本次升级
+  - `services/python_grpc/src/server/runtime_stage_state.py`
+    - 新增 `RuntimeStageSession`，统一封装：
+      - snapshot 更新；
+      - hard/soft heartbeat 发射；
+      - runtime checkpoint 落盘；
+      - `mark/mark_from_event/mark_failed` 三类阶段事件入口；
+      - emitter 延迟绑定，避免 watchdog 初始化失败反向拖垮 runtime checkpoint。
+    - 为失败状态补充人工可执行语义：
+      - `retry_mode`
+      - `required_action`
+      - `retry_entry_point`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `DownloadVideo`、`TranscribeVideo`、`ProcessStage1`、`AnalyzeSemanticUnits`、`AssembleRichText` 改为通过 `RuntimeStageSession` 驱动阶段状态，不再在业务流程里手工维护“软状态 + watchdog + runtime checkpoint”三连写。
+    - `ProcessStage1` 的 `progress_callback` 直接桥接到 `RuntimeStageSession.mark_from_event(...)`，把 Stage1 step 事件映射为统一阶段事件，而不是在回调里再手写状态机落盘。
+    - `AnalyzeWithVL` 保留原有业务流和 watchdog 帮助函数，但其 `_update_vl_heartbeat_state / _emit_vl_heartbeat` 已接入统一会话，补齐 `analysis_extraction` 阶段的 runtime state。
+    - `DownloadVideo` 也不再从业务分支直接调用 `_record_runtime_stage_checkpoint(...)`，统一改为 `RuntimeStageSession.mark(...)` 驱动。
+  - 内层模块 ownership 收敛：
+    - `markdown_enhancer.py` 不再直接写 `phase2b` 阶段状态；
+    - `vl_material_generator.py` 不再直接写 `phase2a` 阶段状态；
+    - 阶段级状态只允许 gRPC 入口持有，内层模块只保留 chunk / LLM call 级恢复写入。
+- 设计取舍
+  - 没有引入 Python 真正的 AOP/织入框架。
+    - 原因：阶段处理中间 checkpoint 不是纯函数边界，而是业务流程中的命名事件，仍然需要显式声明。
+    - 取舍：采用“`RuntimeStageSession` + 少量 `mark(...)` 调用”的 AOP-like 模式，把横切逻辑从业务细节里剥离，但不强行隐藏业务事件本身。
+  - 没有把 `fallback` 直接映射成失败。
+    - `AnalyzeWithVL` 的 `fallback` 语义是“VL 分支退出并交给下游回退链路继续”，不是“整个任务失败”；
+    - 因此 runtime state 记录会保留 `checkpoint=vl_failed*`，但用 `runtime_status=COMPLETED` 表达“该分支已完成并转入回退”。
+  - 没有删除 `_record_runtime_stage_checkpoint(...)` helper。
+    - 原因：保留 helper 作为兼容层，便于后续逐步迁移非主链阶段或测试代码；
+    - 但主干阶段已不再直接从业务代码调用它。
+- 复杂度对比
+  - 测试方式
+    - 统计 `grpc_service_impl.py` 中业务层显式调用 `_record_runtime_stage_checkpoint(...)` 的调用点数量；
+    - 统计主干阶段通过 `RuntimeStageSession.mark/mark_failed/mark_from_event` 统一接管的调用点数量；
+    - 统计内层模块对 `phase2a/phase2b` 的 `update_stage_state(...)` 直接写入数量。
+  - 测试数据
+    - 当前 `grpc_service_impl.py` 中 `_record_runtime_stage_checkpoint(...)` 已只剩 helper 定义自身 `1` 处，业务层直接调用为 `0`。
+    - 当前 `grpc_service_impl.py` 中 `RuntimeStageSession.mark/mark_failed/mark_from_event` 主干阶段调用点为 `28` 处。
+    - 当前 `markdown_enhancer.py + vl_material_generator.py` 中对 `phase2a/phase2b` 的 `update_stage_state(...)` 直接写入为 `0` 处。
+  - 收益
+    - 阶段状态 ownership 从“外层 gRPC + 内层 pipeline 双写”收敛为“gRPC 单写”；
+    - 新阶段要接入恢复协议时，只需声明阶段事件，不再复制线程/锁/三连写模板；
+    - 人工重试语义从“只有 `MANUAL_RETRY_REQUIRED` 标签”升级为“标签 + 操作建议 + 恢复入口”。
+- 验证
+  - `python -m py_compile services/python_grpc/src/server/runtime_stage_state.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py tests/test_grpc_runtime_stage_state.py`
+  - `pytest tests/test_grpc_runtime_stage_state.py -q`
+  - `pytest tests/test_runtime_recovery_store.py tests/test_grpc_runtime_stage_state.py -q`（通过，10 passed）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+## 2026-03-15: Java phase2b structured markdown adds provider retry budget and Qwen fallback
+- Background:
+  - `POST /api/mobile/cards/phase2b/structured-markdown` uses the Java `DeepSeekAdvisorService` streamed path as its primary execution chain.
+  - Production logs showed `DeepSeek phase2b stream call failed: closed`, which previously failed the whole request immediately because the streamed provider path had no retry or provider degradation policy.
+- Reusable leverage:
+  - Reuse the existing provider boundary already centralized in `DeepSeekAdvisorService` instead of pushing retry/fallback policy into `MobileCardController`.
+  - Reuse the Python-side fallback naming and credential path: `MODULE2_DEEPSEEK_QWEN_FALLBACK_*` and `DASHSCOPE_API_KEY`.
+  - Reuse the existing phase2b websocket side channel; only the provider strategy changes.
+- Changes:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - Add phase2b provider retries with `3` retries, exponential backoff, and jitter.
+    - Add Qwen fallback on the same OpenAI-compatible `chat/completions` boundary.
+    - Return the actual provider/source used by phase2b instead of hardcoding `deepseek.phase2b`.
+    - When a streamed attempt has already emitted deltas and then fails, switch subsequent retries into buffered mode to avoid replaying duplicate chunks.
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - Consume the richer phase2b provider result and expose `source/provider/degraded` in the HTTP response payload.
+- Call-chain change:
+  - Old: `MobileCardController -> DeepSeek streamed call -> success or immediate 500`
+  - New: `MobileCardController -> DeepSeek streamed call -> up to 3 retries with exponential backoff + jitter -> optional buffered recovery after partial stream -> Qwen fallback -> final HTTP/WebSocket completion`
+- Decisions:
+  - Decision 1: keep retry and provider degradation inside `DeepSeekAdvisorService`.
+    - Reason: the controller owns request orchestration and websocket notifications, not provider selection policy.
+  - Decision 2: preserve stream continuity by disabling further chunk replay once a failed attempt has already emitted deltas.
+    - Reason: this avoids duplicate websocket chunk semantics while still allowing final markdown recovery.
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests test-compile -q`
+- Performance notes:
+  - No throughput benchmark was run in this turn.
+  - The retry budget increases worst-case latency for a single provider outage, but it removes immediate hard-fail behavior and shifts recovery to the provider boundary.
+
+## 2026-03-15: Java LLM client and retry/fallback strategy extracted into reusable gateway
+- Background:
+  - `DeepSeekAdvisorService` had started to mix five responsibilities in one class: prompt assembly, provider HTTP calls, retry timing, fallback routing, and business result mapping.
+  - The immediate pressure came from `phase2b`, but the same pattern would be repeated for later LLM use cases if no reusable boundary was introduced.
+- Reusable leverage:
+  - Reuse the already unified OpenAI-compatible `chat/completions` transport shape used by DeepSeek and Qwen fallback.
+  - Reuse the Python-side environment naming for fallback config so Java and Python stay aligned on provider wiring.
+  - Reuse the existing business services as prompt assemblers instead of rewriting them.
+- Changes:
+  - Added reusable LLM infrastructure under `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/llm/`:
+    - `LlmClient`
+    - `OpenAiCompatibleLlmClient`
+    - `LlmPromptRequest`
+    - `LlmResponse`
+    - `LlmProviderConfig`
+    - `LlmRetryPolicy`
+    - `LlmFallbackStrategy`
+    - `LlmGateway`
+    - `LlmGatewayResult`
+  - `DeepSeekAdvisorService`
+    - Keep prompt building and business-specific parsing inside the service.
+    - Move provider transport to `OpenAiCompatibleLlmClient`.
+    - Move phase2b retry/fallback orchestration to `LlmGateway`.
+    - Continue exposing existing business-facing methods so current callers do not need to change shape.
+  - Added `LlmGatewayTest` to lock the extracted strategy on two critical behaviors:
+    - primary retries exhausted -> fallback provider
+    - partial streamed delta emitted -> switch fallback to buffered recovery instead of replaying chunks
+- Call-chain change:
+  - Old: `Business service -> provider HTTP + retry + fallback + parse`
+  - New: `Business service -> prompt/result mapping -> LlmGateway -> RetryPolicy/FallbackStrategy -> OpenAiCompatibleLlmClient -> provider`
+- Decisions:
+  - Decision 1: extract transport and strategy now, but keep prompt templates and business parsing in the existing services.
+    - Reason: this gives reuse without forcing a risky all-at-once rewrite.
+  - Decision 2: use `LlmGateway` as the strategy boundary instead of embedding retry logic in each service.
+    - Reason: later LLM scenes can share the same retry/fallback semantics with different prompts.
+  - Decision 3: keep `DeepSeekAdvisorService` backward-compatible at the public method level for now.
+    - Reason: existing controller and service callers stay stable while the underlying infrastructure becomes replaceable.
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests test-compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=LlmGatewayTest test -q`
+- Performance notes:
+  - No dedicated latency benchmark was run for the extraction itself.
+  - The structural gain is reduced duplication and lower future change cost, not immediate throughput improvement.

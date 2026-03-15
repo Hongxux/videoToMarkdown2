@@ -13,6 +13,7 @@ import com.mvp.module2.fusion.service.CategoryClassificationResultsRepository;
 import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
+import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import com.mvp.module2.fusion.service.TaskManualCollectionRepository;
 import com.mvp.module2.fusion.service.TaskBundleExportService;
 import com.mvp.module2.fusion.service.VideoMetaService;
@@ -138,6 +139,9 @@ public class MobileMarkdownController {
 
     @Autowired(required = false)
     private FileReuseService fileReuseService;
+
+    @Autowired(required = false)
+    private TaskStatusPresentationService taskStatusPresentationService = new TaskStatusPresentationService();
 
     @Autowired
     private FileTransferService fileTransferService;
@@ -1192,6 +1196,7 @@ public class MobileMarkdownController {
         response.put("createdAt", instantToText(task.createdAt));
         response.put("completedAt", instantToText(task.completedAt));
         response.put("markdownAvailable", task.markdownAvailable);
+        taskStatusPresentationService.appendRecoveryFields(response, task.status, task.recoveryPayload);
         return ResponseEntity.ok(response);
     }
 
@@ -1261,6 +1266,43 @@ public class MobileMarkdownController {
         payload.put("deletedEntries", storageDelete.deletedEntries);
         payload.put("message", (runtimeRemoved || storageDelete.deleted) ? "task deleted" : "task removed");
         return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping("/tasks/{taskId}/retry")
+    public ResponseEntity<Map<String, Object>> retryRuntimeTask(@PathVariable String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "status", "INVALID_ARGUMENT",
+                    "message", "taskId cannot be empty"
+            ));
+        }
+        TaskQueueManager.TaskTransitionResult transition = taskQueueManager.retryTaskTransition(normalizedTaskId);
+        if (transition.isRejected()) {
+            int statusCode = transition.reason != null && transition.reason.contains("not found") ? 404 : 409;
+            return ResponseEntity.status(statusCode).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "status", transition.currentStatus != null ? transition.currentStatus.name() : "",
+                    "message", transition.reason != null ? transition.reason : "task cannot retry in current state"
+            ));
+        }
+        TaskEntry refreshedTask = taskQueueManager.getTask(normalizedTaskId);
+        if (refreshedTask != null && taskWebSocketHandler != null) {
+            taskWebSocketHandler.broadcastTaskUpdate(refreshedTask);
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("taskId", normalizedTaskId);
+        response.put("status", transition.currentStatus != null ? transition.currentStatus.name() : "");
+        response.put("previousStatus", transition.previousStatus != null ? transition.previousStatus.name() : "");
+        response.put("message", transition.reason != null ? transition.reason : "task requeued for retry");
+        if (refreshedTask != null) {
+            TaskView taskView = fromRuntimeTask(refreshedTask);
+            taskStatusPresentationService.appendRecoveryFields(response, taskView.status, taskView.recoveryPayload);
+        }
+        return ResponseEntity.ok(response);
     }
 
     @GetMapping("/tasks/{taskId}/personalization/cache")
@@ -2542,6 +2584,7 @@ public class MobileMarkdownController {
         item.put("archived", task.archived);
         item.put("archivedAt", task.archivedAt != null ? instantToText(task.archivedAt) : "");
         item.put("manualCollection", task.manualCollection);
+        taskStatusPresentationService.appendRecoveryFields(item, task.status, task.recoveryPayload);
         if (!compactView) {
             item.put("completedAt", instantToText(task.completedAt));
             item.put("resultPath", task.resultPath != null ? task.resultPath : "");
@@ -2898,6 +2941,7 @@ public class MobileMarkdownController {
         view.resultPath = task.resultPath;
         view.progress = task.progress;
         view.statusMessage = task.statusMessage;
+        view.recoveryPayload = taskStatusPresentationService.sanitizeRecoveryPayload(task.recoveryPayload);
         view.runtimeTask = task;
         applyRuntimeBookLeafIdentity(view, task);
 
@@ -4496,68 +4540,25 @@ public class MobileMarkdownController {
             return 0;
         }
         boolean runtimeTask = task.runtimeTask != null;
-        if (runtimeTask && isProcessingStatus(task.status)) {
+        if (runtimeTask && taskStatusPresentationService.isProcessingStatus(task.status)) {
+            return 6;
+        }
+        if (runtimeTask && taskStatusPresentationService.isBlockedStatus(task.status)) {
             return 5;
         }
-        if (runtimeTask && isQueuedStatus(task.status)) {
+        if (runtimeTask && taskStatusPresentationService.isQueuedStatus(task.status)) {
             return 4;
         }
-        if (task.markdownAvailable || isCompletedStatus(task.status)) {
+        if (task.markdownAvailable || taskStatusPresentationService.isCompletedStatus(task.status)) {
             return 3;
         }
-        if (isFailedStatus(task.status)) {
+        if (taskStatusPresentationService.isFailedStatus(task.status)) {
             return 2;
         }
-        if (isCancelledStatus(task.status)) {
+        if (taskStatusPresentationService.isCancelledStatus(task.status)) {
             return 1;
         }
         return runtimeTask ? 1 : 0;
-    }
-
-    private boolean isProcessingStatus(String rawStatus) {
-        String status = normalizeStatusUpper(rawStatus);
-        return "PROBING".equals(status)
-                || "PROCESSING".equals(status)
-                || "RUNNING".equals(status)
-                || "IN_PROGRESS".equals(status);
-    }
-
-    private boolean isQueuedStatus(String rawStatus) {
-        String status = normalizeStatusUpper(rawStatus);
-        return "QUEUED".equals(status)
-                || "PENDING".equals(status)
-                || "SUBMITTED".equals(status);
-    }
-
-    private boolean isCompletedStatus(String rawStatus) {
-        return "COMPLETED".equals(normalizeStatusUpper(rawStatus));
-    }
-
-    private boolean isFailedStatus(String rawStatus) {
-        return "FAILED".equals(normalizeStatusUpper(rawStatus));
-    }
-
-    private boolean isCancelledStatus(String rawStatus) {
-        return "CANCELLED".equals(normalizeStatusUpper(rawStatus));
-    }
-
-    private String normalizeStatusUpper(String rawStatus) {
-        if (rawStatus == null || rawStatus.isBlank()) {
-            return "";
-        }
-        return rawStatus.trim().toUpperCase(Locale.ROOT);
-    }
-
-    private boolean isRunningStatus(String rawStatus) {
-        if (rawStatus == null || rawStatus.isBlank()) {
-            return false;
-        }
-        String status = rawStatus.trim().toUpperCase(Locale.ROOT);
-        return "QUEUED".equals(status)
-                || "PENDING".equals(status)
-                || "PROBING".equals(status)
-                || "PROCESSING".equals(status)
-                || "RUNNING".equals(status);
     }
 
     private long safeLastModifiedMillis(Path path) {
@@ -5584,6 +5585,7 @@ public class MobileMarkdownController {
         private String domain;
         private String mainTopic;
         private double progress;
+        private Map<String, Object> recoveryPayload;
         private TaskEntry runtimeTask;
         private String collectionId;
         private Integer episodeNo;

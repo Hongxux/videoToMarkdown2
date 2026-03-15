@@ -8463,7 +8463,6 @@
             ws.send(JSON.stringify({
                 action: 'ping',
                 clientTime: state.taskUpdatesLastPingAt,
-                lastReceivedMessageId: Math.max(0, Number(state.taskUpdatesLastProcessedMessageId) || 0),
             }));
             armTaskUpdatesSocketPongTimeout();
         } catch (error) {
@@ -8487,28 +8486,23 @@
             clearTimeout(state.taskUpdatesHeartbeatTimeoutTimerId);
             state.taskUpdatesHeartbeatTimeoutTimerId = 0;
         }
-        const ackedMessageId = Math.max(0, Math.floor(Number(payload && payload.lastAckedMessageId) || 0));
-        if (ackedMessageId) {
-            syncTaskUpdatesSocketOffset(ackedMessageId);
-        }
+        void payload;
     }
 
     function resolveTaskUpdatesWebSocketUrl() {
         const injected = String(window.__mobileTaskWebSocketUrl || '').trim();
         const fallback = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/tasks`;
         const raw = injected || fallback;
-        const lastReceivedMessageId = Math.max(0, Number(state.taskUpdatesLastProcessedMessageId) || 0);
         try {
             const resolved = new URL(raw, window.location.href);
             if (!resolved.searchParams.get('userId')) {
                 resolved.searchParams.set('userId', MOBILE_USER_ID);
             }
             resolved.searchParams.set('streamKey', 'web-task-updates');
-            resolved.searchParams.set('lastReceivedMessageId', String(lastReceivedMessageId));
             return resolved.toString();
         } catch (_error) {
             const joiner = raw.includes('?') ? '&' : '?';
-            return `${raw}${joiner}userId=${encodeURIComponent(MOBILE_USER_ID)}&streamKey=web-task-updates&lastReceivedMessageId=${encodeURIComponent(String(lastReceivedMessageId))}`;
+            return `${raw}${joiner}userId=${encodeURIComponent(MOBILE_USER_ID)}&streamKey=web-task-updates`;
         }
     }
 
@@ -8951,11 +8945,6 @@
             handleTaskUpdatesSocketPong(payload);
             return;
         }
-        const messageId = Math.max(0, Math.floor(Number(payload && payload.messageId) || 0));
-        if (messageId && messageId <= (Number(state.taskUpdatesLastProcessedMessageId) || 0)) {
-            acknowledgeTaskUpdatesSocketMessage(messageId);
-            return;
-        }
         if (type === 'taskUpdate') {
             const merged = mergeLiveTaskUpdateIntoState(payload);
             if (!merged || !merged.nextTask) {
@@ -8987,9 +8976,6 @@
             });
         } else if (type) {
             console.warn('task status websocket ignored message', type, payload);
-        }
-        if (messageId) {
-            acknowledgeTaskUpdatesSocketMessage(messageId);
         }
     }
 
@@ -9081,6 +9067,12 @@
                 state.taskUpdatesSocketReconnectAttempt = 0;
                 startTaskUpdatesSocketHeartbeat();
                 syncTaskUpdatesSocketTaskSubscription(state.currentTaskId, '');
+                refreshTaskListIncrementally({
+                    showLoading: false,
+                    render: true,
+                }).catch((error) => {
+                    console.warn('refresh task snapshot after websocket reconnect failed', error);
+                });
                 finish(true);
             }, { once: true });
             ws.addEventListener('message', (event) => {

@@ -1,6 +1,7 @@
 package com.mvp.module2.fusion.queue;
 
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
+import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
 import com.mvp.module2.fusion.service.TaskStateRepository;
 import com.mvp.module2.fusion.service.TaskStateRepository.PersistedTaskRecord;
 import org.slf4j.Logger;
@@ -49,6 +50,9 @@ public class TaskQueueManager {
     @Autowired(required = false)
     private TaskStateRepository taskStateRepository;
 
+    @Autowired(required = false)
+    private TaskRuntimeRecoveryService taskRuntimeRecoveryService;
+
     public enum Priority {
         LOW(0),
         NORMAL(1),
@@ -70,6 +74,8 @@ public class TaskQueueManager {
         QUEUED,
         PROBING,
         PROCESSING,
+        MANUAL_RETRY_REQUIRED,
+        FATAL,
         COMPLETED,
         FAILED,
         DEDUPED,
@@ -79,6 +85,7 @@ public class TaskQueueManager {
     public enum TaskEvent {
         START_PROBING,
         FINISH_PROBING,
+        RETRY,
         COMPLETE,
         FAIL,
         CANCEL,
@@ -176,6 +183,7 @@ public class TaskQueueManager {
         public String errorMessage;
         public String duplicateOfTaskId;
         public Map<String, Object> probePayload;
+        public Map<String, Object> recoveryPayload;
         public boolean resourcesReleased;
         public boolean processingSlotAcquired;
 
@@ -224,16 +232,29 @@ public class TaskQueueManager {
             return;
         }
         int restoredActiveCount = 0;
+        int restoredBlockedCount = 0;
         int restoredTerminalCount = 0;
         for (PersistedTaskRecord record : records) {
             TaskEntry restored = toTaskEntry(record);
             if (restored == null || restored.taskId == null || restored.taskId.isBlank()) {
                 continue;
             }
+            if (allTasks.containsKey(restored.taskId)) {
+                continue;
+            }
+            TaskRuntimeRecoveryService.RecoveryDirective recoveryDirective = resolveBlockingRecoveryDirective(restored);
+            if (recoveryDirective != null && isActiveStatus(restored.status)) {
+                applyRecoveryDirective(restored, recoveryDirective);
+                persistTaskState(restored);
+            }
+            if (isBlockingStatus(restored.status)) {
+                restored.resourcesReleased = true;
+                restored.processingSlotAcquired = false;
+                allTasks.put(restored.taskId, restored);
+                restoredBlockedCount += 1;
+                continue;
+            }
             if (isActiveStatus(restored.status)) {
-                if (allTasks.containsKey(restored.taskId)) {
-                    continue;
-                }
                 if (restored.status == TaskStatus.PROBING || restored.status == TaskStatus.PROCESSING) {
                     restored.status = TaskStatus.QUEUED;
                     restored.startedAt = null;
@@ -249,8 +270,13 @@ public class TaskQueueManager {
                 restoredTerminalCount += 1;
             }
         }
-        if (restoredActiveCount > 0 || restoredTerminalCount > 0) {
-            logger.info("Restored persisted tasks: active={} terminal={}", restoredActiveCount, restoredTerminalCount);
+        if (restoredActiveCount > 0 || restoredBlockedCount > 0 || restoredTerminalCount > 0) {
+            logger.info(
+                    "Restored persisted tasks: active={} blocked={} terminal={}",
+                    restoredActiveCount,
+                    restoredBlockedCount,
+                    restoredTerminalCount
+            );
         }
         persistedTasksRestored = true;
     }
@@ -388,6 +414,21 @@ public class TaskQueueManager {
             return rejectedTransition(taskId, TaskEvent.FAIL, null, null, "task not found");
         }
         String userMessage = UserFacingErrorMapper.toUserMessage(errorMessage);
+        TaskRuntimeRecoveryService.RecoveryDirective recoveryDirective = resolveBlockingRecoveryDirective(task);
+        if (recoveryDirective != null && (task.status == TaskStatus.PROBING || task.status == TaskStatus.PROCESSING)) {
+            TaskStatus previousStatus = task.status;
+            applyRecoveryDirective(task, recoveryDirective);
+            releaseTaskResources(task);
+            persistTaskState(task);
+            logger.warn(
+                    "Task blocked by runtime recovery directive: taskId={} stage={} checkpoint={} status={}",
+                    taskId,
+                    recoveryDirective.stage(),
+                    recoveryDirective.checkpoint(),
+                    task.status
+            );
+            return appliedTransition(task.taskId, TaskEvent.FAIL, previousStatus, task.status, "task blocked by runtime recovery");
+        }
         TransitionDecision decision = decideTransition(task.status, TaskEvent.FAIL);
         if (decision.outcome == TaskTransitionOutcome.REJECTED) {
             if (task.status == TaskStatus.CANCELLED) {
@@ -410,6 +451,38 @@ public class TaskQueueManager {
 
         logger.error("Task failed: {} - rawError={}, userMessage={}", taskId, errorMessage, userMessage);
         return appliedTransition(task.taskId, TaskEvent.FAIL, previousStatus, task.status, "task failed");
+    }
+
+    public synchronized TaskTransitionResult retryTaskTransition(String taskId) {
+        TaskEntry task = getTask(taskId);
+        if (task == null) {
+            return rejectedTransition(taskId, TaskEvent.RETRY, null, null, "task not found");
+        }
+        TransitionDecision decision = decideTransition(task.status, TaskEvent.RETRY);
+        if (decision.outcome == TaskTransitionOutcome.REJECTED) {
+            return rejectedTransition(task.taskId, TaskEvent.RETRY, task.status, task.status, decision.reason);
+        }
+        if (decision.outcome == TaskTransitionOutcome.NO_OP) {
+            return noOpTransition(task.taskId, TaskEvent.RETRY, task.status, decision.reason);
+        }
+        TaskStatus previousStatus = task.status;
+        task.status = decision.nextStatus;
+        task.startedAt = null;
+        task.completedAt = null;
+        task.statusMessage = previousStatus == TaskStatus.MANUAL_RETRY_REQUIRED || previousStatus == TaskStatus.FATAL
+                ? "人工修复后已重新入队，将从上次 checkpoint 继续"
+                : "任务已重新入队，等待重试";
+        task.errorMessage = null;
+        task.recoveryPayload = null;
+        task.resourcesReleased = false;
+        task.processingSlotAcquired = false;
+        allTasks.put(task.taskId, task);
+        taskQueue.remove(task);
+        taskQueue.offer(task);
+        userTaskCounts.computeIfAbsent(task.userId, key -> new AtomicInteger(0)).incrementAndGet();
+        persistTaskState(task);
+        logger.info("Task retried: taskId={} previousStatus={}", task.taskId, previousStatus);
+        return appliedTransition(task.taskId, TaskEvent.RETRY, previousStatus, task.status, "task requeued for retry");
     }
 
     /**
@@ -536,6 +609,20 @@ public class TaskQueueManager {
             return true;
         }
         task.title = normalizedTitle;
+        persistTaskState(task);
+        return true;
+    }
+
+    public synchronized boolean updateTaskOutputDir(String taskId, String outputDir) {
+        TaskEntry task = allTasks.get(taskId);
+        String normalizedOutputDir = normalizeOptionalText(outputDir);
+        if (task == null || normalizedOutputDir == null) {
+            return false;
+        }
+        if (Objects.equals(task.outputDir, normalizedOutputDir)) {
+            return true;
+        }
+        task.outputDir = normalizedOutputDir;
         persistTaskState(task);
         return true;
     }
@@ -702,6 +789,17 @@ public class TaskQueueManager {
             }
             return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only probing task can finish probing");
         }
+        if (event == TaskEvent.RETRY) {
+            if (currentStatus == TaskStatus.FAILED
+                    || currentStatus == TaskStatus.MANUAL_RETRY_REQUIRED
+                    || currentStatus == TaskStatus.FATAL) {
+                return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.QUEUED, "terminal -> queued retry");
+            }
+            if (currentStatus == TaskStatus.QUEUED) {
+                return new TransitionDecision(TaskTransitionOutcome.NO_OP, TaskStatus.QUEUED, "task already queued");
+            }
+            return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only failed or blocked task can retry");
+        }
         if (event == TaskEvent.COMPLETE) {
             if (currentStatus == TaskStatus.PROCESSING) {
                 return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.COMPLETED, "processing -> completed");
@@ -836,6 +934,7 @@ public class TaskQueueManager {
         entry.bookOptions = normalizeBookOptions(bookOptions);
         entry.duplicateOfTaskId = null;
         entry.probePayload = null;
+        entry.recoveryPayload = null;
 
         persistAcceptedTaskState(entry);
         allTasks.put(taskId, entry);
@@ -892,6 +991,10 @@ public class TaskQueueManager {
                 || status == TaskStatus.PROCESSING;
     }
 
+    private boolean isBlockingStatus(TaskStatus status) {
+        return status == TaskStatus.MANUAL_RETRY_REQUIRED || status == TaskStatus.FATAL;
+    }
+
     private Priority parsePriority(String rawPriority) {
         String normalized = rawPriority != null ? rawPriority.trim().toUpperCase(Locale.ROOT) : "";
         if (normalized.isEmpty()) {
@@ -942,9 +1045,53 @@ public class TaskQueueManager {
         task.probePayload = record.probePayload != null && !record.probePayload.isEmpty()
                 ? new LinkedHashMap<>(record.probePayload)
                 : null;
+        task.recoveryPayload = record.recoveryPayload != null && !record.recoveryPayload.isEmpty()
+                ? new LinkedHashMap<>(record.recoveryPayload)
+                : null;
         task.resourcesReleased = !isActiveStatus(task.status);
         task.processingSlotAcquired = false;
         return task;
+    }
+
+    private TaskRuntimeRecoveryService.RecoveryDirective resolveBlockingRecoveryDirective(TaskEntry task) {
+        if (task == null || taskRuntimeRecoveryService == null) {
+            return null;
+        }
+        try {
+            return taskRuntimeRecoveryService.resolveBlockingDirective(task).orElse(null);
+        } catch (Exception error) {
+            logger.warn(
+                    "Resolve runtime recovery directive failed: taskId={} outputDir={} err={}",
+                    task.taskId,
+                    task.outputDir,
+                    error.getMessage()
+            );
+            return null;
+        }
+    }
+
+    private void applyRecoveryDirective(TaskEntry task, TaskRuntimeRecoveryService.RecoveryDirective directive) {
+        if (task == null || directive == null) {
+            return;
+        }
+        String stageStatus = normalizeOptionalText(directive.stageStatus());
+        task.status = "FATAL".equalsIgnoreCase(stageStatus)
+                ? TaskStatus.FATAL
+                : TaskStatus.MANUAL_RETRY_REQUIRED;
+        task.completedAt = Instant.now();
+        task.statusMessage = normalizeOptionalText(directive.buildStatusMessage());
+        task.errorMessage = normalizeOptionalText(
+                TaskRuntimeRecoveryService.RecoveryDirective.firstNonBlank(
+                        directive.actionHint(),
+                        directive.requiredAction(),
+                        directive.errorMessage()
+                )
+        );
+        task.outputDir = normalizeOptionalText(TaskRuntimeRecoveryService.RecoveryDirective.firstNonBlank(
+                directive.outputDir(),
+                task.outputDir
+        ));
+        task.recoveryPayload = new LinkedHashMap<>(directive.toPayload());
     }
 
     private void persistTaskState(TaskEntry task) {

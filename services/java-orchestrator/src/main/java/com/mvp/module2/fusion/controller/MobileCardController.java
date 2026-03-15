@@ -507,7 +507,8 @@ public class MobileCardController {
 
             AtomicInteger chunkIndex = new AtomicInteger(0);
             emitPhase2bProgress(progressChannel, progressRequestId, "phase2b_deep", "Phase2B 深度重构中...", false, false);
-            String rawMarkdown = deepSeekAdvisorService.requestPhase2bStructuredMarkdownStreamed(
+            DeepSeekAdvisorService.Phase2bMarkdownResult phase2bResult =
+                    deepSeekAdvisorService.requestPhase2bStructuredMarkdownStreamedResult(
                     llmSourceText,
                     "",
                     blendMode,
@@ -519,13 +520,15 @@ public class MobileCardController {
                     )
             );
             emitPhase2bProgress(progressChannel, progressRequestId, "post_processing", "正在整理最终 Markdown...", false, false);
-            String finalMarkdown = rawMarkdown.trim();
+            String finalMarkdown = String.valueOf(phase2bResult == null ? "" : phase2bResult.markdown).trim();
             emitPhase2bMarkdownFinal(progressChannel, progressRequestId, finalMarkdown, chunkIndex.get());
 
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("success", true);
             payload.put("markdown", finalMarkdown);
-            payload.put("source", blendMode ? "deepseek.phase2b.blend" : "deepseek.phase2b");
+            payload.put("source", phase2bResult == null ? "" : phase2bResult.source);
+            payload.put("provider", phase2bResult == null ? "" : phase2bResult.provider);
+            payload.put("degraded", phase2bResult != null && phase2bResult.degraded);
             payload.put("links", buildPhase2bLinkPayload(extractedArticles));
             if (!linkWarnings.isEmpty()) {
                 payload.put("linkWarnings", linkWarnings);

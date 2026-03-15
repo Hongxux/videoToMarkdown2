@@ -82,6 +82,16 @@ public class DatabaseInitializer {
                             updated_at TEXT NOT NULL
                         )
                         """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS task_terminal_events (
+                            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id TEXT NOT NULL,
+                            task_id TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            payload_json TEXT NOT NULL,
+                            created_at TEXT NOT NULL
+                        )
+                        """);
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_manual_collection_path ON task_manual_collection_bindings(collection_path)");
                 statement.execute("""
                         CREATE TABLE IF NOT EXISTS file_metadata (
@@ -126,6 +136,7 @@ public class DatabaseInitializer {
                             duplicate_of_task_id TEXT,
                             book_options_json TEXT,
                             probe_payload_json TEXT,
+                            recovery_payload_json TEXT,
                             created_at TEXT NOT NULL,
                             started_at TEXT,
                             completed_at TEXT,
@@ -142,9 +153,15 @@ public class DatabaseInitializer {
                 } catch (Exception ignored) {
                     // 幂等迁移：旧库已存在该列时直接跳过。
                 }
+                try {
+                    statement.execute("ALTER TABLE task_runtime_state ADD COLUMN recovery_payload_json TEXT");
+                } catch (Exception ignored) {
+                    // 幂等迁移：旧库已有 recovery_payload_json 时直接跳过。
+                }
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_status ON task_runtime_state(status)");
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_user_id ON task_runtime_state(user_id)");
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_video_key ON task_runtime_state(normalized_video_key)");
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_task_terminal_events_user_event ON task_terminal_events(user_id, event_id)");
                 logger.info("collection schema initialized");
             }
         };

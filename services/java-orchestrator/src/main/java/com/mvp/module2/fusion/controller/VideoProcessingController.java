@@ -10,6 +10,7 @@ import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
 import com.mvp.module2.fusion.service.Phase2bArticleLinkService;
+import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -92,6 +93,9 @@ public class VideoProcessingController {
 
     @Autowired
     private FileTransferService fileTransferService;
+
+    @Autowired(required = false)
+    private TaskStatusPresentationService taskStatusPresentationService = new TaskStatusPresentationService();
     
     /**
      * 提交新任务
@@ -315,19 +319,24 @@ public class VideoProcessingController {
         if (task == null) {
             return ResponseEntity.notFound().build();
         }
-        
-        return ResponseEntity.ok(Map.of(
-            "taskId", task.taskId,
-            "userId", task.userId,
-            "status", task.status.name(),
-            "progress", task.progress,
-            "statusMessage", task.statusMessage != null ? task.statusMessage : "",
-            "resultPath", task.resultPath != null ? task.resultPath : "",
-            "errorMessage", task.errorMessage != null ? task.errorMessage : "",
-            "createdAt", task.createdAt.toString(),
-            "startedAt", task.startedAt != null ? task.startedAt.toString() : "",
-            "completedAt", task.completedAt != null ? task.completedAt.toString() : ""
-        ));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("taskId", task.taskId);
+        response.put("userId", task.userId);
+        response.put("status", task.status.name());
+        response.put("progress", task.progress);
+        response.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        response.put("resultPath", task.resultPath != null ? task.resultPath : "");
+        response.put("errorMessage", task.errorMessage != null ? task.errorMessage : "");
+        response.put("createdAt", task.createdAt.toString());
+        response.put("startedAt", task.startedAt != null ? task.startedAt.toString() : "");
+        response.put("completedAt", task.completedAt != null ? task.completedAt.toString() : "");
+        taskStatusPresentationService.appendRecoveryFields(
+                response,
+                task.status != null ? task.status.name() : "",
+                task.recoveryPayload
+        );
+        return ResponseEntity.ok(response);
     }
     
     /**
@@ -358,6 +367,35 @@ public class VideoProcessingController {
             ));
         }
     }
+
+    @PostMapping("/tasks/{taskId}/retry")
+    public ResponseEntity<Map<String, Object>> retryTask(@PathVariable String taskId) {
+        TaskQueueManager.TaskTransitionResult transition = taskQueueManager.retryTaskTransition(taskId);
+        if (transition.isRejected()) {
+            int statusCode = transition.reason != null && transition.reason.contains("not found") ? 404 : 409;
+            return ResponseEntity.status(statusCode).body(Map.of(
+                    "success", false,
+                    "taskId", taskId,
+                    "status", transition.currentStatus != null ? transition.currentStatus.name() : "",
+                    "message", transition.reason != null ? transition.reason : "task cannot retry in current state"
+            ));
+        }
+        TaskQueueManager.TaskEntry refreshedTask = taskQueueManager.getTask(taskId);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("taskId", taskId);
+        response.put("status", transition.currentStatus != null ? transition.currentStatus.name() : "");
+        response.put("previousStatus", transition.previousStatus != null ? transition.previousStatus.name() : "");
+        response.put("message", transition.reason != null ? transition.reason : "task requeued for retry");
+        if (refreshedTask != null) {
+            taskStatusPresentationService.appendRecoveryFields(
+                    response,
+                    refreshedTask.status != null ? refreshedTask.status.name() : "",
+                    refreshedTask.recoveryPayload
+            );
+        }
+        return ResponseEntity.ok(response);
+    }
     
     /**
      * 获取队列统计
@@ -378,7 +416,7 @@ public class VideoProcessingController {
         }
         return "BUSY";
     }
-    
+
     /**
      * 健康检查
      */

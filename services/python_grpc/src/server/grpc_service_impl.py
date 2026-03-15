@@ -269,6 +269,11 @@ from services.python_grpc.src.common.utils.async_disk_writer import (
     enqueue_text_write,
     flush_async_json_writes,
 )
+from services.python_grpc.src.common.utils.runtime_recovery_store import RuntimeRecoveryStore
+from services.python_grpc.src.server.runtime_stage_state import (
+    RuntimeStageSession,
+    record_runtime_stage_checkpoint as persist_runtime_stage_checkpoint,
+)
 _boot("[BOOT] import services.python_grpc.src.media_engine.knowledge_engine.core.video")
 from services.python_grpc.src.media_engine.knowledge_engine.core.video import VideoProcessor
 _boot("[BOOT] import services.python_grpc.src.media_engine.knowledge_engine.core.transcription")
@@ -2195,6 +2200,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         self._phase2a_runtime_cache: Dict[str, Dict[str, Any]] = {}
         # Phase2A 引用缓存：ref_id -> cache_entry，用于 Java/Python 跨 RPC 无路径传递。
         self._phase2a_ref_cache: Dict[str, Dict[str, Any]] = {}
+        self._runtime_recovery_store_lock = threading.Lock()
+        self._runtime_recovery_stores: Dict[str, RuntimeRecoveryStore] = {}
 
         # LLM 分类并发探测器：AIMD 逐步加压，遇到失败回退
         self._classify_concurrency_limiter = AdaptiveConcurrencyLimiter(
@@ -2760,13 +2767,28 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         self._cache_metrics_begin(task_id, "DownloadVideo")
         raw_video_input = str(request.video_url or "")
         predicted_output_dir = ""
+        download_runtime_base_payload: Dict[str, Any] = {
+            "raw_video_input": raw_video_input,
+        }
         try:
             task_source = _build_task_dir_encoding_source(raw_video_input)
             task_hash = hashlib.md5(task_source.encode("utf-8")).hexdigest()
             predicted_output_dir = os.path.join(_get_primary_storage_root(), task_hash)
         except Exception:
             predicted_output_dir = str(request.output_dir or "").strip()
+        if predicted_output_dir:
+            download_runtime_base_payload["output_dir"] = predicted_output_dir
         download_watchdog = None
+        download_runtime_session: Optional[RuntimeStageSession] = (
+            self._create_runtime_stage_session(
+                output_dir=predicted_output_dir,
+                task_id=task_id,
+                stage="download",
+                base_payload=download_runtime_base_payload,
+            )
+            if predicted_output_dir
+            else None
+        )
         soft_heartbeat_stop = threading.Event()
         soft_heartbeat_thread: Optional[threading.Thread] = None
         if predicted_output_dir:
@@ -2777,12 +2799,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     stage="download",
                     total_steps=3,
                 )
-                download_watchdog.emit(
+                download_runtime_session.bind_heartbeat_emitters(
+                    heartbeat_emitter=download_watchdog.emit,
+                )
+                download_runtime_session.mark(
                     status="running",
                     checkpoint="download_prepare",
                     completed=0,
                     pending=3,
-                    signal_type="hard",
+                    extra_payload=download_runtime_base_payload,
                 )
             except Exception as watchdog_error:
                 logger.warning(f"[{task_id}] Download watchdog init failed: {watchdog_error}")
@@ -2822,25 +2847,27 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         pass
                 checkpoint_label = f"download_in_progress|bytes={total_bytes}"
                 try:
-                    download_watchdog.emit(
+                    if download_runtime_session is None:
+                        continue
+                    download_runtime_session.mark(
                         status="running",
                         checkpoint=checkpoint_label,
                         completed=1,
                         pending=2,
-                        signal_type="hard",
+                        extra_payload={"downloaded_bytes": int(total_bytes)},
                     )
                 except Exception as heartbeat_error:
                     logger.warning(f"[{task_id}] Download hard heartbeat emit failed: {heartbeat_error}")
 
         try:
             self._increment_tasks()
-            if download_watchdog is not None:
-                download_watchdog.emit(
+            if download_runtime_session is not None:
+                download_runtime_session.mark(
                     status="running",
                     checkpoint="download_flow_start",
                     completed=1,
                     pending=2,
-                    signal_type="hard",
+                    extra_payload=download_runtime_base_payload,
                 )
                 soft_heartbeat_thread = threading.Thread(
                     target=_emit_download_hard_heartbeat_loop,
@@ -2865,24 +2892,44 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             )
             soft_heartbeat_stop.set()
 
-            if download_watchdog is not None:
+            if download_runtime_session is not None:
                 if flow_result.success:
-                    download_watchdog.emit(
+                    download_runtime_session.mark(
                         status="completed",
                         checkpoint="download_response_ready",
                         completed=3,
                         pending=0,
-                        signal_type="hard",
-                        extra={"content_type": str(flow_result.content_type or "unknown")},
+                        extra_watchdog={"content_type": str(flow_result.content_type or "unknown")},
+                        extra_payload={
+                            **download_runtime_base_payload,
+                            "video_path": flow_result.video_path,
+                            "video_signature": _file_signature(flow_result.video_path) if flow_result.video_path else {},
+                            "file_size_bytes": int(flow_result.file_size_bytes or 0),
+                            "duration_sec": float(flow_result.duration_sec or 0.0),
+                            "resolved_url": str(flow_result.resolved_url or ""),
+                            "source_platform": str(flow_result.source_platform or ""),
+                            "canonical_id": str(flow_result.canonical_id or ""),
+                            "video_title": str(flow_result.video_title or ""),
+                            "content_type": str(flow_result.content_type or "unknown"),
+                        },
                     )
                 else:
-                    download_watchdog.emit(
+                    download_runtime_session.mark(
                         status="failed",
                         checkpoint="download_failed",
                         completed=1,
                         pending=2,
-                        signal_type="hard",
-                        extra={"error": str(flow_result.error_msg or "")[:200]},
+                        extra_watchdog={"error": str(flow_result.error_msg or "")[:200]},
+                        error_message=str(flow_result.error_msg or ""),
+                        extra_payload={
+                            **download_runtime_base_payload,
+                            "resolved_url": str(flow_result.resolved_url or ""),
+                            "source_platform": str(flow_result.source_platform or ""),
+                            "canonical_id": str(flow_result.canonical_id or ""),
+                            "video_title": str(flow_result.video_title or ""),
+                            "content_type": str(flow_result.content_type or "unknown"),
+                        },
+                        message=str(flow_result.error_msg or ""),
                     )
 
             return video_processing_pb2.DownloadResponse(
@@ -2901,15 +2948,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         except Exception as e:
             soft_heartbeat_stop.set()
             logger.error(f"[{task_id}] DownloadVideo failed: {e}")
-            if download_watchdog is not None:
+            if download_runtime_session is not None:
                 try:
-                    download_watchdog.emit(
-                        status="failed",
+                    download_runtime_session.mark_failed(
                         checkpoint="download_exception",
-                        completed=1,
-                        pending=2,
-                        signal_type="hard",
-                        extra={"error": str(e)[:200]},
+                        error=e,
+                        extra_payload=download_runtime_base_payload,
+                        extra_watchdog={"error": str(e)[:200]},
+                        message=str(e),
+                        default_pending=2,
                     )
                 except Exception as watchdog_error:
                     logger.warning(f"[{task_id}] Download watchdog emit failed: {watchdog_error}")
@@ -3210,60 +3257,25 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         
         logger.info(f"[{task_id}] TranscribeVideo: {video_path} (language={fingerprint_language})")
         transcribe_watchdog: Optional[TaskWatchdogSignalWriter] = None
-        soft_heartbeat_stop = threading.Event()
-        soft_heartbeat_thread: Optional[threading.Thread] = None
-        soft_heartbeat_lock = threading.Lock()
-        soft_heartbeat_state: Dict[str, Any] = {
-            "status": "running",
-            "checkpoint": "transcribe_prepare",
-            "completed": 0,
-            "pending": 1,
-        }
-
-        def _emit_transcribe_soft_heartbeat_loop() -> None:
-            interval_sec = max(
-                5.0,
-                float(_to_int(os.getenv("TRANSCRIBE_SOFT_HEARTBEAT_SEC", 20), 20)),
-            )
-            while not soft_heartbeat_stop.wait(interval_sec):
-                if transcribe_watchdog is None:
-                    continue
-                try:
-                    with soft_heartbeat_lock:
-                        snapshot = dict(soft_heartbeat_state)
-                    transcribe_watchdog.emit(
-                        status=str(snapshot.get("status") or "running"),
-                        checkpoint=str(snapshot.get("checkpoint") or "transcribe_pending"),
-                        completed=int(snapshot.get("completed", 0)),
-                        pending=int(snapshot.get("pending", 1)),
-                        signal_type="soft",
-                    )
-                except Exception as heartbeat_error:
-                    logger.warning(f"[{task_id}] Transcribe soft heartbeat emit failed: {heartbeat_error}")
-
-        def _update_transcribe_soft_state(
-            *,
-            status: Optional[str] = None,
-            checkpoint: Optional[str] = None,
-            completed: Optional[int] = None,
-            pending: Optional[int] = None,
-        ) -> None:
-            with soft_heartbeat_lock:
-                if status is not None:
-                    soft_heartbeat_state["status"] = str(status).strip().lower() or "running"
-                if checkpoint is not None:
-                    soft_heartbeat_state["checkpoint"] = str(checkpoint).strip() or "unknown"
-                if completed is not None:
-                    soft_heartbeat_state["completed"] = max(0, int(completed))
-                if pending is not None:
-                    soft_heartbeat_state["pending"] = max(0, int(pending))
+        transcribe_runtime_session: Optional[RuntimeStageSession] = None
         
         try:
             self._increment_tasks()
             
             # 统一输出目录到 storage/{hash}：做什么是集中字幕产物；为什么是避免源目录污染；权衡是多一次路径映射
             output_dir = _normalize_output_dir(video_path)
-            
+            transcribe_runtime_base_payload = {
+                "video_path": video_path,
+                "video_signature": _file_signature(video_path),
+                "language": str(fingerprint_language or ""),
+            }
+            transcribe_runtime_session = self._create_runtime_stage_session(
+                output_dir=output_dir,
+                task_id=task_id,
+                stage="transcribe",
+                base_payload=transcribe_runtime_base_payload,
+            )
+             
             # 确保目录存在
             os.makedirs(output_dir, exist_ok=True)
             transcribe_watchdog = TaskWatchdogSignalWriter(
@@ -3272,19 +3284,25 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 stage="transcribe",
                 total_steps=1,
             )
-            transcribe_watchdog.emit(
+            transcribe_runtime_session.bind_heartbeat_emitters(
+                heartbeat_emitter=transcribe_watchdog.emit,
+            )
+            transcribe_runtime_session.mark(
                 status="running",
                 checkpoint="transcribe_prepare",
                 completed=0,
                 pending=1,
-                signal_type="hard",
+                extra_payload=transcribe_runtime_base_payload,
             )
-            soft_heartbeat_thread = threading.Thread(
-                target=_emit_transcribe_soft_heartbeat_loop,
-                name=f"transcribe-soft-heartbeat-{task_id}",
-                daemon=True,
+            transcribe_runtime_session.start_soft_heartbeat_loop(
+                interval_sec=max(
+                    5.0,
+                    float(_to_int(os.getenv("TRANSCRIBE_SOFT_HEARTBEAT_SEC", 20), 20)),
+                ),
+                thread_name=f"transcribe-soft-heartbeat-{task_id}",
+                default_checkpoint="transcribe_pending",
+                default_pending=1,
             )
-            soft_heartbeat_thread.start()
             
             # 🔑 检查是否已存在字幕文件（缓存复用）
             subtitle_path = os.path.join(output_dir, "subtitles.txt")
@@ -3306,18 +3324,17 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     with open(subtitle_path, "r", encoding="utf-8") as f:
                         subtitle_text = f.read()
                     reused = True
-                    _update_transcribe_soft_state(
+                    transcribe_runtime_session.mark(
                         status="completed",
                         checkpoint="transcribe_reused",
                         completed=1,
                         pending=0,
-                    )
-                    transcribe_watchdog.emit(
-                        status="completed",
-                        checkpoint="transcribe_reused",
-                        completed=1,
-                        pending=0,
-                        signal_type="hard",
+                        extra_payload={
+                            **transcribe_runtime_base_payload,
+                            "subtitle_path": subtitle_path,
+                            "subtitle_signature": _file_signature(subtitle_path),
+                            "reused_transcribe": True,
+                        },
                     )
                     logger.info(f"[{task_id}] ✅ Reusing existing subtitles: {subtitle_path}")
                     self._append_resume_report(
@@ -3346,18 +3363,18 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 # 兼容旧行为：未开启复用控制时沿用文件存在即复用
                 with open(subtitle_path, "r", encoding="utf-8") as f:
                     subtitle_text = f.read()
-                _update_transcribe_soft_state(
+                transcribe_runtime_session.mark(
                     status="completed",
                     checkpoint="transcribe_reused_legacy",
                     completed=1,
                     pending=0,
-                )
-                transcribe_watchdog.emit(
-                    status="completed",
-                    checkpoint="transcribe_reused_legacy",
-                    completed=1,
-                    pending=0,
-                    signal_type="hard",
+                    extra_payload={
+                        **transcribe_runtime_base_payload,
+                        "subtitle_path": subtitle_path,
+                        "subtitle_signature": _file_signature(subtitle_path),
+                        "reused_transcribe": True,
+                        "legacy_reuse": True,
+                    },
                 )
                 logger.info(f"[{task_id}] ✅ Reusing existing subtitles: {subtitle_path}")
             elif not reused:
@@ -3365,18 +3382,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 transcriber = self.resources.transcriber
                 if not transcriber:
                     raise RuntimeError("Global Transcriber not initialized")
-                _update_transcribe_soft_state(
+                transcribe_runtime_session.mark(
                     status="running",
                     checkpoint="transcribe_engine_running",
                     completed=0,
                     pending=1,
-                )
-                transcribe_watchdog.emit(
-                    status="running",
-                    checkpoint="transcribe_engine_running",
-                    completed=0,
-                    pending=1,
-                    signal_type="hard",
+                    extra_payload=transcribe_runtime_base_payload,
                 )
                 
                 # transcribe 是异步方法
@@ -3394,19 +3405,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         for key in ("segment_id", "segment_index", "total_segments"):
                             if key in event:
                                 extra[key] = _to_int(event.get(key), 0)
-                        _update_transcribe_soft_state(
+                        transcribe_runtime_session.mark(
                             status=status,
                             checkpoint=checkpoint,
                             completed=completed,
                             pending=pending,
-                        )
-                        transcribe_watchdog.emit(
-                            status=status,
-                            checkpoint=checkpoint,
-                            completed=completed,
-                            pending=pending,
-                            signal_type="hard",
-                            extra=extra or None,
+                            extra_watchdog=extra or None,
+                            extra_payload={
+                                **transcribe_runtime_base_payload,
+                                "subtitle_path": subtitle_path,
+                                "segment_id": extra.get("segment_id", 0) if extra else 0,
+                                "segment_index": extra.get("segment_index", 0) if extra else 0,
+                                "total_segments": extra.get("total_segments", 0) if extra else 0,
+                            },
                         )
                     except Exception as progress_error:
                         logger.warning(f"[{task_id}] Transcribe segment progress bridge failed: {progress_error}")
@@ -3420,6 +3431,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 # 🔑 保存字幕文件为 subtitles.txt（异步写盘进程，不阻塞主流程）
                 enqueue_text_write(subtitle_path, subtitle_text, scope_key=output_dir)
 
+                persist_wait_sec = max(
+                    1.0,
+                    float(_to_int(os.getenv("TRANSCRIBE_ASYNC_PERSIST_WAIT_SEC", 30), 30)),
+                )
+
                 _write_resource_meta(
                     subtitle_path,
                     group="transcribe",
@@ -3427,21 +3443,39 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     dependencies={},
                     priority=False,
                 )
-                _update_transcribe_soft_state(
-                    status="completed",
-                    checkpoint="transcribe_persist_queued",
+                transcribe_runtime_session.mark(
+                    status="running",
+                    checkpoint="transcribe_persist_flushing",
                     completed=1,
                     pending=0,
-                )
-                transcribe_watchdog.emit(
-                    status="completed",
-                    checkpoint="transcribe_persist_queued",
-                    completed=1,
-                    pending=0,
-                    signal_type="hard",
+                    extra_payload={
+                        **transcribe_runtime_base_payload,
+                        "subtitle_path": subtitle_path,
+                        "persist_wait_sec": persist_wait_sec,
+                    },
                 )
 
-                logger.info(f"[{task_id}] Subtitles queued to async writer: {subtitle_path}")
+                flushed = flush_async_json_writes(timeout_sec=persist_wait_sec, scope_key=output_dir)
+                subtitle_ready = os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0
+                if not subtitle_ready:
+                    raise RuntimeError(
+                        f"subtitle_path not ready after async persist wait: {subtitle_path} "
+                        f"(flush={flushed}, wait_sec={persist_wait_sec})"
+                    )
+                transcribe_runtime_session.mark(
+                    status="completed",
+                    checkpoint="transcribe_response_ready",
+                    completed=1,
+                    pending=0,
+                    extra_payload={
+                        **transcribe_runtime_base_payload,
+                        "subtitle_path": subtitle_path,
+                        "subtitle_signature": _file_signature(subtitle_path),
+                        "persist_wait_sec": persist_wait_sec,
+                    },
+                )
+
+                logger.info(f"[{task_id}] Subtitles persisted: {subtitle_path} (flush={flushed})")
             
             return video_processing_pb2.TranscribeResponse(
                 success=True,
@@ -3453,21 +3487,18 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             
         except Exception as e:
             logger.error(f"[{task_id}] TranscribeVideo failed: {e}")
-            if transcribe_watchdog is not None:
+            if transcribe_runtime_session is not None:
                 try:
-                    _update_transcribe_soft_state(
-                        status="failed",
+                    transcribe_runtime_session.mark_failed(
                         checkpoint="transcribe_failed",
-                        completed=0,
-                        pending=1,
-                    )
-                    transcribe_watchdog.emit(
-                        status="failed",
-                        checkpoint="transcribe_failed",
-                        completed=0,
-                        pending=1,
-                        signal_type="hard",
-                        extra={"error": str(e)[:200]},
+                        error=e,
+                        extra_payload={
+                            **transcribe_runtime_base_payload,
+                            "subtitle_path": subtitle_path if 'subtitle_path' in locals() else "",
+                            "subtitle_signature": _file_signature(subtitle_path) if 'subtitle_path' in locals() and subtitle_path else {},
+                        },
+                        extra_watchdog={"error": str(e)[:200]},
+                        message=str(e),
                     )
                 except Exception as heartbeat_error:
                     logger.warning(f"[{task_id}] Transcribe watchdog emit failed: {heartbeat_error}")
@@ -3479,9 +3510,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
-            soft_heartbeat_stop.set()
-            if soft_heartbeat_thread is not None and soft_heartbeat_thread.is_alive():
-                soft_heartbeat_thread.join(timeout=2.0)
+            if transcribe_runtime_session is not None:
+                transcribe_runtime_session.stop_soft_heartbeat_loop()
             self._decrement_tasks()
     
     async def ProcessStage1(self, request, context):
@@ -3514,73 +3544,38 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         
         # 确保目录存在
         os.makedirs(intermediates_dir, exist_ok=True)
+        stage1_runtime_base_payload = {
+            "video_path": video_path,
+            "video_signature": _file_signature(video_path),
+            "subtitle_path": subtitle_path,
+            "subtitle_signature": _file_signature(subtitle_path) if subtitle_path else {},
+            "max_step": int(max_step),
+        }
         stage1_heartbeat = Stage1HeartbeatWriter(task_id=task_id, output_dir=output_dir, max_step=max_step)
-        stage1_heartbeat.emit(
+        stage1_runtime_session = self._create_runtime_stage_session(
+            output_dir=output_dir,
+            task_id=task_id,
+            stage="stage1",
+            base_payload=stage1_runtime_base_payload,
+            heartbeat_emitter=stage1_heartbeat.emit,
+            heartbeat_event_emitter=stage1_heartbeat.emit_from_event,
+        )
+        stage1_runtime_session.mark(
             status="running",
             checkpoint="pipeline_prepare",
             completed=0,
             pending=max_step,
+            extra_payload=stage1_runtime_base_payload,
         )
-        soft_heartbeat_interval_sec = max(
-            5.0,
-            float(_to_int(os.getenv("STAGE1_SOFT_HEARTBEAT_SEC", 20), 20)),
+        stage1_runtime_session.start_soft_heartbeat_loop(
+            interval_sec=max(
+                5.0,
+                float(_to_int(os.getenv("STAGE1_SOFT_HEARTBEAT_SEC", 20), 20)),
+            ),
+            thread_name=f"stage1-soft-heartbeat-{task_id}",
+            default_checkpoint="pipeline_pending",
+            default_pending=max_step,
         )
-        soft_heartbeat_lock = threading.Lock()
-        soft_heartbeat_state: Dict[str, Any] = {
-            "status": "running",
-            "checkpoint": "pipeline_prepare",
-            "completed": 0,
-            "pending": max_step,
-        }
-        soft_heartbeat_stop = threading.Event()
-
-        def _update_soft_heartbeat_state(event: Optional[Dict[str, Any]] = None) -> None:
-            if not isinstance(event, dict):
-                return
-            status = str(event.get("status") or "running").strip().lower() or "running"
-            checkpoint = str(
-                event.get("checkpoint")
-                or event.get("step_name")
-                or event.get("event")
-                or "unknown"
-            ).strip()
-            completed_raw = event.get("completed", soft_heartbeat_state.get("completed", 0))
-            pending_raw = event.get("pending", soft_heartbeat_state.get("pending", max_step))
-            try:
-                completed = int(completed_raw)
-            except Exception:
-                completed = int(soft_heartbeat_state.get("completed", 0))
-            try:
-                pending = int(pending_raw)
-            except Exception:
-                pending = int(soft_heartbeat_state.get("pending", max_step))
-            with soft_heartbeat_lock:
-                soft_heartbeat_state["status"] = status
-                soft_heartbeat_state["checkpoint"] = checkpoint or "unknown"
-                soft_heartbeat_state["completed"] = max(0, completed)
-                soft_heartbeat_state["pending"] = max(0, pending)
-
-        def _stage1_soft_heartbeat_loop() -> None:
-            while not soft_heartbeat_stop.wait(soft_heartbeat_interval_sec):
-                try:
-                    with soft_heartbeat_lock:
-                        snapshot = dict(soft_heartbeat_state)
-                    stage1_heartbeat.emit(
-                        status=str(snapshot.get("status") or "running"),
-                        checkpoint=str(snapshot.get("checkpoint") or "pipeline_pending"),
-                        completed=int(snapshot.get("completed", 0)),
-                        pending=int(snapshot.get("pending", max_step)),
-                        signal_type="soft",
-                    )
-                except Exception as soft_heartbeat_error:
-                    logger.warning(f"[{task_id}] Stage1 soft heartbeat emit failed: {soft_heartbeat_error}")
-
-        soft_heartbeat_thread = threading.Thread(
-            target=_stage1_soft_heartbeat_loop,
-            name=f"stage1-soft-heartbeat-{task_id}",
-            daemon=True,
-        )
-        soft_heartbeat_thread.start()
         
         # 输出文件路径
         step2_path = os.path.join(intermediates_dir, "step2_correction_output.json")
@@ -3745,19 +3740,21 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
             stage1_final_state: Dict[str, Any] = {}
             if reused_stage1:
-                _update_soft_heartbeat_state(
-                    {
-                        "status": "completed",
-                        "checkpoint": "reused_stage1_outputs",
-                        "completed": max_step,
-                        "pending": 0,
-                    }
-                )
-                stage1_heartbeat.emit(
+                stage1_runtime_session.mark(
                     status="completed",
                     checkpoint="reused_stage1_outputs",
                     completed=max_step,
                     pending=0,
+                    extra_payload={
+                        **stage1_runtime_base_payload,
+                        "reused_stage1": True,
+                        "step2_json_path": step2_path,
+                        "step2_signature": _file_signature(step2_path),
+                        "step6_json_path": step6_path,
+                        "step6_signature": _file_signature(step6_path),
+                        "sentence_timestamps_path": local_sentence_ts if os.path.exists(local_sentence_ts) else "",
+                        "sentence_timestamps_signature": _file_signature(local_sentence_ts),
+                    },
                 )
                 logger.info(f"[{task_id}] ✅ Reusing existing Stage1 outputs")
             else:
@@ -3777,8 +3774,18 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         f"resume_fields={sorted(resume_state.keys())}"
                     )
                 def _stage1_progress_callback(event: Dict[str, Any]) -> None:
-                    _update_soft_heartbeat_state(event)
-                    stage1_heartbeat.emit_from_event(event)
+                    stage1_runtime_session.mark_from_event(
+                        event,
+                        default_pending=max_step,
+                        emit_watchdog_event=True,
+                        extra_payload={
+                            **stage1_runtime_base_payload,
+                            "event": str(event.get("event") or ""),
+                            "step_name": str(event.get("step_name") or ""),
+                            "resume_from_step": str(resume_from_step or ""),
+                            "timestamp_ms": int(event.get("timestamp_ms", 0) or 0),
+                        },
+                    )
 
                 stage1_final_state = await run_pipeline(
                    video_path=video_path,
@@ -3889,19 +3896,23 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 except Exception as topic_meta_error:
                     logger.warning(f"[{task_id}] Failed to update video_meta domain/main_topic: {topic_meta_error}")
 
-            stage1_heartbeat.emit(
+            stage1_runtime_session.mark(
                 status="completed",
                 checkpoint="stage1_response_ready",
                 completed=max_step,
                 pending=0,
-            )
-            _update_soft_heartbeat_state(
-                {
-                    "status": "completed",
-                    "checkpoint": "stage1_response_ready",
-                    "completed": max_step,
-                    "pending": 0,
-                }
+                extra_payload={
+                    **stage1_runtime_base_payload,
+                    "reused_stage1": bool(reused_stage1),
+                    "step2_json_path": step2_path,
+                    "step2_signature": _file_signature(step2_path),
+                    "step6_json_path": step6_path,
+                    "step6_signature": _file_signature(step6_path),
+                    "sentence_timestamps_path": sentence_timestamps_path,
+                    "sentence_timestamps_signature": _file_signature(sentence_timestamps_path),
+                    "domain": stage1_domain,
+                    "main_topic": stage1_main_topic,
+                },
             )
               
             return video_processing_pb2.Stage1Response(
@@ -3915,20 +3926,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         except Exception as e:
             logger.error(f"[{task_id}] ProcessStage1 failed: {e}")
             try:
-                _update_soft_heartbeat_state(
-                    {
-                        "status": "failed",
-                        "checkpoint": "stage1_failed",
-                        "completed": 0,
-                        "pending": max_step,
-                    }
-                )
-                stage1_heartbeat.emit(
-                    status="failed",
+                stage1_runtime_session.mark_failed(
                     checkpoint="stage1_failed",
-                    completed=0,
-                    pending=max_step,
-                    extra={"error": str(e)[:200]},
+                    error=e,
+                    extra_payload=stage1_runtime_base_payload,
+                    extra_watchdog={"error": str(e)[:200]},
+                    message=str(e),
                 )
             except Exception as heartbeat_error:
                 logger.warning(f"[{task_id}] Stage1 heartbeat write failed: {heartbeat_error}")
@@ -3940,9 +3943,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
-            soft_heartbeat_stop.set()
-            if soft_heartbeat_thread.is_alive():
-                soft_heartbeat_thread.join(timeout=2.0)
+            stage1_runtime_session.stop_soft_heartbeat_loop()
             self._decrement_tasks()
     
     async def AnalyzeSemanticUnits(self, request, context):
@@ -3976,6 +3977,16 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         output_dir = _normalize_output_dir(video_path)
         phase2a_candidates = _phase2a_semantic_units_candidates(output_dir)
         semantic_units_path = phase2a_candidates[0]
+        phase2a_runtime_base_payload = {
+            "video_path": video_path,
+            "video_signature": _file_signature(video_path),
+            "step2_json_path": step2_json_path,
+            "step2_signature": _file_signature(step2_json_path) if step2_json_path else {},
+            "step6_json_path": step6_json_path,
+            "step6_signature": _file_signature(step6_json_path) if step6_json_path else {},
+            "semantic_units_path": semantic_units_path,
+            "semantic_units_signature": _file_signature(semantic_units_path),
+        }
         if not sentence_timestamps_path:
             # 默认使用 intermediates 路径（Stage1 已复制到此处）
             sentence_timestamps_path = os.path.join(output_dir, "intermediates", "sentence_timestamps.json")
@@ -3994,67 +4005,36 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             stage="phase2a",
             total_steps=3,
         )
-        analyze_soft_stop = threading.Event()
-        analyze_soft_thread: Optional[threading.Thread] = None
-        analyze_soft_lock = threading.Lock()
-        analyze_soft_state: Dict[str, Any] = {
-            "status": "running",
-            "checkpoint": "phase2a_prepare",
-            "completed": 0,
-            "pending": 3,
-        }
-
-        def _emit_analyze_soft_loop() -> None:
-            interval_sec = max(
-                5.0,
-                float(_to_int(os.getenv("PHASE2A_SOFT_HEARTBEAT_SEC", 20), 20)),
-            )
-            while not analyze_soft_stop.wait(interval_sec):
-                try:
-                    with analyze_soft_lock:
-                        snapshot = dict(analyze_soft_state)
-                    analyze_watchdog.emit(
-                        status=str(snapshot.get("status") or "running"),
-                        checkpoint=str(snapshot.get("checkpoint") or "phase2a_pending"),
-                        completed=int(snapshot.get("completed", 0)),
-                        pending=int(snapshot.get("pending", 3)),
-                        signal_type="soft",
-                    )
-                except Exception as soft_error:
-                    logger.warning(f"[{task_id}] Phase2A soft heartbeat emit failed: {soft_error}")
-
-        def _update_analyze_soft_state(
-            *,
-            status: Optional[str] = None,
-            checkpoint: Optional[str] = None,
-            completed: Optional[int] = None,
-            pending: Optional[int] = None,
-        ) -> None:
-            with analyze_soft_lock:
-                if status is not None:
-                    analyze_soft_state["status"] = str(status).strip().lower() or "running"
-                if checkpoint is not None:
-                    analyze_soft_state["checkpoint"] = str(checkpoint).strip() or "unknown"
-                if completed is not None:
-                    analyze_soft_state["completed"] = max(0, int(completed))
-                if pending is not None:
-                    analyze_soft_state["pending"] = max(0, int(pending))
+        phase2a_runtime_session = self._create_runtime_stage_session(
+            output_dir=output_dir,
+            task_id=task_id,
+            stage="phase2a",
+            base_payload=phase2a_runtime_base_payload,
+            heartbeat_emitter=analyze_watchdog.emit,
+        )
         
         try:
             self._increment_tasks()
-            analyze_watchdog.emit(
+            phase2a_runtime_session.mark(
                 status="running",
                 checkpoint="phase2a_prepare",
                 completed=0,
                 pending=3,
-                signal_type="hard",
+                extra_payload={
+                    **phase2a_runtime_base_payload,
+                    "sentence_timestamps_path": sentence_timestamps_path,
+                    "sentence_timestamps_signature": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                },
             )
-            analyze_soft_thread = threading.Thread(
-                target=_emit_analyze_soft_loop,
-                name=f"phase2a-soft-heartbeat-{task_id}",
-                daemon=True,
+            phase2a_runtime_session.start_soft_heartbeat_loop(
+                interval_sec=max(
+                    5.0,
+                    float(_to_int(os.getenv("PHASE2A_SOFT_HEARTBEAT_SEC", 20), 20)),
+                ),
+                thread_name=f"phase2a-soft-heartbeat-{task_id}",
+                default_checkpoint="phase2a_pending",
+                default_pending=3,
             )
-            analyze_soft_thread.start()
 
             phase2a_fp = _build_input_fingerprint(
                 video_path,
@@ -4137,18 +4117,21 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             cache_entry=cache_entry,
                         )
                     )
-                _update_analyze_soft_state(
+                phase2a_runtime_session.mark(
                     status="completed",
                     checkpoint="phase2a_reused_ready",
                     completed=3,
                     pending=0,
-                )
-                analyze_watchdog.emit(
-                    status="completed",
-                    checkpoint="phase2a_reused_ready",
-                    completed=3,
-                    pending=0,
-                    signal_type="hard",
+                    extra_payload={
+                        **phase2a_runtime_base_payload,
+                        "sentence_timestamps_path": sentence_timestamps_path,
+                        "sentence_timestamps_signature": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                        "semantic_units_path": semantic_units_path,
+                        "semantic_units_signature": _file_signature(semantic_units_path),
+                        "reused_phase2a": True,
+                        "unit_count": len(semantic_units_payload or []),
+                        "semantic_units_fingerprint": isinstance(cache_entry, dict) and str(cache_entry.get("fingerprint", "") or "") or "",
+                    },
                 )
                 return response
 
@@ -4205,18 +4188,16 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 pipeline.segmenter = shared_segmenter
 
             logger.info(f"[{task_id}] Phase2A segmentation-only mode enabled: skip material request generation")
-            _update_analyze_soft_state(
+            phase2a_runtime_session.mark(
                 status="running",
                 checkpoint="phase2a_segmentation_running",
                 completed=1,
                 pending=2,
-            )
-            analyze_watchdog.emit(
-                status="running",
-                checkpoint="phase2a_segmentation_running",
-                completed=1,
-                pending=2,
-                signal_type="hard",
+                extra_payload={
+                    **phase2a_runtime_base_payload,
+                    "sentence_timestamps_path": sentence_timestamps_path,
+                    "sentence_timestamps_signature": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                },
             )
             semantic_units_path = await pipeline.analyze_segmentation_only()
             runtime_semantic_units = getattr(pipeline, "latest_phase2a_semantic_units_payload", None)
@@ -4285,18 +4266,21 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         cache_entry=cache_entry,
                     )
                 )
-            _update_analyze_soft_state(
+            phase2a_runtime_session.mark(
                 status="completed",
                 checkpoint="phase2a_response_ready",
                 completed=3,
                 pending=0,
-            )
-            analyze_watchdog.emit(
-                status="completed",
-                checkpoint="phase2a_response_ready",
-                completed=3,
-                pending=0,
-                signal_type="hard",
+                extra_payload={
+                    **phase2a_runtime_base_payload,
+                    "sentence_timestamps_path": sentence_timestamps_path,
+                    "sentence_timestamps_signature": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                    "semantic_units_path": semantic_units_path,
+                    "semantic_units_signature": _file_signature(semantic_units_path),
+                    "reused_phase2a": False,
+                    "unit_count": len(runtime_semantic_units or []),
+                    "semantic_units_fingerprint": isinstance(cache_entry, dict) and str(cache_entry.get("fingerprint", "") or "") or "",
+                },
             )
             return response
             
@@ -4304,19 +4288,16 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             logger.error(f"[{task_id}] AnalyzeSemanticUnits failed: {e}")
             logger.exception(e)  # Log full traceback
             try:
-                _update_analyze_soft_state(
-                    status="failed",
+                phase2a_runtime_session.mark_failed(
                     checkpoint="phase2a_failed",
-                    completed=1,
-                    pending=2,
-                )
-                analyze_watchdog.emit(
-                    status="failed",
-                    checkpoint="phase2a_failed",
-                    completed=1,
-                    pending=2,
-                    signal_type="hard",
-                    extra={"error": str(e)[:200]},
+                    error=e,
+                    extra_payload={
+                        **phase2a_runtime_base_payload,
+                        "sentence_timestamps_path": sentence_timestamps_path,
+                        "sentence_timestamps_signature": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                    },
+                    extra_watchdog={"error": str(e)[:200]},
+                    message=str(e),
                 )
             except Exception as heartbeat_error:
                 logger.warning(f"[{task_id}] Phase2A watchdog emit failed: {heartbeat_error}")
@@ -4327,9 +4308,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
-            analyze_soft_stop.set()
-            if analyze_soft_thread is not None and analyze_soft_thread.is_alive():
-                analyze_soft_thread.join(timeout=2.0)
+            phase2a_runtime_session.stop_soft_heartbeat_loop()
             self._decrement_tasks()
 
     async def ClassifyKnowledgeBatch(self, request, context):
@@ -5107,6 +5086,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             video_path=video_path,
         )
         self._cache_metrics_begin(task_id, "AssembleRichText")
+        phase2b_runtime_base_payload = {
+            "video_path": video_path,
+            "video_signature": _file_signature(video_path),
+            "semantic_source_case": str(semantic_source_case or "runtime_or_empty"),
+            "screenshots_dir": screenshots_dir,
+            "screenshots_signature": _file_signature(screenshots_dir) if screenshots_dir else {},
+            "clips_dir": clips_dir,
+            "clips_signature": _file_signature(clips_dir) if clips_dir else {},
+            "title": title,
+        }
+        materialized_semantic_units_path = ""
+        markdown_path = ""
+        json_path = ""
         
         # 确保目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -5124,51 +5116,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             stage="phase2b",
             total_steps=4,
         )
-        assemble_soft_stop = threading.Event()
-        assemble_soft_thread: Optional[threading.Thread] = None
-        assemble_soft_lock = threading.Lock()
-        assemble_soft_state: Dict[str, Any] = {
-            "status": "running",
-            "checkpoint": "phase2b_prepare",
-            "completed": 0,
-            "pending": 4,
-        }
-
-        def _emit_assemble_soft_loop() -> None:
-            interval_sec = max(
-                5.0,
-                float(_to_int(os.getenv("PHASE2B_SOFT_HEARTBEAT_SEC", 20), 20)),
-            )
-            while not assemble_soft_stop.wait(interval_sec):
-                try:
-                    with assemble_soft_lock:
-                        snapshot = dict(assemble_soft_state)
-                    assemble_watchdog.emit(
-                        status=str(snapshot.get("status") or "running"),
-                        checkpoint=str(snapshot.get("checkpoint") or "phase2b_pending"),
-                        completed=int(snapshot.get("completed", 0)),
-                        pending=int(snapshot.get("pending", 4)),
-                        signal_type="soft",
-                    )
-                except Exception as soft_error:
-                    logger.warning(f"[{task_id}] Phase2B soft heartbeat emit failed: {soft_error}")
-
-        def _update_assemble_soft_state(
-            *,
-            status: Optional[str] = None,
-            checkpoint: Optional[str] = None,
-            completed: Optional[int] = None,
-            pending: Optional[int] = None,
-        ) -> None:
-            with assemble_soft_lock:
-                if status is not None:
-                    assemble_soft_state["status"] = str(status).strip().lower() or "running"
-                if checkpoint is not None:
-                    assemble_soft_state["checkpoint"] = str(checkpoint).strip() or "unknown"
-                if completed is not None:
-                    assemble_soft_state["completed"] = max(0, int(completed))
-                if pending is not None:
-                    assemble_soft_state["pending"] = max(0, int(pending))
+        phase2b_runtime_session = self._create_runtime_stage_session(
+            output_dir=output_dir,
+            task_id=task_id,
+            stage="phase2b",
+            base_payload=phase2b_runtime_base_payload,
+            heartbeat_emitter=assemble_watchdog.emit,
+        )
 
         from services.python_grpc.src.content_pipeline.infra.llm.deepseek_audit import (
             build_phase2b_audit_context,
@@ -5179,19 +5133,22 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
         try:
             self._increment_tasks()
-            assemble_watchdog.emit(
+            phase2b_runtime_session.mark(
                 status="running",
                 checkpoint="phase2b_prepare",
                 completed=0,
                 pending=4,
-                signal_type="hard",
+                extra_payload=phase2b_runtime_base_payload,
             )
-            assemble_soft_thread = threading.Thread(
-                target=_emit_assemble_soft_loop,
-                name=f"phase2b-soft-heartbeat-{task_id}",
-                daemon=True,
+            phase2b_runtime_session.start_soft_heartbeat_loop(
+                interval_sec=max(
+                    5.0,
+                    float(_to_int(os.getenv("PHASE2B_SOFT_HEARTBEAT_SEC", 20), 20)),
+                ),
+                thread_name=f"phase2b-soft-heartbeat-{task_id}",
+                default_checkpoint="phase2b_pending",
+                default_pending=4,
             )
-            assemble_soft_thread.start()
 
             audit_context = build_phase2b_audit_context(
                 output_dir=output_dir,
@@ -5203,18 +5160,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             semantic_units_payload: List[Dict[str, Any]] = []
             if semantic_source_case == "semantic_units_inline":
                 semantic_units_payload = self._decode_semantic_units_inline_message(request.semantic_units_inline)
-                _update_assemble_soft_state(
+                phase2b_runtime_session.mark(
                     status="running",
                     checkpoint="phase2b_semantic_inline_ready",
                     completed=1,
                     pending=3,
-                )
-                assemble_watchdog.emit(
-                    status="running",
-                    checkpoint="phase2b_semantic_inline_ready",
-                    completed=1,
-                    pending=3,
-                    signal_type="hard",
+                    extra_payload={
+                        **phase2b_runtime_base_payload,
+                        "semantic_unit_count": len(semantic_units_payload),
+                    },
                 )
                 logger.info(
                     f"[{task_id}] AssembleRichText loaded semantic units from inline payload: units={len(semantic_units_payload)}"
@@ -5224,18 +5178,16 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 ref_entry = self._get_phase2a_runtime_cache_entry_by_ref(ref_id)
                 if isinstance(ref_entry, dict):
                     semantic_units_payload = ref_entry.get("semantic_units", []) or []
-                    _update_assemble_soft_state(
+                    phase2b_runtime_session.mark(
                         status="running",
                         checkpoint="phase2b_semantic_ref_ready",
                         completed=1,
                         pending=3,
-                    )
-                    assemble_watchdog.emit(
-                        status="running",
-                        checkpoint="phase2b_semantic_ref_ready",
-                        completed=1,
-                        pending=3,
-                        signal_type="hard",
+                        extra_payload={
+                            **phase2b_runtime_base_payload,
+                            "semantic_ref_id": ref_id,
+                            "semantic_unit_count": len(semantic_units_payload),
+                        },
                     )
                     logger.info(
                         f"[{task_id}] AssembleRichText loaded semantic units from ref cache: "
@@ -5257,18 +5209,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 previous_metrics = self._collect_semantic_unit_quality_metrics(semantic_units_payload)
                 runtime_metrics = self._collect_semantic_unit_quality_metrics(runtime_semantic_units)
                 semantic_units_payload = runtime_semantic_units
-                _update_assemble_soft_state(
+                phase2b_runtime_session.mark(
                     status="running",
                     checkpoint="phase2b_semantic_runtime_ready",
                     completed=1,
                     pending=3,
-                )
-                assemble_watchdog.emit(
-                    status="running",
-                    checkpoint="phase2b_semantic_runtime_ready",
-                    completed=1,
-                    pending=3,
-                    signal_type="hard",
+                    extra_payload={
+                        **phase2b_runtime_base_payload,
+                        "semantic_unit_count": len(semantic_units_payload),
+                    },
                 )
 
                 logger.info(
@@ -5277,7 +5226,6 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     f"current_metrics={previous_metrics}, runtime_metrics={runtime_metrics}"
                 )
 
-            materialized_semantic_units_path = ""
             if semantic_units_payload:
                 materialized_semantic_units_path = self._materialize_semantic_units_payload(
                     output_dir=output_dir,
@@ -5294,18 +5242,17 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
             if not materialized_semantic_units_path:
                 raise FileNotFoundError("semantic_units source missing: neither inline/ref/runtime available")
-            _update_assemble_soft_state(
+            phase2b_runtime_session.mark(
                 status="running",
                 checkpoint="phase2b_materialized_ready",
                 completed=2,
                 pending=2,
-            )
-            assemble_watchdog.emit(
-                status="running",
-                checkpoint="phase2b_materialized_ready",
-                completed=2,
-                pending=2,
-                signal_type="hard",
+                extra_payload={
+                    **phase2b_runtime_base_payload,
+                    "materialized_semantic_units_path": materialized_semantic_units_path,
+                    "materialized_semantic_units_signature": _file_signature(materialized_semantic_units_path) if materialized_semantic_units_path else {},
+                    "semantic_unit_count": len(semantic_units_payload),
+                },
             )
 
             # 🔑 创建 RichTextPipeline
@@ -5326,18 +5273,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 clips_dir=clips_dir,
                 title=title
             )
-            _update_assemble_soft_state(
+            phase2b_runtime_session.mark(
                 status="running",
                 checkpoint="phase2b_assembled_ready",
                 completed=3,
                 pending=1,
-            )
-            assemble_watchdog.emit(
-                status="running",
-                checkpoint="phase2b_assembled_ready",
-                completed=3,
-                pending=1,
-                signal_type="hard",
+                extra_payload={
+                    **phase2b_runtime_base_payload,
+                    "materialized_semantic_units_path": materialized_semantic_units_path,
+                    "materialized_semantic_units_signature": _file_signature(materialized_semantic_units_path) if materialized_semantic_units_path else {},
+                    "markdown_path": markdown_path,
+                    "markdown_signature": _file_signature(markdown_path) if markdown_path else {},
+                    "json_path": json_path,
+                    "json_signature": _file_signature(json_path) if json_path else {},
+                },
             )
 
             try:
@@ -5361,18 +5310,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 text_only_count=0,
                 vision_validated_count=0
             )
-            _update_assemble_soft_state(
+            phase2b_runtime_session.mark(
                 status="completed",
                 checkpoint="phase2b_response_ready",
                 completed=4,
                 pending=0,
-            )
-            assemble_watchdog.emit(
-                status="completed",
-                checkpoint="phase2b_response_ready",
-                completed=4,
-                pending=0,
-                signal_type="hard",
+                extra_payload={
+                    **phase2b_runtime_base_payload,
+                    "materialized_semantic_units_path": materialized_semantic_units_path,
+                    "materialized_semantic_units_signature": _file_signature(materialized_semantic_units_path) if materialized_semantic_units_path else {},
+                    "markdown_path": markdown_path,
+                    "markdown_signature": _file_signature(markdown_path) if markdown_path else {},
+                    "json_path": json_path,
+                    "json_signature": _file_signature(json_path) if json_path else {},
+                    "stats": {
+                        "video_clips_count": int(getattr(stats, "video_clips_count", 0) or 0),
+                        "screenshots_count": int(getattr(stats, "screenshots_count", 0) or 0),
+                    },
+                },
             )
             
             return video_processing_pb2.AssembleResponse(
@@ -5388,22 +5343,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             logger.error(f"[{task_id}] AssembleRichText failed: {e}")
             logger.error(traceback.format_exc()) # Log full traceback
             try:
-                with assemble_soft_lock:
-                    failed_completed = int(assemble_soft_state.get("completed", 0))
-                    failed_pending = max(1, int(assemble_soft_state.get("pending", 1)))
-                _update_assemble_soft_state(
-                    status="failed",
+                phase2b_runtime_session.mark_failed(
                     checkpoint="phase2b_failed",
-                    completed=failed_completed,
-                    pending=failed_pending,
-                )
-                assemble_watchdog.emit(
-                    status="failed",
-                    checkpoint="phase2b_failed",
-                    completed=failed_completed,
-                    pending=failed_pending,
-                    signal_type="hard",
-                    extra={"error": str(e)[:200]},
+                    error=e,
+                    extra_payload={
+                        **phase2b_runtime_base_payload,
+                        "materialized_semantic_units_path": materialized_semantic_units_path,
+                        "materialized_semantic_units_signature": _file_signature(materialized_semantic_units_path) if materialized_semantic_units_path else {},
+                        "markdown_path": markdown_path,
+                        "markdown_signature": _file_signature(markdown_path) if markdown_path else {},
+                        "json_path": json_path,
+                        "json_signature": _file_signature(json_path) if json_path else {},
+                    },
+                    extra_watchdog={"error": str(e)[:200]},
+                    message=str(e),
                 )
             except Exception as heartbeat_error:
                 logger.warning(f"[{task_id}] Phase2B watchdog emit failed: {heartbeat_error}")
@@ -5415,9 +5368,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
-            assemble_soft_stop.set()
-            if assemble_soft_thread is not None and assemble_soft_thread.is_alive():
-                assemble_soft_thread.join(timeout=2.0)
+            phase2b_runtime_session.stop_soft_heartbeat_loop()
             if audit_token is not None:
                 try:
                     pop_deepseek_audit_context(audit_token)
@@ -5615,6 +5566,89 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         if self.resume_control.mode != "file_reuse":
             return False
         return bool(self.resume_control.groups.get(group, False))
+
+    def _get_runtime_recovery_store(
+        self,
+        *,
+        output_dir: str,
+        task_id: str,
+    ) -> Optional[RuntimeRecoveryStore]:
+        safe_output_dir = str(output_dir or "").strip()
+        if not safe_output_dir:
+            return None
+        try:
+            safe_output_dir = os.path.abspath(safe_output_dir)
+        except Exception:
+            pass
+
+        with self._runtime_recovery_store_lock:
+            cached = self._runtime_recovery_stores.get(safe_output_dir)
+            if cached is not None and (not task_id or cached.task_id == str(task_id or "").strip()):
+                return cached
+            try:
+                store = RuntimeRecoveryStore(output_dir=safe_output_dir, task_id=task_id)
+            except Exception as error:
+                logger.warning(
+                    "[%s] RuntimeRecoveryStore init failed: output_dir=%s error=%s",
+                    task_id,
+                    safe_output_dir,
+                    error,
+                )
+                return None
+            self._runtime_recovery_stores[safe_output_dir] = store
+            return store
+
+    def _record_runtime_stage_checkpoint(
+        self,
+        *,
+        output_dir: str,
+        task_id: str,
+        stage: str,
+        status: str,
+        checkpoint: str,
+        completed: Any,
+        pending: Any,
+        error: Optional[Exception] = None,
+        error_message: str = "",
+        extra_payload: Optional[Dict[str, Any]] = None,
+        message: str = "",
+    ) -> None:
+        store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+        if store is None:
+            return
+        persist_runtime_stage_checkpoint(
+            store=store,
+            output_dir=output_dir,
+            stage=stage,
+            status=status,
+            checkpoint=checkpoint,
+            completed=completed,
+            pending=pending,
+            error=error,
+            error_message=error_message,
+            extra_payload=extra_payload,
+            message=message,
+        )
+
+    def _create_runtime_stage_session(
+        self,
+        *,
+        output_dir: str,
+        task_id: str,
+        stage: str,
+        base_payload: Optional[Dict[str, Any]] = None,
+        heartbeat_emitter: Optional[Callable[..., None]] = None,
+        heartbeat_event_emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> RuntimeStageSession:
+        return RuntimeStageSession(
+            store=self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id),
+            output_dir=output_dir,
+            task_id=task_id,
+            stage=stage,
+            base_payload=base_payload,
+            heartbeat_emitter=heartbeat_emitter,
+            heartbeat_event_emitter=heartbeat_event_emitter,
+        )
 
     def _cache_metrics_begin(self, task_id: str, stage: str) -> None:
         """
@@ -6840,6 +6874,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
         semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
         vl_model_name = "qwen-vl-max-2025-08-13"
+        vl_runtime_base_payload: Dict[str, Any] = {
+            "video_path": video_path,
+            "video_signature": _file_signature(video_path) if video_path else {},
+            "semantic_units_path": semantic_units_path,
+            "semantic_units_signature": _file_signature(semantic_units_path) if semantic_units_path else {},
+            "semantic_source_case": str(semantic_source_case or ""),
+            "vl_model": vl_model_name,
+        }
 
         vl_report_writer = VLReportWriter(
             task_id=task_id,
@@ -6932,16 +6974,16 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             )
         except Exception as watchdog_init_error:
             logger.warning(f"[{task_id}] AnalyzeWithVL watchdog init failed: {watchdog_init_error}")
+        vl_runtime_session = self._create_runtime_stage_session(
+            output_dir=output_dir,
+            task_id=task_id,
+            stage="analysis_extraction",
+            base_payload=vl_runtime_base_payload,
+            heartbeat_emitter=vl_watchdog.emit if vl_watchdog is not None else None,
+        )
 
         vl_heartbeat_stop = threading.Event()
         vl_heartbeat_thread: Optional[threading.Thread] = None
-        vl_heartbeat_lock = threading.Lock()
-        vl_heartbeat_state: Dict[str, Any] = {
-            "status": "running",
-            "checkpoint": "analyze_with_vl_start",
-            "completed": 0,
-            "pending": 1,
-        }
         vl_budget_seconds = 1
         vl_started_at_sec = 0.0
 
@@ -6952,31 +6994,38 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             completed: Optional[int] = None,
             pending: Optional[int] = None,
         ) -> None:
-            with vl_heartbeat_lock:
-                if status is not None:
-                    vl_heartbeat_state["status"] = str(status).strip().lower() or "running"
-                if checkpoint is not None:
-                    vl_heartbeat_state["checkpoint"] = str(checkpoint).strip() or "unknown"
-                if completed is not None:
-                    vl_heartbeat_state["completed"] = max(0, int(completed))
-                if pending is not None:
-                    vl_heartbeat_state["pending"] = max(0, int(pending))
+            snapshot = vl_runtime_session.snapshot()
+            vl_runtime_session.mark(
+                status=status if status is not None else str(snapshot.get("status") or "running"),
+                checkpoint=checkpoint if checkpoint is not None else str(snapshot.get("checkpoint") or "unknown"),
+                completed=completed if completed is not None else snapshot.get("completed", 0),
+                pending=pending if pending is not None else snapshot.get("pending", 0),
+                persist_runtime=False,
+                emit_watchdog=False,
+            )
 
         def _emit_vl_heartbeat(signal_type: str = "hard") -> None:
-            if vl_watchdog is None:
-                return
             try:
-                with vl_heartbeat_lock:
-                    snapshot = dict(vl_heartbeat_state)
-                vl_watchdog.emit(
+                snapshot = vl_runtime_session.snapshot()
+                runtime_status = str(snapshot.get("status", "running") or "running").strip().lower() or "running"
+                if runtime_status == "fallback":
+                    runtime_status = "completed"
+                vl_runtime_session.mark(
                     status=str(snapshot.get("status", "running")),
+                    runtime_status=runtime_status,
                     checkpoint=str(snapshot.get("checkpoint", "unknown")),
                     completed=max(0, int(snapshot.get("completed", 0))),
                     pending=max(0, int(snapshot.get("pending", 0))),
                     signal_type=signal_type,
-                    extra={
+                    persist_runtime=str(signal_type or "hard").strip().lower() == "hard",
+                    extra_watchdog={
                         "source": "python_vl_heartbeat",
                         "vl_budget_seconds": int(max(1, vl_budget_seconds)),
+                    },
+                    extra_payload={
+                        "vl_budget_seconds": int(max(1, vl_budget_seconds)),
+                        "semantic_units_path": semantic_units_path,
+                        "semantic_units_signature": _file_signature(semantic_units_path) if semantic_units_path else {},
                     },
                 )
             except Exception as heartbeat_error:

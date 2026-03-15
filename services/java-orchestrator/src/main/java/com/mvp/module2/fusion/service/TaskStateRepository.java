@@ -63,6 +63,7 @@ public class TaskStateRepository {
                     duplicate_of_task_id,
                     book_options_json,
                     probe_payload_json,
+                    recovery_payload_json,
                     created_at,
                     started_at,
                     completed_at,
@@ -85,6 +86,7 @@ public class TaskStateRepository {
                     duplicate_of_task_id = excluded.duplicate_of_task_id,
                     book_options_json = excluded.book_options_json,
                     probe_payload_json = excluded.probe_payload_json,
+                    recovery_payload_json = excluded.recovery_payload_json,
                     created_at = excluded.created_at,
                     started_at = excluded.started_at,
                     completed_at = excluded.completed_at,
@@ -106,6 +108,7 @@ public class TaskStateRepository {
                 nullable(task.duplicateOfTaskId),
                 serializeBookOptions(task.bookOptions),
                 serializeProbePayload(task.probePayload),
+                serializeRecoveryPayload(task.recoveryPayload),
                 task.createdAt != null ? task.createdAt.toString() : now,
                 task.startedAt != null ? task.startedAt.toString() : null,
                 task.completedAt != null ? task.completedAt.toString() : null,
@@ -137,6 +140,7 @@ public class TaskStateRepository {
                     duplicate_of_task_id,
                     book_options_json,
                     probe_payload_json,
+                    recovery_payload_json,
                     created_at,
                     started_at,
                     completed_at,
@@ -162,6 +166,7 @@ public class TaskStateRepository {
                         rs.getString("duplicate_of_task_id"),
                         deserializeBookOptions(rs.getString("book_options_json")),
                         deserializeProbePayload(rs.getString("probe_payload_json")),
+                        deserializeRecoveryPayload(rs.getString("recovery_payload_json")),
                         parseInstant(rs.getString("created_at")),
                         parseInstant(rs.getString("started_at")),
                         parseInstant(rs.getString("completed_at")),
@@ -195,6 +200,7 @@ public class TaskStateRepository {
                     duplicate_of_task_id,
                     book_options_json,
                     probe_payload_json,
+                    recovery_payload_json,
                     created_at,
                     started_at,
                     completed_at,
@@ -219,6 +225,7 @@ public class TaskStateRepository {
                         rs.getString("duplicate_of_task_id"),
                         deserializeBookOptions(rs.getString("book_options_json")),
                         deserializeProbePayload(rs.getString("probe_payload_json")),
+                        deserializeRecoveryPayload(rs.getString("recovery_payload_json")),
                         parseInstant(rs.getString("created_at")),
                         parseInstant(rs.getString("started_at")),
                         parseInstant(rs.getString("completed_at")),
@@ -254,6 +261,7 @@ public class TaskStateRepository {
                     duplicate_of_task_id,
                     book_options_json,
                     probe_payload_json,
+                    recovery_payload_json,
                     created_at,
                     started_at,
                     completed_at,
@@ -261,7 +269,7 @@ public class TaskStateRepository {
                 FROM task_runtime_state
                 WHERE normalized_video_key = ?
                   AND task_id <> ?
-                  AND status NOT IN ('FAILED', 'CANCELLED', 'DEDUPED')
+                  AND status NOT IN ('FAILED', 'CANCELLED', 'DEDUPED', 'MANUAL_RETRY_REQUIRED', 'FATAL')
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -282,6 +290,7 @@ public class TaskStateRepository {
                         rs.getString("duplicate_of_task_id"),
                         deserializeBookOptions(rs.getString("book_options_json")),
                         deserializeProbePayload(rs.getString("probe_payload_json")),
+                        deserializeRecoveryPayload(rs.getString("recovery_payload_json")),
                         parseInstant(rs.getString("created_at")),
                         parseInstant(rs.getString("started_at")),
                         parseInstant(rs.getString("completed_at")),
@@ -373,6 +382,27 @@ public class TaskStateRepository {
         }
     }
 
+    private String serializeRecoveryPayload(Map<String, Object> recoveryPayload) {
+        if (recoveryPayload == null || recoveryPayload.isEmpty()) {
+            return null;
+        }
+        return writeJson(recoveryPayload);
+    }
+
+    private Map<String, Object> deserializeRecoveryPayload(String rawJson) {
+        String normalizedJson = normalize(rawJson);
+        if (normalizedJson.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(normalizedJson, new TypeReference<LinkedHashMap<String, Object>>() {
+            });
+        } catch (Exception error) {
+            logger.warn("deserialize persisted recovery payload failed: {}", error.getMessage());
+            return null;
+        }
+    }
+
     private String writeJson(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
@@ -460,6 +490,7 @@ public class TaskStateRepository {
         public final String duplicateOfTaskId;
         public final TaskQueueManager.BookProcessingOptions bookOptions;
         public final Map<String, Object> probePayload;
+        public final Map<String, Object> recoveryPayload;
         public final Instant createdAt;
         public final Instant startedAt;
         public final Instant completedAt;
@@ -482,6 +513,7 @@ public class TaskStateRepository {
                 String duplicateOfTaskId,
                 TaskQueueManager.BookProcessingOptions bookOptions,
                 Map<String, Object> probePayload,
+                Map<String, Object> recoveryPayload,
                 Instant createdAt,
                 Instant startedAt,
                 Instant completedAt,
@@ -503,6 +535,7 @@ public class TaskStateRepository {
             this.duplicateOfTaskId = duplicateOfTaskId;
             this.bookOptions = bookOptions;
             this.probePayload = probePayload;
+            this.recoveryPayload = recoveryPayload;
             this.createdAt = createdAt;
             this.startedAt = startedAt;
             this.completedAt = completedAt;

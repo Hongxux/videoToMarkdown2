@@ -301,7 +301,13 @@ public class TaskProcessingWorker {
             String userMessage = UserFacingErrorMapper.toUserMessage(rawError);
             TaskTransitionResult failure = taskQueueManager.failTask(task.taskId, rawError);
             if (failure.isApplied()) {
-                webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, userMessage, null);
+                TaskEntry refreshedTask = taskQueueManager.getTask(task.taskId);
+                if (refreshedTask != null) {
+                    webSocketHandler.broadcastTaskUpdate(refreshedTask);
+                } else {
+                    String status = failure.currentStatus != null ? failure.currentStatus.name() : "FAILED";
+                    webSocketHandler.broadcastTaskUpdate(task.taskId, status, task.progress, userMessage, null);
+                }
             } else if (failure.currentStatus == TaskQueueManager.TaskStatus.CANCELLED) {
                 finalizeCancelled(task, "任务已取消");
             } else {
@@ -642,6 +648,7 @@ public class TaskProcessingWorker {
         }
         VideoProcessingOrchestrator.IOPhaseResult ioResult =
                 executeVideoDownloadPhaseWithPermit(task.taskId, task.videoUrl, outputDir);
+        syncRecoveredOutputDirAfterDownload(task, ioResult);
         syncRecoveredTitleAfterDownload(task, ioResult);
         ioResult = executeVideoTranscribePhaseWithPermit(task.taskId, ioResult);
         ioResult = orchestrator.processVideoStage1Phase(task.taskId, ioResult);
@@ -656,6 +663,28 @@ public class TaskProcessingWorker {
             return;
         }
         syncRecoveredTaskTitle(task, ioResult.downloadResult.videoTitle);
+    }
+
+    private void syncRecoveredOutputDirAfterDownload(
+            TaskEntry task,
+            VideoProcessingOrchestrator.IOPhaseResult ioResult
+    ) {
+        if (task == null || ioResult == null || taskQueueManager == null) {
+            return;
+        }
+        String resolvedOutputDir = firstNonBlank(ioResult.outputDir, ioResult.metricsOutputDir);
+        if (resolvedOutputDir == null || resolvedOutputDir.isBlank()) {
+            return;
+        }
+        TaskEntry currentTask = taskQueueManager.getTask(task.taskId);
+        if (currentTask == null) {
+            return;
+        }
+        String currentOutputDir = firstNonBlank(currentTask.outputDir, "");
+        if (resolvedOutputDir.equals(currentOutputDir)) {
+            return;
+        }
+        taskQueueManager.updateTaskOutputDir(task.taskId, resolvedOutputDir);
     }
 
     private void syncRecoveredTaskTitle(TaskEntry task, String recoveredTitle) {

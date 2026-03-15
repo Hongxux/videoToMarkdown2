@@ -3,6 +3,7 @@ package com.mvp.module2.fusion.websocket;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.service.CollectionRepository;
+import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,22 +18,16 @@ import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.NavigableMap;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class TaskWebSocketHandler extends TextWebSocketHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(TaskWebSocketHandler.class);
     private static final long CLIENT_HEARTBEAT_TIMEOUT_MS = 35_000L;
-    private static final long USER_INBOX_TTL_MS = 30L * 60L * 1000L;
-    private static final int USER_INBOX_MAX_MESSAGES = 2_048;
 
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> userSessions =
             new ConcurrentHashMap<>();
@@ -44,13 +39,15 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> taskCollectionCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, SessionRuntimeState> sessionStates = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, UserMessageInbox> userMessageInboxes = new ConcurrentHashMap<>();
 
     @Autowired
     private TaskQueueManager taskQueueManager;
 
     @Autowired(required = false)
     private CollectionRepository collectionRepository;
+
+    @Autowired(required = false)
+    private TaskStatusPresentationService taskStatusPresentationService = new TaskStatusPresentationService();
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -59,14 +56,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         String userId = getUserIdFromSession(session);
         String streamKey = getTextQueryParam(session, "streamKey");
         userSessions.computeIfAbsent(userId, key -> new ConcurrentHashMap<>()).put(session.getId(), session);
-        SessionRuntimeState runtimeState = new SessionRuntimeState(session, userId, streamKey);
-        sessionStates.put(session.getId(), runtimeState);
-        long lastReceivedMessageId = getLongQueryParam(session, "lastReceivedMessageId");
-        if (lastReceivedMessageId > 0) {
-            replayUserInboxAfter(runtimeState, lastReceivedMessageId);
-        } else {
-            pruneUserInbox(userId);
-        }
+        sessionStates.put(session.getId(), new SessionRuntimeState(session, userId, streamKey));
         logger.info("WebSocket connected: user={}, session={}", userId, session.getId());
     }
 
@@ -117,9 +107,6 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
                     break;
                 case "unsubscribePhase2b":
                     handleUnsubscribePhase2b(session, payload);
-                    break;
-                case "ack":
-                    handleAck(session, payload);
                     break;
                 case "ping":
                     handlePing(session, payload);
@@ -191,7 +178,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         boolean cancelled = taskQueueManager.cancelTask(taskId);
-        sendReliablePayloadToSessions(Collections.singletonList(session), Map.of(
+        sendPayloadToSessions(List.of(session), Map.of(
                 "type", "cancelResult",
                 "taskId", taskId,
                 "success", cancelled
@@ -247,7 +234,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         payload.put("done", done);
         payload.put("success", success);
         payload.put("updatedAt", System.currentTimeMillis());
-        sendReliablePayloadToSessions(subscribers.values(), payload);
+        sendPayloadToSessions(subscribers.values(), payload);
     }
 
     public void broadcastPhase2bMarkdownChunk(
@@ -273,7 +260,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         payload.put("chunkIndex", Math.max(0, chunkIndex));
         payload.put("done", done);
         payload.put("updatedAt", System.currentTimeMillis());
-        sendReliablePayloadToSessions(subscribers.values(), payload);
+        sendPayloadToSessions(subscribers.values(), payload);
     }
 
     public void broadcastPhase2bMarkdownFinal(
@@ -298,12 +285,12 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         payload.put("chunkIndex", Math.max(0, finalChunkIndex));
         payload.put("done", true);
         payload.put("updatedAt", System.currentTimeMillis());
-        sendReliablePayloadToSessions(subscribers.values(), payload);
+        sendPayloadToSessions(subscribers.values(), payload);
     }
 
     public void broadcastTaskUpdate(TaskQueueManager.TaskEntry task) {
         String collectionId = resolveCollectionId(task.taskId);
-        sendReliablePayloadToSessions(
+        sendPayloadToSessions(
                 collectSessions(taskSubscribers.get(task.taskId), collectionSubscribers.get(collectionId), userSessions.get(task.userId)),
                 buildTaskUpdatePayload(
                         task.taskId,
@@ -335,7 +322,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
 
         TaskQueueManager.TaskEntry ownerTask = taskQueueManager.getTask(normalizedTaskId);
         String userId = ownerTask != null ? ownerTask.userId : "";
-        sendReliablePayloadToSessions(
+        sendPayloadToSessions(
                 collectSessions(taskSubscribers.get(normalizedTaskId), collectionSubscribers.get(collectionId), userSessions.get(userId)),
                 update
         );
@@ -355,7 +342,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         if (!collectionId.isEmpty()) {
             payload.put("collectionId", collectionId);
         }
-        sendReliablePayloadToSessions(
+        sendPayloadToSessions(
                 collectSessions(taskSubscribers.get(normalizedTaskId), collectionSubscribers.get(collectionId), userSessions.get(userId)),
                 payload
         );
@@ -379,7 +366,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         payload.put("normalizedVideoKey", normalizeText(normalizedVideoKey));
         payload.put("reason", normalizeText(reason));
         payload.put("updatedAt", System.currentTimeMillis());
-        sendReliablePayloadToSessions(collectSessions(userSessions.get(userId)), payload);
+        sendPayloadToSessions(collectSessions(userSessions.get(userId)), payload);
     }
 
     public void broadcastTaskMetaSync(
@@ -401,15 +388,15 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         payload.put("anchorId", normalizeText(anchorId));
         payload.put("updatedAt", System.currentTimeMillis());
 
-        sendReliablePayloadToSessions(
+        sendPayloadToSessions(
                 collectSessions(taskSubscribers.get(normalizedTaskId), userSessions.get(userId)),
                 payload
         );
     }
 
     private void sendTaskUpdate(WebSocketSession session, TaskQueueManager.TaskEntry task, String collectionId) {
-        sendReliablePayloadToSessions(
-                Collections.singletonList(session),
+        sendPayloadToSessions(
+                List.of(session),
                 buildTaskUpdatePayload(
                         task.taskId,
                         task.status.name(),
@@ -441,6 +428,11 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         payload.put("message", message != null ? message : "");
         payload.put("resultPath", resultPath != null ? resultPath : "");
         payload.put("errorMessage", errorMessage != null ? errorMessage : "");
+        taskStatusPresentationService.appendRecoveryFields(
+                payload,
+                status,
+                task != null ? task.recoveryPayload : null
+        );
         if (task != null) {
             String title = normalizeText(task.title);
             String videoUrl = normalizeText(task.videoUrl);
@@ -533,43 +525,22 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         return value.trim();
     }
 
-    private void handleAck(WebSocketSession session, Map<String, Object> payload) {
-        long messageId = readLong(payload.get("messageId"));
-        if (messageId <= 0) {
-            return;
-        }
-        acknowledgeSessionMessages(session.getId(), messageId);
-    }
-
     private void handlePing(WebSocketSession session, Map<String, Object> payload) {
         long now = System.currentTimeMillis();
         SessionRuntimeState runtimeState = sessionStates.get(session.getId());
         if (runtimeState != null) {
             runtimeState.markPing(now);
         }
-        long lastReceivedMessageId = readLong(payload.get("lastReceivedMessageId"));
-        if (lastReceivedMessageId > 0) {
-            acknowledgeSessionMessages(session.getId(), lastReceivedMessageId);
-        }
         Map<String, Object> pong = new LinkedHashMap<>();
         pong.put("type", "pong");
         pong.put("serverTime", now);
         pong.put("clientTime", readLong(payload.get("clientTime")));
-        pong.put("lastAckedMessageId", runtimeState != null ? runtimeState.lastAckedMessageId : 0L);
         sendRawMessage(session, pong);
     }
 
-    private void acknowledgeSessionMessages(String sessionId, long messageId) {
-        SessionRuntimeState runtimeState = sessionStates.get(sessionId);
-        if (runtimeState == null || messageId <= 0) {
-            return;
-        }
-        runtimeState.acknowledge(messageId);
-    }
-
-    private void sendReliablePayloadToSessions(
+    private void sendPayloadToSessions(
             Iterable<WebSocketSession> candidateSessions,
-            Map<String, Object> basePayload
+            Map<String, Object> payload
     ) {
         LinkedHashMap<String, WebSocketSession> deduplicated = new LinkedHashMap<>();
         for (WebSocketSession session : candidateSessions) {
@@ -578,70 +549,8 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             }
             deduplicated.putIfAbsent(session.getId(), session);
         }
-        if (deduplicated.isEmpty()) {
-            return;
-        }
-        LinkedHashMap<String, List<WebSocketSession>> sessionsByUser = new LinkedHashMap<>();
         for (WebSocketSession session : deduplicated.values()) {
-            if (!session.isOpen()) {
-                continue;
-            }
-            String userId = getUserIdForSession(session);
-            sessionsByUser.computeIfAbsent(userId, key -> new ArrayList<>()).add(session);
-        }
-        for (Map.Entry<String, List<WebSocketSession>> entry : sessionsByUser.entrySet()) {
-            Map<String, Object> envelope = buildReliableEnvelope(entry.getKey(), basePayload);
-            long messageId = readLong(envelope.get("messageId"));
-            for (WebSocketSession session : entry.getValue()) {
-                SessionRuntimeState runtimeState = sessionStates.get(session.getId());
-                if (runtimeState != null && messageId > 0) {
-                    runtimeState.trackPending(messageId);
-                }
-                sendRawMessage(session, envelope);
-            }
-        }
-    }
-
-    private Map<String, Object> buildReliableEnvelope(String userId, Map<String, Object> basePayload) {
-        UserMessageInbox inbox = userMessageInboxes.computeIfAbsent(userId, key -> new UserMessageInbox());
-        long now = System.currentTimeMillis();
-        long messageId = inbox.nextMessageId.incrementAndGet();
-        Map<String, Object> envelope = new LinkedHashMap<>(basePayload);
-        envelope.put("messageId", messageId);
-        envelope.put("requiresAck", true);
-        envelope.put("sentAt", now);
-        inbox.messages.put(messageId, new StoredEnvelope(now, new LinkedHashMap<>(envelope)));
-        pruneUserInbox(userId);
-        return envelope;
-    }
-
-    private void replayUserInboxAfter(SessionRuntimeState runtimeState, long lastReceivedMessageId) {
-        if (runtimeState == null || lastReceivedMessageId < 0) {
-            return;
-        }
-        pruneUserInbox(runtimeState.userId);
-        UserMessageInbox inbox = userMessageInboxes.get(runtimeState.userId);
-        if (inbox == null || inbox.messages.isEmpty()) {
-            return;
-        }
-        NavigableMap<Long, StoredEnvelope> tail = inbox.messages.tailMap(lastReceivedMessageId, false);
-        if (tail.isEmpty()) {
-            return;
-        }
-        int replayed = 0;
-        for (Map.Entry<Long, StoredEnvelope> entry : new ArrayList<>(tail.entrySet())) {
-            runtimeState.trackPending(entry.getKey());
-            sendRawMessage(runtimeState.session, entry.getValue().payload);
-            replayed += 1;
-        }
-        if (replayed > 0) {
-            logger.info(
-                    "Replayed {} reliable websocket messages: user={}, session={}, lastReceivedMessageId={}",
-                    replayed,
-                    runtimeState.userId,
-                    runtimeState.session.getId(),
-                    lastReceivedMessageId
-            );
+            sendRawMessage(session, payload);
         }
     }
 
@@ -676,18 +585,6 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         return sessions;
     }
 
-    private String getUserIdForSession(WebSocketSession session) {
-        SessionRuntimeState runtimeState = sessionStates.get(session.getId());
-        if (runtimeState != null && !runtimeState.userId.isEmpty()) {
-            return runtimeState.userId;
-        }
-        return getUserIdFromSession(session);
-    }
-
-    private long getLongQueryParam(WebSocketSession session, String key) {
-        return readLong(getTextQueryParam(session, key));
-    }
-
     private String getTextQueryParam(WebSocketSession session, String key) {
         if (session.getUri() == null || session.getUri().getQuery() == null) {
             return "";
@@ -718,30 +615,6 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    private void pruneUserInbox(String userId) {
-        String normalizedUserId = normalizeText(userId);
-        if (normalizedUserId.isEmpty()) {
-            return;
-        }
-        UserMessageInbox inbox = userMessageInboxes.get(normalizedUserId);
-        if (inbox == null) {
-            return;
-        }
-        long expireBefore = System.currentTimeMillis() - USER_INBOX_TTL_MS;
-        while (true) {
-            Map.Entry<Long, StoredEnvelope> firstEntry = inbox.messages.firstEntry();
-            if (firstEntry == null) {
-                return;
-            }
-            boolean expired = firstEntry.getValue().createdAt < expireBefore;
-            boolean overflow = inbox.messages.size() > USER_INBOX_MAX_MESSAGES;
-            if (!expired && !overflow) {
-                return;
-            }
-            inbox.messages.remove(firstEntry.getKey(), firstEntry.getValue());
-        }
-    }
-
     @Scheduled(fixedDelay = 5000L)
     public void reapHalfOpenSessions() {
         long now = System.currentTimeMillis();
@@ -761,9 +634,6 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
                     runtimeState.lastClientPingAt
             );
             closeSessionSilently(runtimeState.session, new CloseStatus(4008, "heartbeat timeout"));
-        }
-        for (String userId : new ArrayList<>(userMessageInboxes.keySet())) {
-            pruneUserInbox(userId);
         }
     }
 
@@ -791,31 +661,14 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         return total;
     }
 
-    private static final class UserMessageInbox {
-        private final AtomicLong nextMessageId = new AtomicLong(0L);
-        private final ConcurrentSkipListMap<Long, StoredEnvelope> messages = new ConcurrentSkipListMap<>();
-    }
-
-    private static final class StoredEnvelope {
-        private final long createdAt;
-        private final Map<String, Object> payload;
-
-        private StoredEnvelope(long createdAt, Map<String, Object> payload) {
-            this.createdAt = createdAt;
-            this.payload = payload;
-        }
-    }
-
     private static final class SessionRuntimeState {
         private final WebSocketSession session;
         private final String userId;
         private final String streamKey;
         private final boolean heartbeatEnabled;
-        private final ConcurrentSkipListMap<Long, Boolean> pendingMessageIds = new ConcurrentSkipListMap<>();
         private final long connectedAt;
         private volatile long lastClientMessageAt;
         private volatile long lastClientPingAt;
-        private volatile long lastAckedMessageId;
 
         private SessionRuntimeState(WebSocketSession session, String userId, String streamKey) {
             long now = System.currentTimeMillis();
@@ -826,7 +679,6 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             this.connectedAt = now;
             this.lastClientMessageAt = now;
             this.lastClientPingAt = now;
-            this.lastAckedMessageId = 0L;
         }
 
         private void markClientActivity(long now) {
@@ -836,23 +688,6 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         private void markPing(long now) {
             this.lastClientMessageAt = now;
             this.lastClientPingAt = now;
-        }
-
-        private void trackPending(long messageId) {
-            if (messageId <= 0) {
-                return;
-            }
-            pendingMessageIds.put(messageId, Boolean.TRUE);
-        }
-
-        private void acknowledge(long messageId) {
-            if (messageId <= 0) {
-                return;
-            }
-            if (messageId > lastAckedMessageId) {
-                lastAckedMessageId = messageId;
-            }
-            pendingMessageIds.headMap(messageId, true).clear();
         }
     }
 }

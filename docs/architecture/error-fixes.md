@@ -1,5 +1,119 @@
 ﻿# 错误修正记录
 
+## 2026-03-15 run_server.ps1 自动拉起 Redis 时命中 PowerShell `$Host` 只读变量
+- Date:
+  - 2026-03-15
+- Symptom:
+  - 执行 `run_server.ps1` 时，Redis 容器已经成功启动，但脚本在等待 Redis 就绪阶段直接报错：
+    - `无法覆盖变量 Host，因为该变量为只读变量或常量。`
+  - 结果是 Python 服务根本不会真正启动，自动拉起 Redis 的能力变成“起到一半就中断”。
+- Root cause:
+  - `run_server.ps1` 的 `Test-TcpEndpoint` 函数使用了参数名 `$Host`。
+  - PowerShell 内置自动变量 `$Host` 是只读对象，函数参数绑定阶段尝试覆盖时会直接抛 `SessionStateUnauthorizedAccessException`。
+- Fix:
+  - 将 `Test-TcpEndpoint` 的参数从 `$Host` 改为 `$HostName`。
+  - 同步把 `Wait-RedisReady` 里的调用点改为 `-HostName`，避免再次命中自动变量冲突。
+- Verification:
+  - `run_server.ps1` 语法解析通过。
+  - `docker compose up -d redis`
+  - `docker inspect --format "name={{.Name}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}" v2m-redis`
+- Prevention:
+  - PowerShell 脚本中禁止新增会覆盖自动变量的参数名，例如 `$Host`、`$PID`、`$Error`、`$Input`。
+  - 启动脚本新增辅助函数时，优先使用领域化命名，如 `$HostName`、`$TargetPort`、`$RedisUrl`，避免与 shell 保留变量冲突。
+- Files:
+  - `run_server.ps1`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-15 Java 控制面忽略恢复阻塞态，worker 会把人工重试任务误报成 FAILED
+- Date:
+  - 2026-03-15
+- Symptom:
+  - Python 已经把 `MANUAL_RETRY_REQUIRED / FATAL` 与 `required_action / retry_entry_point` 写进 `stage_state.json`，但 Java 控制面重启后仍只会把活跃任务统一回退成 `QUEUED` 或普通 `FAILED`。
+  - `TaskProcessingWorker` 在 `failTask(...)` 之后仍固定广播 `"FAILED"`，导致前端明明应该显示“人工修复后重试”，却只看到模糊失败。
+  - `/api/mobile/tasks`、`/api/mobile/tasks/{taskId}`、`/api/tasks/{taskId}` 之前也没有统一透出恢复字段，人工无法直接知道该修什么、从哪里继续。
+- Root cause:
+  - 控制面只持久化了任务级快照，没有把 Python 侧阶段恢复指令投影为 Java 一等状态。
+  - `TaskQueueManager` 状态机缺少显式 `MANUAL_RETRY_REQUIRED/FATAL/RETRY` 转移，worker 和 controller 只能退化成 `FAILED` 语义。
+  - 任务列表与详情接口是手工投影 `Map`，没有同步纳入 `recoveryPayload` 和 blocked 分类字段。
+- Fix:
+  - 新增 `TaskRuntimeRecoveryService`，读取 `intermediates/rt/s/*/stage_state.json`，把最新阻塞指令映射为控制面恢复指令。
+  - `task_runtime_state` 新增 `recovery_payload_json`，`TaskQueueManager` 新增 `MANUAL_RETRY_REQUIRED`、`FATAL`、`RETRY`，恢复和失败路径都优先消费 recovery directive。
+  - `TaskProcessingWorker` 改为广播 `TaskQueueManager` 最终状态，不再硬编码 `"FAILED"`。
+  - `MobileMarkdownController`、`VideoProcessingController` 增加 `POST /tasks/{taskId}/retry`，并在任务列表/详情中透出 `blocked / recoveryStage / recoveryCheckpoint / retryMode / requiredAction / retryEntryPoint / retryStrategy / operatorAction / actionHint`。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests test-compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=TaskQueueManagerStateMachineTest,TaskProcessingWorkerRecoveryStatusTest,MobileMarkdownControllerRecoveryStatusTest" surefire:test -q`
+- Prevention:
+  - Python 侧新增的恢复字段必须同步落到 Java 控制面状态机和任务查询接口，禁止只在执行面可见。
+  - 任何阻塞态都必须有显式 retry 入口，禁止靠手工改库或重新提交整单恢复。
+  - worker 对外广播必须来自状态机最终值，禁止局部业务代码手写状态字符串。
+  - HTTP 与 WebSocket 的 `blocked/statusCategory/recovery*` 输出必须统一复用共享 presenter/classifier，禁止在 controller 或 handler 内复制粘贴字段拼装逻辑。
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskRuntimeRecoveryService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/DatabaseInitializer.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/queue/TaskQueueManagerStateMachineTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerRecoveryStatusTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerRecoveryStatusTest.java`
+  - `docs/architecture/overview.md`
+  - `docs/architecture/upgrade-log.md`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-15 阶段状态双写导致语义漂移，人工重试只有分类没有操作指令
+- Date:
+  - 2026-03-15
+- Symptom:
+  - 阶段级运行态在 `grpc_service_impl.py` 外层和 `markdown_enhancer.py` / `vl_material_generator.py` 内层同时写入，`phase2a/phase2b` 的 `stage_state.json` 可能被后写者覆盖，checkpoint 与完成度语义不稳定。
+  - `MANUAL_RETRY_REQUIRED` 虽然能写出来，但状态文件里没有“人工应该做什么、从哪里继续”的明确指令，排障时还要再翻业务日志和错误栈。
+  - `AnalyzeWithVL` 只有 watchdog，没有进入统一的 `stage_state.json` 协议，导致 VL 分支恢复信息不完整。
+- Root cause:
+  - 阶段运行态本质上是横切关注点，但此前直接嵌在业务函数和内层 pipeline 里，形成了：
+    - soft-state 字典；
+    - heartbeat 线程；
+    - runtime checkpoint 落盘；
+    - 阶段级 `update_stage_state(...)`
+    四类逻辑的重复复制。
+  - 错误分类只输出 `AUTO_RETRY_WAIT / MANUAL_RETRY_REQUIRED / FATAL`，没有进一步落成可执行的人工操作提示。
+- Fix:
+  - 在 `services/python_grpc/src/server/runtime_stage_state.py` 新增 `RuntimeStageSession`：
+    - 统一承载 snapshot、soft/hard heartbeat、runtime checkpoint；
+    - 提供 `mark / mark_from_event / mark_failed` 三个统一入口；
+    - 支持 emitter 延迟绑定，避免 watchdog 初始化失败时丢失 runtime checkpoint。
+  - `grpc_service_impl.py` 主干阶段改为通过 `RuntimeStageSession` 写运行态：
+    - `DownloadVideo`
+    - `TranscribeVideo`
+    - `ProcessStage1`
+    - `AnalyzeSemanticUnits`
+    - `AssembleRichText`
+    - `AnalyzeWithVL`
+  - 删除内层模块对 `phase2a/phase2b` 的直接阶段写入，只保留 chunk / LLM call 级恢复落盘。
+  - 失败状态补充人工可执行字段：
+    - `retry_mode`
+    - `required_action`
+    - `retry_entry_point`
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/runtime_stage_state.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py tests/test_grpc_runtime_stage_state.py`
+  - `pytest tests/test_grpc_runtime_stage_state.py -q`
+  - `pytest tests/test_runtime_recovery_store.py tests/test_grpc_runtime_stage_state.py -q`
+- Prevention:
+  - 阶段级状态 ownership 只允许保留在 gRPC 阶段入口，内层模块禁止直接写 `phase2a/phase2b` 的 `stage_state.json`。
+  - 新阶段接入恢复协议时，优先复用 `RuntimeStageSession`，禁止再次在业务函数里复制线程、锁和三连写模板。
+  - `MANUAL_RETRY_REQUIRED` 之后必须同时给出 `required_action` 和 `retry_entry_point`，避免状态标签成为“只可读、不可执行”的半成品。
+- Files:
+  - `services/python_grpc/src/server/runtime_stage_state.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `tests/test_grpc_runtime_stage_state.py`
+  - `docs/architecture/overview.md`
+  - `docs/architecture/upgrade-log.md`
+  - `docs/architecture/error-fixes.md`
+
 ## 2026-03-14 URL submit path could return success before durable accept and could double-probe
 - Date:
   - 2026-03-14
@@ -10305,3 +10419,52 @@
   - 以后设计实时链路时，先区分快照模型和事件模型，不能默认所有 WebSocket 消息都需要历史重放。
   - 以后凡是普通任务状态面板，只要已经有数据库真相源与 REST 对账链路，就优先采用“快照 + 重连 + 对账”模型。
   - 只有当用户语义明确依赖“中间事件不可丢失、顺序不可乱”时，才引入 ACK/offset/补发队列。
+
+## 2026-03-15 AnalyzeWithVL 运行态未纳入统一阶段状态机
+- 现象
+  - `AnalyzeWithVL` 虽然会写 watchdog heartbeat，但没有完全纳入 `RuntimeStageSession`，阶段快照仍靠本地 `dict + lock` 手工维护。
+  - 结果是 `analysis_extraction` 阶段的恢复语义和其他主干阶段不一致，人工重试提示也无法自然下沉到同一套运行态字段。
+- 根因
+  - 前期优先补了 `Download/Transcribe/Stage1/Phase2A/Phase2B` 的阶段状态，VL 分支因为存在预算型 hard heartbeat 循环，被保留成了“半接入”状态。
+  - `DownloadVideo` 的异常分支也遗留了一处直接调用 `_record_runtime_stage_checkpoint(...)` 的旁路，没有完全收口到横切层。
+- 修复
+  - `AnalyzeWithVL` 的 `_update_vl_heartbeat_state / _emit_vl_heartbeat` 现在统一改为基于 `RuntimeStageSession.snapshot()/mark(...)` 驱动，不再单独维护阶段状态字典。
+  - `DownloadVideo` 异常分支改为 `RuntimeStageSession.mark_failed(...)`，清除业务层最后一处直接写 `stage_state.json` 的旁路。
+  - `classify_runtime_error(...)` 同步补齐 `retry_strategy / operator_action / action_hint`，让 chunk/LLM/stage 三层运行态都能表达更细的自动重试与人工修复动作。
+- 预防
+  - 以后凡是新增阶段级 heartbeat 或 checkpoint，都必须先落到 `RuntimeStageSession`，禁止在业务方法里新建一套 `dict + lock + emit + checkpoint` 模板。
+  - 以后凡是错误分类能力扩展，都要同时检查：
+    - `stage_state.json`
+    - `chunk_state.json`
+    - `llm manifest/error.json`
+    确保三层语义一致，而不是只修其中一层。
+## 2026-03-15 Java phase2b streamed provider failures could hard-fail without retry or fallback
+- Date:
+  - 2026-03-15
+- Symptom:
+  - Logs showed `phase2b structured markdown failed: err=DeepSeek phase2b stream call failed: closed`.
+  - `POST /api/mobile/cards/phase2b/structured-markdown` could return HTTP 500 immediately when the upstream streamed provider connection was closed mid-call.
+  - Even when a fallback provider was available in the wider system, the Java phase2b chain did not use it.
+- Root cause:
+  - The Java phase2b main path used `requestPhase2bStructuredMarkdownStreamed(...)`, but the old retry helper only covered the non-streamed structured advisor path.
+  - `MobileCardController` hardcoded the response source as `deepseek.phase2b`, so even a future provider fallback would have been invisible to callers.
+  - Provider policy was effectively missing at the Java phase2b boundary: no retry budget, no jittered backoff, no Qwen degradation path.
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - Added phase2b provider retries with `3` retries, exponential backoff, and jitter.
+    - Added Qwen fallback using the same OpenAI-compatible `chat/completions` protocol and Python-aligned env naming (`MODULE2_DEEPSEEK_QWEN_FALLBACK_*`, `DASHSCOPE_API_KEY`).
+    - Added buffered recovery after partial streamed output so later retries do not replay duplicate websocket chunks.
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - Return `source/provider/degraded` from the actual provider result instead of hardcoding `deepseek.phase2b`.
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests test-compile -q`
+- Prevention:
+  - Any new Java-side LLM streamed chain must define provider retry and degradation policy at the provider boundary before wiring controller or websocket behavior.
+  - Streamed retries must distinguish between `before first delta` and `after first delta`; after partial emission, retries should switch to buffered recovery or another explicit reset protocol.
+  - HTTP response payloads must report the real provider/source used whenever automatic degradation is possible.
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - `docs/architecture/upgrade-log.md`
+  - `docs/architecture/error-fixes.md`

@@ -18,6 +18,29 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def _fsync_parent_dir(path: str) -> None:
+    """尽力同步父目录元数据，降低断电后原子替换丢失风险。"""
+    parent_dir = os.path.dirname(os.path.abspath(path))
+    if not parent_dir:
+        return
+    try:
+        dir_flags = getattr(os, "O_RDONLY", 0)
+        if hasattr(os, "O_BINARY"):
+            dir_flags |= getattr(os, "O_BINARY", 0)
+        dir_fd = os.open(parent_dir, dir_flags)
+    except Exception:
+        return
+    try:
+        os.fsync(dir_fd)
+    except Exception:
+        pass
+    finally:
+        try:
+            os.close(dir_fd)
+        except Exception:
+            pass
+
+
 def _write_json_atomic(
     path: str,
     payload: Any,
@@ -33,7 +56,10 @@ def _write_json_atomic(
     tmp_path = f"{target_path}.tmp.{os.getpid()}.{time.time_ns()}"
     with open(tmp_path, "w", encoding="utf-8") as output_stream:
         json.dump(payload, output_stream, ensure_ascii=ensure_ascii, indent=indent, default=str)
+        output_stream.flush()
+        os.fsync(output_stream.fileno())
     os.replace(tmp_path, target_path)
+    _fsync_parent_dir(target_path)
 
 
 def _write_text_atomic(path: str, content: str) -> None:
@@ -45,7 +71,10 @@ def _write_text_atomic(path: str, content: str) -> None:
     tmp_path = f"{target_path}.tmp.{os.getpid()}.{time.time_ns()}"
     with open(tmp_path, "w", encoding="utf-8") as output_stream:
         output_stream.write(content)
+        output_stream.flush()
+        os.fsync(output_stream.fileno())
     os.replace(tmp_path, target_path)
+    _fsync_parent_dir(target_path)
 
 
 def _json_writer_worker(task_queue: "mp.Queue", ack_queue: "mp.Queue") -> None:

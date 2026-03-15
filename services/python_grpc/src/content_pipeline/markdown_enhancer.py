@@ -16,6 +16,7 @@ import logging
 import re
 import yaml
 import time
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple, Set
 from dataclasses import dataclass, field
@@ -31,6 +32,10 @@ from services.python_grpc.src.common.utils.patch_protocol import (
     collect_patch_ops,
     normalize_replace_add_patch_item,
     pick_full_text_fallback,
+)
+from services.python_grpc.src.common.utils.runtime_recovery_store import (
+    RuntimeRecoveryStore,
+    build_llm_input_fingerprint,
 )
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 from services.python_grpc.src.config_paths import resolve_video_config_path
@@ -403,6 +408,7 @@ class MarkdownEnhancer:
         # Obsidian 嵌入路径基准目录（默认使用输出 Markdown 所在目录）
         self._markdown_dir = None
         self._result_dir = None
+        self._runtime_store: Optional[RuntimeRecoveryStore] = None
         # 🚀 调用合并开关：默认开启，失败时自动回退到两次调用
         raw = (os.getenv("MODULE2_MARKDOWN_ENHANCER_COMBINE_CALLS", "1") or "").strip().lower()
         self._combine_llm_calls = raw in ("1", "true", "yes", "y", "on")
@@ -696,12 +702,146 @@ class MarkdownEnhancer:
         self._llm_trace_file_path = str(trace_path)
         logger.info(f"LLM trace enabled: {self._llm_trace_file_path} (level={self._llm_trace_level})")
 
+    def _prepare_runtime_store(self) -> None:
+        """初始化 Phase2B 运行态恢复存储。"""
+        if not self._result_dir:
+            self._runtime_store = None
+            return
+        try:
+            self._runtime_store = RuntimeRecoveryStore(
+                output_dir=self._result_dir,
+                task_id=Path(self._result_dir).name,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to prepare runtime recovery store: {exc}")
+            self._runtime_store = None
+
     @staticmethod
     def _build_text_preview(text: str, max_chars: int = 500) -> str:
         value = str(text or "")
         if len(value) <= max_chars:
             return value
         return value[:max_chars] + "...<truncated>"
+
+    @staticmethod
+    def _build_runtime_chunk_id(unit_id: str) -> str:
+        normalized = re.sub(r"[^0-9A-Za-z._-]+", "_", str(unit_id or "GLOBAL").strip())
+        normalized = normalized.strip("._") or "GLOBAL"
+        return f"unit_{normalized}"
+
+    @staticmethod
+    def _metadata_to_runtime_payload(metadata: Optional[Any]) -> Dict[str, Any]:
+        if metadata is None:
+            return {}
+        return {
+            "model": str(getattr(metadata, "model", "") or ""),
+            "prompt_tokens": getattr(metadata, "prompt_tokens", None),
+            "completion_tokens": getattr(metadata, "completion_tokens", None),
+            "total_tokens": getattr(metadata, "total_tokens", None),
+            "cache_hit": bool(getattr(metadata, "cache_hit", False)),
+        }
+
+    async def _execute_recoverable_llm_call(
+        self,
+        *,
+        step_name: str,
+        unit_id: str,
+        system_prompt: str,
+        user_prompt: str,
+        call_factory,
+        model_name: str = "",
+        trace_on_reuse: bool = True,
+    ) -> Tuple[str, Any, bool]:
+        """执行支持本地提交恢复的单次 LLM 调用。"""
+        runtime_store = self._runtime_store
+        normalized_model = str(model_name or getattr(self._llm_client, "model", "") or self._structured_text_model or "").strip()
+        input_fingerprint = build_llm_input_fingerprint(
+            step_name=step_name,
+            unit_id=unit_id,
+            model=normalized_model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        chunk_id = self._build_runtime_chunk_id(unit_id)
+        llm_call_id = ""
+        if runtime_store is not None:
+            llm_call_id = runtime_store.build_llm_call_id(
+                step_name=step_name,
+                unit_id=unit_id,
+                input_fingerprint=input_fingerprint,
+            )
+            restored = runtime_store.load_committed_llm_response(
+                stage="phase2b",
+                chunk_id=chunk_id,
+                llm_call_id=llm_call_id,
+                input_fingerprint=input_fingerprint,
+            )
+            if restored is not None:
+                cache_meta = SimpleNamespace(
+                    model=normalized_model,
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    total_tokens=None,
+                    cache_hit=True,
+                )
+                if trace_on_reuse:
+                    await self._write_llm_trace_record(
+                        step_name=step_name,
+                        unit_id=unit_id,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        response_text=str(restored.get("response_text", "") or ""),
+                        duration_ms=0.0,
+                        success=True,
+                        metadata=cache_meta,
+                    )
+                return str(restored.get("response_text", "") or ""), cache_meta, True
+
+        handle = None
+        request_payload = {
+            "schema_version": "phase2b_llm_request_v1",
+            "step_name": step_name,
+            "unit_id": unit_id,
+            "model": normalized_model,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "input_fingerprint": input_fingerprint,
+        }
+        if runtime_store is not None and llm_call_id:
+            handle = runtime_store.begin_llm_attempt(
+                stage="phase2b",
+                chunk_id=chunk_id,
+                llm_call_id=llm_call_id,
+                input_fingerprint=input_fingerprint,
+                request_payload=request_payload,
+                metadata={
+                    "step_name": step_name,
+                    "unit_id": unit_id,
+                    "model": normalized_model,
+                },
+            )
+
+        try:
+            content, meta, _ = await call_factory()
+            if runtime_store is not None and handle is not None:
+                runtime_store.commit_llm_attempt(
+                    handle=handle,
+                    response_text=str(content or ""),
+                    response_metadata=self._metadata_to_runtime_payload(meta),
+                    max_part_bytes=max(
+                        4096,
+                        int(os.getenv("PHASE2B_RUNTIME_LLM_PART_MAX_BYTES", "262144") or "262144"),
+                    ),
+                )
+            return content, meta, False
+        except Exception as exc:
+            if runtime_store is not None and handle is not None:
+                runtime_store.fail_llm_attempt(
+                    handle=handle,
+                    error=exc,
+                    request_snapshot=request_payload,
+                )
+            raise
 
     async def _write_llm_trace_record(
         self,
@@ -1083,6 +1223,7 @@ class MarkdownEnhancer:
         self._markdown_dir = os.path.abspath(markdown_dir) if markdown_dir else None
         self._result_dir = str(Path(result_json_path).resolve().parent)
         self._prepare_llm_trace_output()
+        self._prepare_runtime_store()
         concrete_canonical_by_unit = self._load_concrete_canonical_by_unit(self._result_dir)
         if concrete_canonical_by_unit:
             try:
@@ -1408,9 +1549,16 @@ class MarkdownEnhancer:
         prompt = self._hierarchy_prompt_template.format(subject=subject, titles=titles)
         start_ts = time.perf_counter()
         try:
-            # 🚀 使用 LLMClient 进行异步调用
-            content, meta, _ = await self._llm_client.complete_text(
-                prompt=prompt
+            # 🚀 使用可恢复 LLM 调用，优先复用已提交结果。
+            content, meta, _ = await self._execute_recoverable_llm_call(
+                step_name="hierarchy_classification",
+                unit_id="GLOBAL",
+                system_prompt="",
+                user_prompt=prompt,
+                model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
+                call_factory=lambda: self._llm_client.complete_text(
+                    prompt=prompt
+                ),
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -2561,9 +2709,16 @@ class MarkdownEnhancer:
 
         start_ts = time.perf_counter()
         try:
-            content, meta, _ = await self._llm_client.complete_text(
-                prompt=prompt,
-                system_message=self._img_desc_augment_system_prompt,
+            content, meta, _ = await self._execute_recoverable_llm_call(
+                step_name="img_desc_augment",
+                unit_id=str(section.unit_id),
+                system_prompt=self._img_desc_augment_system_prompt,
+                user_prompt=prompt,
+                model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
+                call_factory=lambda: self._llm_client.complete_text(
+                    prompt=prompt,
+                    system_message=self._img_desc_augment_system_prompt,
+                ),
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -3462,10 +3617,17 @@ class MarkdownEnhancer:
 
         start_ts = time.perf_counter()
         try:
-            content, meta, _ = await self._complete_text_with_model_fallback(
-                prompt=prompt,
-                system_message=structured_system_prompt,
-                model=self._structured_text_model,
+            content, meta, _ = await self._execute_recoverable_llm_call(
+                step_name="structured_text_preserve_media",
+                unit_id=str(section.unit_id),
+                system_prompt=structured_system_prompt,
+                user_prompt=prompt,
+                model_name=self._structured_text_model,
+                call_factory=lambda: self._complete_text_with_model_fallback(
+                    prompt=prompt,
+                    system_message=structured_system_prompt,
+                    model=self._structured_text_model,
+                ),
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -3584,10 +3746,17 @@ class MarkdownEnhancer:
 
         start_ts = time.perf_counter()
         try:
-            content, meta, _ = await self._complete_text_with_model_fallback(
-                prompt=prompt,
-                system_message=structured_system_prompt,
-                model=self._structured_text_model,
+            content, meta, _ = await self._execute_recoverable_llm_call(
+                step_name="structured_text",
+                unit_id=str(section.unit_id),
+                system_prompt=structured_system_prompt,
+                user_prompt=prompt,
+                model_name=self._structured_text_model,
+                call_factory=lambda: self._complete_text_with_model_fallback(
+                    prompt=prompt,
+                    system_message=structured_system_prompt,
+                    model=self._structured_text_model,
+                ),
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -3911,8 +4080,16 @@ class MarkdownEnhancer:
         )
         
         try:
-            content, _, _ = await self._llm_client.complete_text(
-                prompt=prompt
+            content, _, _ = await self._execute_recoverable_llm_call(
+                step_name="text_enhance",
+                unit_id=str(section.unit_id),
+                system_prompt="",
+                user_prompt=prompt,
+                model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
+                call_factory=lambda: self._llm_client.complete_text(
+                    prompt=prompt
+                ),
+                trace_on_reuse=False,
             )
             return self._strip_header_title(content.strip(), section.title)
             
@@ -3965,8 +4142,16 @@ class MarkdownEnhancer:
         )
         
         try:
-            content, _, _ = await self._llm_client.complete_text(
-                prompt=prompt
+            content, _, _ = await self._execute_recoverable_llm_call(
+                step_name="logic_extract",
+                unit_id=str(section.unit_id),
+                system_prompt="",
+                user_prompt=prompt,
+                model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
+                call_factory=lambda: self._llm_client.complete_text(
+                    prompt=prompt
+                ),
+                trace_on_reuse=False,
             )
             
             return content.strip()
