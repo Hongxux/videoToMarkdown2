@@ -12677,3 +12677,32 @@ body` and task metadata is still present.
     - healthy websocket session: from `~2.4` REST reconciliations/minute to `~0.33`/minute
     - recovery/disconnected websocket session: unchanged at `~2.4`/minute
     - fully terminal task set: `0` automatic reconciliations/minute
+
+## 2026-03-15: Java advisory and structured DeepSeek calls moved onto the shared LLM gateway
+- Background:
+  - After the first extraction, only `phase2b` used the new Java `LlmGateway`; the older advisory paths still kept their own transport/retry entry points inside `DeepSeekAdvisorService`.
+  - That left the Java LLM layer half-unified: one strategy path for `phase2b`, another path for `requestAdvice` / `requestStructuredAdvice` / `requestStructuredAdviceBatch`.
+- Reusable leverage:
+  - Reuse the already extracted `LlmGateway`, `OpenAiCompatibleLlmClient`, `LlmRetryPolicy`, and `LlmProviderConfig`.
+  - Reuse the existing business parsing in `DeepSeekAdvisorService` so only transport/strategy changes, not prompt assembly or result parsing.
+- Changes:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - `requestAdvice(...)` now uses the shared `LlmGateway` for text completion.
+    - `requestStructuredAdvice(...)` and `requestStructuredAdviceBatch(...)` now use the shared `LlmGateway` for JSON-style completion while preserving the existing `finish_reason=length -> max_tokens bump -> retry` business rule.
+    - Preserve existing business-facing exception semantics by surfacing the deepest provider cause/message instead of leaking gateway-level wrapper text.
+    - Keep fallback disabled for the older advisory/structured calls by default; only `phase2b` currently enables provider degradation.
+- Call-chain change:
+  - Old: `DeepSeekAdvisorService advisory methods -> direct DeepSeek transport/retry helper`
+  - New: `DeepSeekAdvisorService advisory methods -> prompt/result mapping -> shared LlmGateway -> shared OpenAiCompatibleLlmClient`
+- Decisions:
+  - Decision 1: unify transport and retry first, but do not automatically enable fallback for all legacy advisory calls.
+    - Reason: this keeps existing business behavior stable while still eliminating duplicated transport/retry code.
+  - Decision 2: keep `finish_reason=length` handling in `DeepSeekAdvisorService` instead of the gateway.
+    - Reason: token-length expansion is a business/use-case concern, not a generic provider strategy.
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=DeepSeekAdvisorServiceRetryTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=LlmGatewayTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Performance notes:
+  - No dedicated latency benchmark was run for these advisory call migrations.
+  - The main gain is structural: later Java LLM use cases can now reuse one transport/strategy layer instead of extending `DeepSeekAdvisorService` with another bespoke HTTP path.

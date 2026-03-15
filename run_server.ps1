@@ -32,7 +32,7 @@ if (-not $SkipRedis -and -not (Test-Path $RedisComposeFilePath)) {
     throw "Redis compose file not found: $RedisComposeFilePath"
 }
 
-# 固定禁用 user-site，避免本地启动时用户目录包污染运行时依赖解析。
+# 固定启动环境隔离，避免本地运行时被 user-site 包污染依赖解析。
 $env:PYTHONNOUSERSITE = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
