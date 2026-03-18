@@ -14,7 +14,6 @@ import os
 import cv2
 import json
 import asyncio
-import hashlib
 import fnmatch
 import logging
 import time
@@ -26,8 +25,11 @@ from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 import httpx
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
+from services.python_grpc.src.content_pipeline.infra.llm.token_costing import normalize_usage_payload
 
 logger = logging.getLogger(__name__)
+
+_INTERNAL_RESPONSE_METADATA_KEY = "__llm_response_metadata"
 
 
 def _supports_http2_transport() -> bool:
@@ -581,6 +583,17 @@ class VisionAIBackgroundLoop:
 _VISION_BG_LOOP = VisionAIBackgroundLoop()
 
 
+def ensure_sync_bridge_not_in_running_loop(api_name: str) -> None:
+    """在协程上下文中禁止走同步 bridge，避免阻塞事件循环。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(
+        f"{api_name} cannot be called inside a running event loop; use the async variant instead."
+    )
+
+
 @dataclass
 class VisionAIConfig:
     """类说明：VisionAIConfig 负责封装本模块相关能力。
@@ -1099,6 +1112,40 @@ class VisionAIClient:
 
         return [{"error": "invalid_batch_response", "should_include": True} for _ in range(expected_count)]
 
+    def _build_response_metadata(
+        self,
+        *,
+        data: Dict[str, Any],
+        latency_ms: float,
+        image_count: int,
+        request_mode: str,
+    ) -> Dict[str, Any]:
+        usage_payload = normalize_usage_payload((data or {}).get("usage"))
+        return {
+            "model": str((data or {}).get("model") or self.config.model or ""),
+            "prompt_tokens": int(usage_payload.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage_payload.get("completion_tokens", 0) or 0),
+            "total_tokens": int(usage_payload.get("total_tokens", 0) or 0),
+            "latency_ms": float(latency_ms or 0.0),
+            "cache_hit": False,
+            "usage_details": usage_payload,
+            "request_mode": str(request_mode or ""),
+            "image_count": max(1, int(image_count or 1)),
+        }
+
+    def _attach_response_metadata(self, payload: Any, metadata: Dict[str, Any]) -> Any:
+        if isinstance(payload, list):
+            return [self._attach_response_metadata(item, metadata) for item in payload]
+        if isinstance(payload, dict):
+            enriched = dict(payload)
+            enriched[_INTERNAL_RESPONSE_METADATA_KEY] = dict(metadata or {})
+            return enriched
+        return {
+            "raw_response": str(payload),
+            "should_include": True,
+            _INTERNAL_RESPONSE_METADATA_KEY: dict(metadata or {}),
+        }
+
     async def validate_images_batch(
         self,
         image_paths: List[str],
@@ -1281,7 +1328,14 @@ class VisionAIClient:
                 data = response.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 parsed = self._parse_vision_content(content)
-                return self._normalize_batch_result(parsed, len(image_paths))
+                metadata = self._build_response_metadata(
+                    data=data,
+                    latency_ms=http_ms,
+                    image_count=len(image_paths),
+                    request_mode="batch",
+                )
+                normalized = self._normalize_batch_result(parsed, len(image_paths))
+                return self._attach_response_metadata(normalized, metadata)
 
             if response.status_code == 429:
                 await self._concurrency_limiter.record_failure(is_rate_limit=True)
@@ -1382,10 +1436,19 @@ class VisionAIClient:
                 data = response.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 parsed = self._parse_vision_content(content)
+                metadata = self._build_response_metadata(
+                    data=data,
+                    latency_ms=http_ms,
+                    image_count=1,
+                    request_mode="single",
+                )
                 if isinstance(parsed, dict):
-                    return parsed
+                    return self._attach_response_metadata(parsed, metadata)
                 # 非 dict 返回降级为 raw，保证兼容原单图接口
-                return {"raw_response": str(parsed), "should_include": True}
+                return self._attach_response_metadata(
+                    {"raw_response": str(parsed), "should_include": True},
+                    metadata,
+                )
             
             elif response.status_code == 429:
                 await self._concurrency_limiter.record_failure(is_rate_limit=True)
@@ -1450,6 +1513,7 @@ class VisionAIClient:
         """
         作用：在同步上下文中复用后台事件循环执行异步 Vision 调用。
         """
+        ensure_sync_bridge_not_in_running_loop("VisionAIClient.validate_image_sync")
         return _VISION_BG_LOOP.submit(
             self.validate_image(
                 image_path,
@@ -1470,6 +1534,7 @@ class VisionAIClient:
         timeout: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """在同步上下文中调用批量 Vision 校验。"""
+        ensure_sync_bridge_not_in_running_loop("VisionAIClient.validate_images_batch_sync")
         return _VISION_BG_LOOP.submit(
             self.validate_images_batch(
                 image_paths=image_paths,

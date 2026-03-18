@@ -130,6 +130,7 @@ public class DatabaseInitializer {
                             status TEXT NOT NULL,
                             progress REAL NOT NULL DEFAULT 0,
                             status_message TEXT,
+                            user_message TEXT,
                             result_path TEXT,
                             cleanup_source_path TEXT,
                             error_message TEXT,
@@ -143,6 +144,26 @@ public class DatabaseInitializer {
                             updated_at TEXT NOT NULL
                         )
                         """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS task_cleanup_queue (
+                            task_id TEXT PRIMARY KEY,
+                            storage_key TEXT NOT NULL,
+                            task_root TEXT NOT NULL,
+                            task_type TEXT NOT NULL,
+                            task_status TEXT NOT NULL,
+                            policy_version TEXT NOT NULL,
+                            ttl_millis INTEGER NOT NULL,
+                            completed_at_ms INTEGER NOT NULL,
+                            cleanup_after_ms INTEGER NOT NULL,
+                            updated_at_ms INTEGER NOT NULL,
+                            last_error TEXT
+                        )
+                        """);
+                try {
+                    statement.execute("ALTER TABLE task_runtime_state ADD COLUMN user_message TEXT");
+                } catch (Exception ignored) {
+                    // 骞傜瓑杩佺Щ锛氭棫搴撳凡瀛樺湪 user_message 鏃剁洿鎺ヨ烦杩囥€?
+                }
                 try {
                     statement.execute("ALTER TABLE task_runtime_state ADD COLUMN normalized_video_key TEXT");
                 } catch (Exception ignored) {
@@ -161,6 +182,8 @@ public class DatabaseInitializer {
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_status ON task_runtime_state(status)");
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_user_id ON task_runtime_state(user_id)");
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_video_key ON task_runtime_state(normalized_video_key)");
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_task_cleanup_queue_due ON task_cleanup_queue(cleanup_after_ms)");
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_task_cleanup_queue_storage_key ON task_cleanup_queue(storage_key)");
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_task_terminal_events_user_event ON task_terminal_events(user_id, event_id)");
                 logger.info("collection schema initialized");
             }

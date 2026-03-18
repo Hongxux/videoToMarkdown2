@@ -2,14 +2,18 @@ package com.mvp.module2.fusion.queue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
+import com.mvp.module2.fusion.service.TaskRuntimeStageStore;
 import com.mvp.module2.fusion.service.TaskStateRepository;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -111,7 +115,12 @@ class TaskQueueManagerStateMachineTest {
         );
 
         TaskQueueManager queueManager = newQueueManager();
-        injectField(queueManager, "taskRuntimeRecoveryService", new TaskRuntimeRecoveryService(new ObjectMapper()));
+        ObjectMapper objectMapper = new ObjectMapper();
+        injectField(
+                queueManager,
+                "taskRuntimeRecoveryService",
+                new TaskRuntimeRecoveryService(objectMapper, new TaskRuntimeStageStore(objectMapper))
+        );
         TaskQueueManager.TaskEntry task = queueManager.submitTask(
                 "u_state_machine_manual_retry",
                 "https://example.com/state-machine-manual-retry",
@@ -152,6 +161,122 @@ class TaskQueueManagerStateMachineTest {
         assertEquals(TaskQueueManager.TaskStatus.PROBING, rePolled.status);
     }
 
+
+    @Test
+    void resolveBlockingDirectiveShouldUseRuntimeStateDbWhenStageFilesMissing() throws Exception {
+        Path taskRoot = Files.createTempDirectory("queue-manager-runtime-db-blocking");
+        ObjectMapper objectMapper = new ObjectMapper();
+        TaskRuntimeStageStore store = new TaskRuntimeStageStore(objectMapper);
+        TaskRuntimeRecoveryService recoveryService = new TaskRuntimeRecoveryService(objectMapper, store);
+
+        store.writeStageState(
+                taskRoot.toString(),
+                "task-runtime-db-blocking",
+                "phase2b",
+                "MANUAL_RETRY_REQUIRED",
+                "llm_call_commit_pending",
+                3,
+                1,
+                Map.of(
+                        "stage_owner", "python",
+                        "retry_mode", "manual",
+                        "required_action", "repair llm quota and retry",
+                        "retry_entry_point", "phase2b/chunk-42",
+                        "updated_at_ms", 1773500003210L
+                )
+        );
+
+        Files.deleteIfExists(taskRoot.resolve("intermediates").resolve("rt").resolve("resume_index.json"));
+        deleteTree(taskRoot.resolve("intermediates").resolve("rt").resolve("stage"));
+
+        Optional<TaskRuntimeRecoveryService.RecoveryDirective> directiveOpt =
+                recoveryService.resolveBlockingDirective("https://example.com/runtime-db-blocking", taskRoot.toString(), null);
+
+        assertTrue(directiveOpt.isPresent());
+        TaskRuntimeRecoveryService.RecoveryDirective directive = directiveOpt.orElseThrow();
+        assertEquals("phase2b", directive.stage());
+        assertEquals("MANUAL_RETRY_REQUIRED", directive.stageStatus());
+        assertEquals("llm_call_commit_pending", directive.checkpoint());
+        assertEquals("manual", directive.retryMode());
+        assertEquals("repair llm quota and retry", directive.requiredAction());
+        assertEquals("phase2b/chunk-42", directive.retryEntryPoint());
+        assertFalse(Files.exists(taskRoot.resolve("intermediates").resolve("rt").resolve("stage")));
+        assertTrue(Files.isRegularFile(taskRoot.resolve("intermediates").resolve("rt").resolve("runtime_state.db")));
+    }
+
+    @Test
+    void resolveResumeDecisionShouldUseRuntimeStateDbWhenOnlyDbRemains() throws Exception {
+        Path taskRoot = Files.createTempDirectory("queue-manager-runtime-db-resume");
+        ObjectMapper objectMapper = new ObjectMapper();
+        TaskRuntimeStageStore store = new TaskRuntimeStageStore(objectMapper);
+        TaskRuntimeRecoveryService recoveryService = new TaskRuntimeRecoveryService(objectMapper, store);
+
+        store.writeStageState(
+                taskRoot.toString(),
+                "task-runtime-db-resume",
+                "download",
+                "COMPLETED",
+                "download_finished",
+                1,
+                0,
+                Map.of("stage_owner", "python", "updated_at_ms", 1773500001000L)
+        );
+        store.writeStageState(
+                taskRoot.toString(),
+                "task-runtime-db-resume",
+                "transcribe",
+                "COMPLETED",
+                "transcribe_finished",
+                2,
+                0,
+                Map.of("stage_owner", "python", "updated_at_ms", 1773500002000L)
+        );
+        store.writeStageState(
+                taskRoot.toString(),
+                "task-runtime-db-resume",
+                "stage1",
+                "COMPLETED",
+                "stage1_finished",
+                6,
+                0,
+                Map.of("stage_owner", "python", "updated_at_ms", 1773500003000L)
+        );
+        store.writeStageState(
+                taskRoot.toString(),
+                "task-runtime-db-resume",
+                "phase2a",
+                "EXECUTING",
+                "phase2a_running",
+                2,
+                1,
+                Map.of(
+                        "stage_owner", "python",
+                        "updated_at_ms", 1773500004000L,
+                        "unit_count", 3
+                )
+        );
+
+        Files.deleteIfExists(taskRoot.resolve("intermediates").resolve("rt").resolve("resume_index.json"));
+        deleteTree(taskRoot.resolve("intermediates").resolve("rt").resolve("stage"));
+
+        Optional<TaskRuntimeRecoveryService.ResumeDecision> decisionOpt =
+                recoveryService.resolveResumeDecision("https://example.com/runtime-db-resume", taskRoot.toString(), null);
+
+        assertTrue(decisionOpt.isPresent());
+        TaskRuntimeRecoveryService.ResumeDecision decision = decisionOpt.orElseThrow();
+        assertEquals("phase2a", decision.resumeFromStage());
+        assertEquals("python", decision.stageOwner());
+        assertEquals("anchor_stage_incomplete", decision.reason());
+        assertNotNull(decision.latestStageSnapshot());
+        assertEquals("phase2a", decision.latestStageSnapshot().stage());
+        assertEquals("EXECUTING", decision.latestStageSnapshot().status());
+        assertEquals("phase2a_running", decision.latestStageSnapshot().checkpoint());
+        assertEquals(2L, decision.findLong("completed"));
+
+        assertNotNull(decision.stageSnapshot("phase2a"));
+        assertEquals("python", decision.stageSnapshot("phase2a").stageOwner());
+        assertFalse(Files.exists(taskRoot.resolve("intermediates").resolve("rt").resolve("stage")));
+    }
     private static TaskQueueManager newQueueManager() throws Exception {
         TaskQueueManager queueManager = new TaskQueueManager();
         TaskStateRepository repository = mock(TaskStateRepository.class);
@@ -205,6 +330,21 @@ class TaskQueueManagerStateMachineTest {
         return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
+
+    private static void deleteTree(Path root) throws IOException {
+        if (root == null || !Files.exists(root)) {
+            return;
+        }
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException error) {
+                    throw new IllegalStateException("delete tree failed: " + path, error);
+                }
+            });
+        }
+    }
     private static void injectField(Object target, String fieldName, Object value) throws Exception {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);

@@ -14,10 +14,11 @@ import os
 import subprocess
 import math
 import tempfile
+from dataclasses import dataclass
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from faster_whisper import WhisperModel
 import json
 import sys
+from typing import Any, Callable, Dict, List, Optional
 
 from services.python_grpc.src.common.utils.numbers import safe_int, safe_float
 from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
@@ -25,9 +26,32 @@ from services.python_grpc.src.common.utils.time import format_hhmmss
 from services.python_grpc.src.common.utils.video import get_video_duration as _get_video_duration
 from .language_normalizer import normalize_whisper_language
 
+# 先锁定底层 BLAS/OpenMP 线程，避免 spawn 子进程在导入数值库时发生线程放大与额外内存申请。
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+
+from faster_whisper import WhisperModel
+
 # 启用 HuggingFace 下载进度条
 os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '0'
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
+
+try:
+    from concurrent.futures.process import BrokenProcessPool
+except Exception:  # pragma: no cover - 不同 Python 版本兼容兜底
+    BrokenProcessPool = None
+
+
+@dataclass(frozen=True)
+class TranscriptionSegmentRuntimeHooks:
+    restore_committed_segments: Optional[Callable[[List[Dict[str, Any]], int], Dict[int, Dict[str, Any]]]] = None
+    plan_pending_segments: Optional[Callable[[List[Dict[str, Any]], int], None]] = None
+    mark_segment_running: Optional[Callable[[Dict[str, Any], int], None]] = None
+    commit_segment: Optional[Callable[[Dict[str, Any], int, Dict[str, Any]], None]] = None
+    fail_segment: Optional[Callable[[Dict[str, Any], int, Exception], None]] = None
 
 
 def _notify_progress(progress_callback, event):
@@ -42,6 +66,7 @@ def _notify_progress(progress_callback, event):
 _RESOURCE_EXHAUSTION_MARKERS = (
     "mkl_malloc",
     "failed to allocate memory",
+    "memory allocation still failed",
     "cannot allocate memory",
     "out of memory",
     "insufficient memory",
@@ -49,6 +74,13 @@ _RESOURCE_EXHAUSTION_MARKERS = (
     "bad allocation",
     "memoryerror",
     "resource exhausted",
+)
+
+_PROCESS_POOL_CRASH_MARKERS = (
+    "brokenprocesspool",
+    "process pool was terminated abruptly",
+    "terminated abruptly while the future was running or pending",
+    "a child process terminated abruptly",
 )
 
 
@@ -63,12 +95,32 @@ def _is_resource_exhaustion_error(error):
     return any(marker in message for marker in _RESOURCE_EXHAUSTION_MARKERS)
 
 
+def _is_process_pool_crash_error(error):
+    if error is None:
+        return False
+    if BrokenProcessPool is not None and isinstance(error, BrokenProcessPool):
+        return True
+    message = str(error).strip().lower()
+    if not message:
+        return False
+    return any(marker in message for marker in _PROCESS_POOL_CRASH_MARKERS)
+
+
 def _build_failed_segment_result(segment_id, error):
     return {
         "segment_id": segment_id,
-        "error": str(error),
+        "error": _format_error_message(error),
         "success": False,
     }
+
+
+def _format_error_message(error):
+    if error is None:
+        return ""
+    message = str(error).strip()
+    if message:
+        return message
+    return error.__class__.__name__
 
 
 def _next_lower_worker_count(current_workers, pending_tasks_args):
@@ -78,19 +130,120 @@ def _next_lower_worker_count(current_workers, pending_tasks_args):
     return max(1, min(pending_count, current_workers - 1))
 
 
-def _execute_parallel_batch(tasks_args, max_workers):
-    batch_results = []
-    with _build_process_pool_executor(max_workers=max_workers) as executor:
-        futures = {executor.submit(transcribe_segment, args): args for args in tasks_args}
-        for future in as_completed(futures):
-            task_args = futures[future]
+def _iter_parallel_batch_results(tasks_args, max_workers):
+    yielded_segment_ids = set()
+    futures = {}
+    try:
+        with _build_process_pool_executor(max_workers=max_workers) as executor:
+            for task_args in tasks_args:
+                segment = task_args[1]
+                try:
+                    futures[executor.submit(transcribe_segment, task_args)] = task_args
+                except Exception as exc:
+                    yielded_segment_ids.add(safe_int(segment.get("id", 0), 0))
+                    yield task_args, _build_failed_segment_result(segment["id"], exc)
+            for future in as_completed(futures):
+                task_args = futures[future]
+                segment = task_args[1]
+                yielded_segment_ids.add(safe_int(segment.get("id", 0), 0))
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = _build_failed_segment_result(segment["id"], exc)
+                yield task_args, result
+    except Exception as exc:
+        for task_args in tasks_args:
             segment = task_args[1]
-            try:
-                result = future.result()
-            except Exception as exc:
-                result = _build_failed_segment_result(segment["id"], exc)
-            batch_results.append((task_args, result))
-    return batch_results
+            segment_id = safe_int(segment.get("id", 0), 0)
+            if segment_id in yielded_segment_ids:
+                continue
+            yield task_args, _build_failed_segment_result(segment_id, exc)
+
+
+def _restore_runtime_segments(segment_runtime_hooks, segments):
+    if (
+        segment_runtime_hooks is None
+        or segment_runtime_hooks.restore_committed_segments is None
+        or not segments
+    ):
+        return {}
+    try:
+        restored = segment_runtime_hooks.restore_committed_segments(
+            [dict(segment) for segment in list(segments or []) if isinstance(segment, dict)],
+            len(list(segments or [])),
+        )
+    except Exception as runtime_error:
+        print(f"[并行转录] 恢复已提交分段失败: {runtime_error}", flush=True)
+        return {}
+    if not isinstance(restored, dict):
+        return {}
+    normalized = {}
+    for raw_segment_id, payload in restored.items():
+        if not isinstance(payload, dict):
+            continue
+        subtitles = payload.get("subtitles")
+        if not isinstance(subtitles, list):
+            continue
+        try:
+            segment_id = int(raw_segment_id)
+        except Exception:
+            continue
+        normalized[segment_id] = dict(payload)
+    return normalized
+
+
+def _plan_runtime_segments(segment_runtime_hooks, segments, total_segments):
+    if (
+        segment_runtime_hooks is None
+        or segment_runtime_hooks.plan_pending_segments is None
+        or not segments
+    ):
+        return
+    try:
+        segment_runtime_hooks.plan_pending_segments(
+            [dict(segment) for segment in list(segments or []) if isinstance(segment, dict)],
+            int(total_segments or 0),
+        )
+    except Exception as runtime_error:
+        print(f"[并行转录] 记录待转录分段状态失败: {runtime_error}", flush=True)
+
+
+def _mark_runtime_segment_running(segment_runtime_hooks, segment, total_segments):
+    if segment_runtime_hooks is None or segment_runtime_hooks.mark_segment_running is None:
+        return
+    try:
+        segment_runtime_hooks.mark_segment_running(
+            dict(segment),
+            int(total_segments or 0),
+        )
+    except Exception as runtime_error:
+        print(f"[并行转录] 记录分段执行中状态失败: {runtime_error}", flush=True)
+
+
+def _commit_runtime_segment(segment_runtime_hooks, segment, total_segments, result_payload):
+    if segment_runtime_hooks is None or segment_runtime_hooks.commit_segment is None:
+        return
+    try:
+        segment_runtime_hooks.commit_segment(
+            dict(segment),
+            int(total_segments or 0),
+            dict(result_payload or {}),
+        )
+    except Exception as runtime_error:
+        print(f"[并行转录] 提交分段恢复快照失败: {runtime_error}", flush=True)
+
+
+def _fail_runtime_segment(segment_runtime_hooks, segment, total_segments, error):
+    if segment_runtime_hooks is None or segment_runtime_hooks.fail_segment is None:
+        return
+    try:
+        segment_runtime_hooks.fail_segment(
+            dict(segment),
+            int(total_segments or 0),
+            error,
+        )
+    except Exception as runtime_error:
+        print(f"[并行转录] 记录分段失败快照失败: {runtime_error}", flush=True)
 
 
 def _extract_full_audio(video_path, full_audio_path):
@@ -466,7 +619,7 @@ def transcribe_segment(args):
         
         return {
             'segment_id': segment['id'],
-            'error': str(e),
+            'error': _format_error_message(e),
             'success': False
         }
 
@@ -474,7 +627,8 @@ def transcribe_segment(args):
 def transcribe_parallel(video_path, model_size="small", device="cpu",
                        compute_type="int8", language="auto",
                        segment_duration=600, num_workers=3, hf_endpoint=None,
-                       config=None, progress_callback=None):
+                       config=None, progress_callback=None,
+                       segment_runtime_hooks=None):
     """
     执行逻辑：
     1) 准备必要上下文与参数。
@@ -576,6 +730,61 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     cpu_threads_per_worker = plan["cpu_threads_per_worker"]
 
     # 3.5 一次性提取整段音频，供所有分段复用。
+    restored_segment_payloads = _restore_runtime_segments(segment_runtime_hooks, segments)
+    total_segments = len(segments)
+    all_subtitles = []
+    completed = 0
+    pending_segments = []
+    restored_count = 0
+    for segment in segments:
+        segment_id = safe_int(isinstance(segment, dict) and segment.get("id", 0), 0)
+        restored_payload = restored_segment_payloads.get(segment_id)
+        restored_subtitles = restored_payload.get("subtitles") if isinstance(restored_payload, dict) else None
+        if isinstance(restored_subtitles, list):
+            all_subtitles.extend(restored_subtitles)
+            completed += 1
+            restored_count += 1
+            _notify_progress(
+                progress_callback,
+                {
+                    "stage": "transcribe",
+                    "status": "running",
+                    "checkpoint": f"transcribe_segment_{segment_id + 1}_restored",
+                    "signal_type": "hard",
+                    "completed": completed,
+                    "pending": max(0, total_segments - completed),
+                    "segment_id": segment_id,
+                    "segment_index": segment_id + 1,
+                    "total_segments": total_segments,
+                    "restored": True,
+                },
+            )
+            print(
+                f"[并行转录] ↺ 段 {segment_id + 1}/{total_segments} 已从 runtime recovery 恢复 "
+                f"({completed}/{total_segments})",
+                flush=True,
+            )
+            continue
+        pending_segments.append(segment)
+
+    if restored_count > 0:
+        print(
+            f"[并行转录] 已恢复 {restored_count}/{total_segments} 个分段，剩余 {len(pending_segments)} 个待转录",
+            flush=True,
+        )
+
+    _plan_runtime_segments(segment_runtime_hooks, pending_segments, total_segments)
+
+    if not pending_segments:
+        all_subtitles.sort(key=lambda x: x['start'])
+        subtitle_text = format_subtitles(all_subtitles)
+        print("[并行转录] 所有分段均已恢复，跳过音频切片与模型推理", flush=True)
+        print(f"[并行转录] 完成！共 {len(all_subtitles)} 条字幕", flush=True)
+        return subtitle_text
+
+    effective_workers = max(1, min(effective_workers, len(pending_segments)))
+    cpu_threads_per_worker = max(1, plan["cpu_budget"] // effective_workers)
+
     fd, full_audio_path = tempfile.mkstemp(prefix="whisper_full_audio_", suffix=".wav")
     os.close(fd)
     print(f"[并行转录] 开始一次性提取整段音频: {full_audio_path}", flush=True)
@@ -619,8 +828,6 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     )
 
     # 3. 执行并行转录
-    all_subtitles = []
-    completed = 0
     
     # CPU / GPU 统一使用 ProcessPoolExecutor（真正多进程并行）
     if device == "cpu":
@@ -642,7 +849,7 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
             beam_size,
             vad_filter,
         )
-        for seg in segments
+        for seg in pending_segments
     ]
 
     failed_tasks_args = []
@@ -652,12 +859,35 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
         while pending_tasks_args:
             batch_failed_tasks_args = []
             retryable_resource_tasks_args = []
-            batch_results = _execute_parallel_batch(
+            for task_args in pending_tasks_args:
+                _mark_runtime_segment_running(
+                    segment_runtime_hooks,
+                    task_args[1],
+                    total_segments,
+                )
+            for task_args, result in _iter_parallel_batch_results(
                 tasks_args=pending_tasks_args,
                 max_workers=current_workers,
-            )
-            for task_args, result in batch_results:
+            ):
+                segment = task_args[1]
                 if result['success']:
+                    _commit_runtime_segment(
+                        segment_runtime_hooks,
+                        segment,
+                        total_segments,
+                        {
+                            "segment_id": result['segment_id'],
+                            "segment_index": safe_int(segment.get("id", 0), 0) + 1,
+                            "total_segments": total_segments,
+                            "segment": {
+                                "id": safe_int(segment.get("id", 0), 0),
+                                "start": safe_float(segment.get("start", 0.0), 0.0),
+                                "end": safe_float(segment.get("end", 0.0), 0.0),
+                                "duration": safe_float(segment.get("duration", 0.0), 0.0),
+                            },
+                            "subtitles": list(result.get('subtitles', []) or []),
+                        },
+                    )
                     all_subtitles.extend(result['subtitles'])
                     completed += 1
                     _notify_progress(
@@ -666,19 +896,28 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
                             "stage": "transcribe",
                             "status": "running",
                             "checkpoint": f"transcribe_segment_{result['segment_id'] + 1}_completed",
+                            "signal_type": "hard",
                             "completed": completed,
-                            "pending": max(0, len(segments) - completed),
+                            "pending": max(0, total_segments - completed),
                             "segment_id": result['segment_id'],
                             "segment_index": result['segment_id'] + 1,
-                            "total_segments": len(segments),
+                            "total_segments": total_segments,
                         },
                     )
                     print(f"[并行转录] ✓ 段 {result['segment_id']+1}/{len(segments)} 完成 "
                           f"({completed}/{len(segments)})")
                 else:
                     batch_failed_tasks_args.append(task_args)
-                    if _is_resource_exhaustion_error(result.get("error")) and current_workers > 1:
+                    is_resource_exhaustion = _is_resource_exhaustion_error(result.get("error"))
+                    is_process_pool_crash = _is_process_pool_crash_error(result.get("error"))
+                    if (is_resource_exhaustion or is_process_pool_crash) and current_workers > 1:
                         retryable_resource_tasks_args.append(task_args)
+                    if is_process_pool_crash:
+                        print(
+                            f"[并行转录] ⚠ 段 {result['segment_id']+1} 命中进程池异常终止，"
+                            "疑似资源不足或底层线程库崩溃",
+                            flush=True,
+                        )
                     print(f"[并行转录] ✗ 段 {result['segment_id']+1} 失败: {result['error']}")
 
             if not batch_failed_tasks_args:
@@ -712,8 +951,30 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
             print(f"[并行转录] 进入串行补偿: {len(failed_tasks_args)} 段")
             for task_args in failed_tasks_args:
                 segment = task_args[1]
+                _mark_runtime_segment_running(
+                    segment_runtime_hooks,
+                    segment,
+                    total_segments,
+                )
                 fallback_result = transcribe_segment(task_args)
                 if fallback_result['success']:
+                    _commit_runtime_segment(
+                        segment_runtime_hooks,
+                        segment,
+                        total_segments,
+                        {
+                            "segment_id": safe_int(segment.get("id", 0), 0),
+                            "segment_index": safe_int(segment.get("id", 0), 0) + 1,
+                            "total_segments": total_segments,
+                            "segment": {
+                                "id": safe_int(segment.get("id", 0), 0),
+                                "start": safe_float(segment.get("start", 0.0), 0.0),
+                                "end": safe_float(segment.get("end", 0.0), 0.0),
+                                "duration": safe_float(segment.get("duration", 0.0), 0.0),
+                            },
+                            "subtitles": list(fallback_result.get("subtitles", []) or []),
+                        },
+                    )
                     all_subtitles.extend(fallback_result['subtitles'])
                     completed += 1
                     _notify_progress(
@@ -722,16 +983,23 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
                             "stage": "transcribe",
                             "status": "running",
                             "checkpoint": f"transcribe_segment_{segment['id'] + 1}_completed",
+                            "signal_type": "hard",
                             "completed": completed,
-                            "pending": max(0, len(segments) - completed),
+                            "pending": max(0, total_segments - completed),
                             "segment_id": segment['id'],
                             "segment_index": segment['id'] + 1,
-                            "total_segments": len(segments),
+                            "total_segments": total_segments,
                         },
                     )
                     print(f"[并行转录] ✓ 段 {segment['id']+1}/{len(segments)} 串行补偿完成 "
                           f"({completed}/{len(segments)})")
                 else:
+                    _fail_runtime_segment(
+                        segment_runtime_hooks,
+                        segment,
+                        total_segments,
+                        RuntimeError(str(fallback_result.get("error") or "serial-fallback-failed")),
+                    )
                     print(f"[并行转录] ✗ 段 {segment['id']+1}/{len(segments)} 串行补偿失败: {fallback_result['error']}")
     finally:
         if os.path.exists(full_audio_path):
@@ -743,8 +1011,8 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     if completed == 0:
         raise RuntimeError("并行转录失败：所有分段均未成功")
 
-    if completed < len(segments):
-        failed_count = len(segments) - completed
+    if completed < total_segments:
+        failed_count = total_segments - completed
         raise RuntimeError(f"并行转录失败：仍有 {failed_count}/{len(segments)} 个分段失败")
     
     # 4. 按时间排序

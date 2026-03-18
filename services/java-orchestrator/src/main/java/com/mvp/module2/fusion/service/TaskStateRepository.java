@@ -7,6 +7,8 @@ import com.mvp.module2.fusion.queue.TaskQueueManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,10 +25,12 @@ public class TaskStateRepository {
     private static final Logger logger = LoggerFactory.getLogger(TaskStateRepository.class);
 
     private final JdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate namedParameterJdbcTemplate;
     private final ObjectMapper objectMapper;
 
     public TaskStateRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
+        this.namedParameterJdbcTemplate = new NamedParameterJdbcTemplate(jdbcTemplate);
         this.objectMapper = objectMapper;
     }
 
@@ -44,7 +48,30 @@ public class TaskStateRepository {
             return;
         }
         String now = Instant.now().toString();
-        jdbcTemplate.update(
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("task_id", taskId)
+                .addValue("user_id", userId)
+                .addValue("video_url", videoUrl)
+                .addValue("normalized_video_key", nullable(task.normalizedVideoKey))
+                .addValue("title", nullable(task.title))
+                .addValue("output_dir", nullable(task.outputDir))
+                .addValue("priority", priority)
+                .addValue("status", status)
+                .addValue("progress", task.progress)
+                .addValue("status_message", nullable(task.statusMessage))
+                .addValue("user_message", nullable(task.userMessage))
+                .addValue("result_path", nullable(task.resultPath))
+                .addValue("cleanup_source_path", nullable(task.cleanupSourcePath))
+                .addValue("error_message", nullable(task.errorMessage))
+                .addValue("duplicate_of_task_id", nullable(task.duplicateOfTaskId))
+                .addValue("book_options_json", serializeBookOptions(task.bookOptions))
+                .addValue("probe_payload_json", serializeProbePayload(task.probePayload))
+                .addValue("recovery_payload_json", serializeRecoveryPayload(task.recoveryPayload))
+                .addValue("created_at", task.createdAt != null ? task.createdAt.toString() : now)
+                .addValue("started_at", task.startedAt != null ? task.startedAt.toString() : null)
+                .addValue("completed_at", task.completedAt != null ? task.completedAt.toString() : null)
+                .addValue("updated_at", now);
+        namedParameterJdbcTemplate.update(
                 """
                 INSERT INTO task_runtime_state (
                     task_id,
@@ -57,6 +84,7 @@ public class TaskStateRepository {
                     status,
                     progress,
                     status_message,
+                    user_message,
                     result_path,
                     cleanup_source_path,
                     error_message,
@@ -69,7 +97,30 @@ public class TaskStateRepository {
                     completed_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    :task_id,
+                    :user_id,
+                    :video_url,
+                    :normalized_video_key,
+                    :title,
+                    :output_dir,
+                    :priority,
+                    :status,
+                    :progress,
+                    :status_message,
+                    :user_message,
+                    :result_path,
+                    :cleanup_source_path,
+                    :error_message,
+                    :duplicate_of_task_id,
+                    :book_options_json,
+                    :probe_payload_json,
+                    :recovery_payload_json,
+                    :created_at,
+                    :started_at,
+                    :completed_at,
+                    :updated_at
+                )
                 ON CONFLICT(task_id) DO UPDATE SET
                     user_id = excluded.user_id,
                     video_url = excluded.video_url,
@@ -80,6 +131,7 @@ public class TaskStateRepository {
                     status = excluded.status,
                     progress = excluded.progress,
                     status_message = excluded.status_message,
+                    user_message = excluded.user_message,
                     result_path = excluded.result_path,
                     cleanup_source_path = excluded.cleanup_source_path,
                     error_message = excluded.error_message,
@@ -92,27 +144,7 @@ public class TaskStateRepository {
                     completed_at = excluded.completed_at,
                     updated_at = excluded.updated_at
                 """,
-                taskId,
-                userId,
-                videoUrl,
-                nullable(task.normalizedVideoKey),
-                nullable(task.title),
-                nullable(task.outputDir),
-                priority,
-                status,
-                task.progress,
-                nullable(task.statusMessage),
-                nullable(task.resultPath),
-                nullable(task.cleanupSourcePath),
-                nullable(task.errorMessage),
-                nullable(task.duplicateOfTaskId),
-                serializeBookOptions(task.bookOptions),
-                serializeProbePayload(task.probePayload),
-                serializeRecoveryPayload(task.recoveryPayload),
-                task.createdAt != null ? task.createdAt.toString() : now,
-                task.startedAt != null ? task.startedAt.toString() : null,
-                task.completedAt != null ? task.completedAt.toString() : null,
-                now
+                params
         );
     }
 
@@ -134,6 +166,7 @@ public class TaskStateRepository {
                     status,
                     progress,
                     status_message,
+                    user_message,
                     result_path,
                     cleanup_source_path,
                     error_message,
@@ -160,6 +193,7 @@ public class TaskStateRepository {
                         rs.getString("status"),
                         rs.getDouble("progress"),
                         rs.getString("status_message"),
+                        rs.getString("user_message"),
                         rs.getString("result_path"),
                         rs.getString("cleanup_source_path"),
                         rs.getString("error_message"),
@@ -194,6 +228,7 @@ public class TaskStateRepository {
                     status,
                     progress,
                     status_message,
+                    user_message,
                     result_path,
                     cleanup_source_path,
                     error_message,
@@ -219,6 +254,7 @@ public class TaskStateRepository {
                         rs.getString("status"),
                         rs.getDouble("progress"),
                         rs.getString("status_message"),
+                        rs.getString("user_message"),
                         rs.getString("result_path"),
                         rs.getString("cleanup_source_path"),
                         rs.getString("error_message"),
@@ -255,6 +291,7 @@ public class TaskStateRepository {
                     status,
                     progress,
                     status_message,
+                    user_message,
                     result_path,
                     cleanup_source_path,
                     error_message,
@@ -284,6 +321,7 @@ public class TaskStateRepository {
                         rs.getString("status"),
                         rs.getDouble("progress"),
                         rs.getString("status_message"),
+                        rs.getString("user_message"),
                         rs.getString("result_path"),
                         rs.getString("cleanup_source_path"),
                         rs.getString("error_message"),
@@ -484,6 +522,7 @@ public class TaskStateRepository {
         public final String status;
         public final double progress;
         public final String statusMessage;
+        public final String userMessage;
         public final String resultPath;
         public final String cleanupSourcePath;
         public final String errorMessage;
@@ -507,6 +546,7 @@ public class TaskStateRepository {
                 String status,
                 double progress,
                 String statusMessage,
+                String userMessage,
                 String resultPath,
                 String cleanupSourcePath,
                 String errorMessage,
@@ -529,6 +569,7 @@ public class TaskStateRepository {
             this.status = status;
             this.progress = progress;
             this.statusMessage = statusMessage;
+            this.userMessage = userMessage;
             this.resultPath = resultPath;
             this.cleanupSourcePath = cleanupSourcePath;
             this.errorMessage = errorMessage;
@@ -540,6 +581,10 @@ public class TaskStateRepository {
             this.startedAt = startedAt;
             this.completedAt = completedAt;
             this.updatedAt = updatedAt;
+        }
+
+        public String userMessage() {
+            return userMessage;
         }
     }
 }

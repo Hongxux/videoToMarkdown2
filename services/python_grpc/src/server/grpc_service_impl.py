@@ -224,7 +224,6 @@ _boot("[BOOT] import psutil")
 import psutil
 import traceback
 import time
-import hashlib
 import shutil
 import json
 import gzip
@@ -262,17 +261,69 @@ import video_processing_pb2
 import video_processing_pb2_grpc
 
 # 模块导入
-_boot("[BOOT] import services.python_grpc.src.transcript_pipeline.graph")
-from services.python_grpc.src.transcript_pipeline.graph import run_pipeline
+_boot("[BOOT] defer heavy transcript_pipeline imports until first use")
 from services.python_grpc.src.common.utils.async_disk_writer import (
     enqueue_json_write,
     enqueue_text_write,
     flush_async_json_writes,
 )
-from services.python_grpc.src.common.utils.runtime_recovery_store import RuntimeRecoveryStore
+from services.python_grpc.src.common.utils.hash_policy import (
+    fast_digest_text,
+    md5_text_compat,
+    sha256_bytes,
+)
+from services.python_grpc.src.common.utils.runtime_recovery_store import (
+    RuntimeRecoveryStore,
+    STATUS_ERROR,
+    STATUS_FAILED,
+    STATUS_MANUAL_NEEDED,
+    STATUS_PLANNED,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+    build_runtime_payload_fingerprint,
+    classify_runtime_error,
+    _derive_scope_failure_status,
+)
+from services.python_grpc.src.common.utils.runtime_llm_context import activate_runtime_llm_context
+from services.python_grpc.src.common.utils.stage_artifact_paths import (
+    phase2a_semantic_units_candidates as helper_phase2a_semantic_units_candidates,
+    phase2a_semantic_units_path as helper_phase2a_semantic_units_path,
+)
 from services.python_grpc.src.server.runtime_stage_state import (
     RuntimeStageSession,
     record_runtime_stage_checkpoint as persist_runtime_stage_checkpoint,
+)
+from services.python_grpc.src.server.download_runtime_repository import (
+    DOWNLOAD_REPOSITORY_SCHEMA_VERSION,
+    build_download_runtime_repository,
+    update_download_repository_views,
+)
+from services.python_grpc.src.server.phase2a_runtime_repository import (
+    PHASE2A_REPOSITORY_SCHEMA_VERSION,
+    build_phase2a_runtime_repository,
+    get_phase2a_repository_views,
+)
+from services.python_grpc.src.server.phase2b_runtime_repository import (
+    PHASE2B_REPOSITORY_SCHEMA_VERSION,
+    build_phase2b_runtime_repository,
+    get_phase2b_repository_views,
+    update_phase2b_repository_views,
+)
+from services.python_grpc.src.server.runtime_stage_repository import RuntimeStageRepositoryRegistry
+from services.python_grpc.src.server.stage1_runtime_repository import (
+    STAGE1_REPOSITORY_SCHEMA_VERSION,
+    apply_stage1_progress_event,
+    build_stage1_repository_from_projected_state,
+    build_stage1_runtime_repository,
+    get_stage1_repository_views,
+    mark_stage1_runtime_outputs_ready,
+)
+from services.python_grpc.src.server.transcribe_runtime_repository import (
+    TRANSCRIBE_REPOSITORY_SCHEMA_VERSION,
+    build_transcribe_repository_from_restored_rows,
+    build_transcribe_runtime_repository,
+    mark_transcribe_repository_completed,
+    upsert_transcribe_runtime_segment,
 )
 _boot("[BOOT] import services.python_grpc.src.media_engine.knowledge_engine.core.video")
 from services.python_grpc.src.media_engine.knowledge_engine.core.video import VideoProcessor
@@ -283,30 +334,7 @@ try:
     _safe_print(f"[BOOT] knowledge_engine package search path: {list(getattr(_knowledge_engine_pkg, '__path__', []))}")
 except Exception as _vtm_e:
     _safe_print(f"[BOOT] Failed to inspect knowledge_engine package path: {_vtm_e}")
-_boot("[BOOT] import services.python_grpc.src.content_pipeline")
-from services.python_grpc.src.content_pipeline import (
-    RichTextPipeline,
-    PipelineConfig,
-    ScreenshotRequest,
-    ClipRequest,
-    MaterialRequests,
-    SemanticUnitSegmenter
-)
-from services.python_grpc.src.content_pipeline.shared.semantic_payload import (
-    iter_semantic_unit_nodes as shared_iter_semantic_unit_nodes,
-    build_semantic_unit_index as shared_build_semantic_unit_index,
-    normalize_semantic_units_payload as shared_normalize_semantic_units_payload,
-    build_grouped_semantic_units_payload as shared_build_grouped_semantic_units_payload,
-)
-from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_extractor import (
-    VisualFeatureExtractor,
-    get_visual_process_pool,
-    get_shared_frame_registry,
-    SharedFrameRegistry,
-)
-# 🔑 Import tools for GenerateMaterialRequests
-from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
-from services.python_grpc.src.content_pipeline.infra.llm.llm_client import AdaptiveConcurrencyLimiter
+_boot("[BOOT] defer heavy content_pipeline imports until first use")
 from .douyin_download import (
     download_video_with_douyin_downloader as _download_video_with_douyin_downloader,
     probe_douyin_video_info as _probe_douyin_video_info,
@@ -321,7 +349,6 @@ from .platform_rules import (
     is_douyin_url as _is_douyin_url_from_rules,
 )
 from .share_link_resolver import resolve_share_link
-from .vl_report_writer import VLReportWriter
 from .watchdog_signal_writer import (
     TaskWatchdogSignalWriter,
     publish_watchdog_signal,
@@ -330,6 +357,277 @@ from .watchdog_signal_writer import (
 from .book_pdf_extractor import extract_book_pdf_markdown
 
 logger = logging.getLogger(__name__)
+
+_CONTENT_PIPELINE_RUNTIME = None
+_CONTENT_PIPELINE_RUNTIME_LOCK = threading.Lock()
+_VISUAL_RUNTIME = None
+_VISUAL_RUNTIME_LOCK = threading.Lock()
+_SCREENSHOT_SELECTOR_CLASS = None
+_SCREENSHOT_SELECTOR_LOCK = threading.Lock()
+_STAGE1_RUN_PIPELINE = None
+_STAGE1_RUN_PIPELINE_LOCK = threading.Lock()
+_STAGE1_PROJECTION_REPOSITORY_CLASS = None
+_STAGE1_PROJECTION_REPOSITORY_LOCK = threading.Lock()
+_SEMANTIC_PAYLOAD_RUNTIME = None
+_SEMANTIC_PAYLOAD_RUNTIME_LOCK = threading.Lock()
+_VL_REPORT_WRITER_CLASS = None
+_VL_REPORT_WRITER_CLASS_LOCK = threading.Lock()
+_TRANSCRIPT_STEP_INDEX_MAP = {
+    "step1_validate": 1,
+    "step2_correction": 2,
+    "step3_merge": 3,
+    "step3_5_translate": 4,
+    "step4_clean_local": 5,
+    "step5_clean_cross": 5,
+    "step6_merge_cross": 6,
+    "step5_6_dedup_merge": 6,
+}
+
+
+def _lazy_import_content_pipeline_runtime() -> Dict[str, Any]:
+    """按需导入 Module2 核心运行时，避免冷启动直接拉起整条内容增强链。"""
+    global _CONTENT_PIPELINE_RUNTIME
+    if _CONTENT_PIPELINE_RUNTIME is not None:
+        return _CONTENT_PIPELINE_RUNTIME
+    with _CONTENT_PIPELINE_RUNTIME_LOCK:
+        if _CONTENT_PIPELINE_RUNTIME is None:
+            started_at = time.perf_counter()
+            from services.python_grpc.src.content_pipeline.phase2b.assembly.rich_text_pipeline import (
+                RichTextPipeline,
+            )
+            from services.python_grpc.src.content_pipeline.phase2a.segmentation.semantic_unit_segmenter import (
+                SemanticUnitSegmenter,
+            )
+
+            _CONTENT_PIPELINE_RUNTIME = {
+                "RichTextPipeline": RichTextPipeline,
+                "SemanticUnitSegmenter": SemanticUnitSegmenter,
+            }
+            logger.info(
+                "Lazy import completed: content_pipeline core loaded in %.2fs",
+                time.perf_counter() - started_at,
+            )
+    return _CONTENT_PIPELINE_RUNTIME
+
+
+def _get_rich_text_pipeline_cls():
+    return _lazy_import_content_pipeline_runtime()["RichTextPipeline"]
+
+
+def _get_semantic_unit_segmenter_cls():
+    return _lazy_import_content_pipeline_runtime()["SemanticUnitSegmenter"]
+
+
+def _lazy_import_visual_runtime() -> Dict[str, Any]:
+    """按需导入视觉运行时，避免服务启动阶段装载 OpenCV/transformers 依赖树。"""
+    global _VISUAL_RUNTIME
+    if _VISUAL_RUNTIME is not None:
+        return _VISUAL_RUNTIME
+    with _VISUAL_RUNTIME_LOCK:
+        if _VISUAL_RUNTIME is None:
+            started_at = time.perf_counter()
+            from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_extractor import (
+                SharedFrameRegistry,
+                VisualFeatureExtractor,
+                get_shared_frame_registry,
+            )
+
+            _VISUAL_RUNTIME = {
+                "SharedFrameRegistry": SharedFrameRegistry,
+                "VisualFeatureExtractor": VisualFeatureExtractor,
+                "get_shared_frame_registry": get_shared_frame_registry,
+            }
+            logger.info(
+                "Lazy import completed: visual runtime loaded in %.2fs",
+                time.perf_counter() - started_at,
+            )
+    return _VISUAL_RUNTIME
+
+
+def _get_visual_feature_extractor_cls():
+    return _lazy_import_visual_runtime()["VisualFeatureExtractor"]
+
+
+def _get_shared_frame_registry_cls():
+    return _lazy_import_visual_runtime()["SharedFrameRegistry"]
+
+
+def _get_shared_frame_registry_factory():
+    return _lazy_import_visual_runtime()["get_shared_frame_registry"]
+
+
+def _get_screenshot_selector_cls():
+    """按需导入截图选择器，避免冷启动触发 numba/cv 辅助模块初始化。"""
+    global _SCREENSHOT_SELECTOR_CLASS
+    if _SCREENSHOT_SELECTOR_CLASS is not None:
+        return _SCREENSHOT_SELECTOR_CLASS
+    with _SCREENSHOT_SELECTOR_LOCK:
+        if _SCREENSHOT_SELECTOR_CLASS is None:
+            started_at = time.perf_counter()
+            from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import (
+                ScreenshotSelector,
+            )
+
+            _SCREENSHOT_SELECTOR_CLASS = ScreenshotSelector
+            logger.info(
+                "Lazy import completed: screenshot selector loaded in %.2fs",
+                time.perf_counter() - started_at,
+            )
+    return _SCREENSHOT_SELECTOR_CLASS
+
+
+def _get_semantic_payload_runtime() -> Dict[str, Any]:
+    """按需导入语义载荷工具，避免冷启动执行 content_pipeline 包初始化。"""
+    global _SEMANTIC_PAYLOAD_RUNTIME
+    if _SEMANTIC_PAYLOAD_RUNTIME is not None:
+        return _SEMANTIC_PAYLOAD_RUNTIME
+    with _SEMANTIC_PAYLOAD_RUNTIME_LOCK:
+        if _SEMANTIC_PAYLOAD_RUNTIME is None:
+            started_at = time.perf_counter()
+            from services.python_grpc.src.content_pipeline.shared.semantic_payload import (
+                build_grouped_semantic_units_payload,
+                build_semantic_unit_index,
+                iter_semantic_unit_nodes,
+                normalize_semantic_units_payload,
+            )
+
+            _SEMANTIC_PAYLOAD_RUNTIME = {
+                "iter_semantic_unit_nodes": iter_semantic_unit_nodes,
+                "build_semantic_unit_index": build_semantic_unit_index,
+                "normalize_semantic_units_payload": normalize_semantic_units_payload,
+                "build_grouped_semantic_units_payload": build_grouped_semantic_units_payload,
+            }
+            logger.info(
+                "Lazy import completed: semantic payload helpers loaded in %.2fs",
+                time.perf_counter() - started_at,
+            )
+    return _SEMANTIC_PAYLOAD_RUNTIME
+
+
+def _get_stage1_run_pipeline():
+    """按需导入 Stage1 图执行入口，避免冷启动提前拉起 cv2/校验依赖链。"""
+    global _STAGE1_RUN_PIPELINE
+    if _STAGE1_RUN_PIPELINE is not None:
+        return _STAGE1_RUN_PIPELINE
+    with _STAGE1_RUN_PIPELINE_LOCK:
+        if _STAGE1_RUN_PIPELINE is None:
+            started_at = time.perf_counter()
+            from services.python_grpc.src.transcript_pipeline.graph import run_pipeline
+
+            _STAGE1_RUN_PIPELINE = run_pipeline
+            logger.info(
+                "Lazy import completed: transcript pipeline loaded in %.2fs",
+                time.perf_counter() - started_at,
+            )
+    return _STAGE1_RUN_PIPELINE
+
+
+def _get_stage1_projection_repository_cls():
+    """按需导入 Stage1 恢复投影器，避免冷启动提前拉起恢复链依赖。"""
+    global _STAGE1_PROJECTION_REPOSITORY_CLASS
+    if _STAGE1_PROJECTION_REPOSITORY_CLASS is not None:
+        return _STAGE1_PROJECTION_REPOSITORY_CLASS
+    with _STAGE1_PROJECTION_REPOSITORY_LOCK:
+        if _STAGE1_PROJECTION_REPOSITORY_CLASS is None:
+            started_at = time.perf_counter()
+            from services.python_grpc.src.transcript_pipeline.stage1_projection_repository import (
+                Stage1ProjectionRepository,
+            )
+
+            _STAGE1_PROJECTION_REPOSITORY_CLASS = Stage1ProjectionRepository
+            logger.info(
+                "Lazy import completed: stage1 projection repository loaded in %.2fs",
+                time.perf_counter() - started_at,
+            )
+    return _STAGE1_PROJECTION_REPOSITORY_CLASS
+
+
+def _get_vl_report_writer_cls():
+    """按需导入 VL 报表写入器，避免冷启动提前拉起 token_costing 依赖链。"""
+    global _VL_REPORT_WRITER_CLASS
+    if _VL_REPORT_WRITER_CLASS is not None:
+        return _VL_REPORT_WRITER_CLASS
+    with _VL_REPORT_WRITER_CLASS_LOCK:
+        if _VL_REPORT_WRITER_CLASS is None:
+            started_at = time.perf_counter()
+            from .vl_report_writer import VLReportWriter
+
+            _VL_REPORT_WRITER_CLASS = VLReportWriter
+            logger.info(
+                "Lazy import completed: VL report writer loaded in %.2fs",
+                time.perf_counter() - started_at,
+            )
+    return _VL_REPORT_WRITER_CLASS
+
+
+class ServerAdaptiveConcurrencyLimiter:
+    """服务内轻量 AIMD 并发限制器，避免仅为限流器导入整条 Module2 LLM 依赖链。"""
+
+    def __init__(
+        self,
+        initial_limit: int = 10,
+        min_limit: int = 2,
+        max_limit: int = 100,
+        increase_step: int = 1,
+        decrease_factor: float = 0.5,
+        window_size: int = 20,
+    ):
+        self.current_limit = max(1, int(initial_limit))
+        self.min_limit = max(1, int(min_limit))
+        self.max_limit = max(self.min_limit, int(max_limit))
+        self.increase_step = max(1, int(increase_step))
+        self.decrease_factor = max(0.1, min(float(decrease_factor), 0.95))
+        self.window_size = max(1, int(window_size))
+        self.results: List[bool] = []
+        self._effective_limit = self.current_limit
+        self._in_use_permits = 0
+        self._lock = asyncio.Lock()
+        self._cond = asyncio.Condition(self._lock)
+        logger.info(
+            "ServerAdaptiveConcurrencyLimiter initialized: limit=%s, range=[%s, %s]",
+            self.current_limit,
+            self.min_limit,
+            self.max_limit,
+        )
+
+    async def acquire(self, permits: int = 1) -> int:
+        permits = max(1, int(permits))
+        async with self._cond:
+            permits = min(permits, self._effective_limit)
+            while self._in_use_permits + permits > self._effective_limit:
+                await self._cond.wait()
+            self._in_use_permits += permits
+            return permits
+
+    async def release(self, permits: int = 1) -> None:
+        permits = max(1, int(permits))
+        async with self._cond:
+            self._in_use_permits = max(0, self._in_use_permits - permits)
+            self._cond.notify_all()
+
+    async def record_success(self) -> None:
+        async with self._cond:
+            self.results.append(True)
+            if len(self.results) > self.window_size:
+                self.results.pop(0)
+            if len(self.results) >= self.window_size:
+                success_rate = sum(self.results) / len(self.results)
+                if success_rate > 0.9 and self.current_limit < self.max_limit:
+                    self.current_limit = min(self.current_limit + self.increase_step, self.max_limit)
+                    self._effective_limit = self.current_limit
+                    self._cond.notify_all()
+
+    async def record_failure(self, is_rate_limit: bool = False) -> None:
+        async with self._cond:
+            self.results.append(False)
+            if len(self.results) > self.window_size:
+                self.results.pop(0)
+            if is_rate_limit:
+                self.current_limit = max(int(self.current_limit * self.decrease_factor), self.min_limit)
+            else:
+                self.current_limit = max(self.current_limit - 1, self.min_limit)
+            self._effective_limit = self.current_limit
+            self._cond.notify_all()
 
 
 RESUME_META_SCHEMA_VERSION = "resume_meta_v1"
@@ -569,6 +867,9 @@ def _safe_parse_iso_datetime(value: str) -> Optional[datetime]:
 def _file_signature(path: str) -> Dict[str, Any]:
     """生成文件签名（存在性、大小、修改时间）。"""
     try:
+        normalized_path = str(path or "").strip()
+        if not normalized_path:
+            return {"exists": False, "path": ""}
         abs_path = os.path.abspath(path)
         if not os.path.exists(abs_path):
             return {"exists": False, "path": abs_path}
@@ -583,6 +884,46 @@ def _file_signature(path: str) -> Dict[str, Any]:
         return {"exists": False, "path": os.path.abspath(path)}
 
 
+def _build_stage1_runtime_outputs_fingerprint(runtime_state: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(runtime_state, dict):
+        return ""
+    runtime_views = get_stage1_repository_views(runtime_state)
+    fingerprint_payload = {
+        "corrected_subtitles": runtime_views.get("corrected_subtitles", []),
+        "merged_sentences": runtime_views.get("merged_sentences", []),
+        "translated_sentences": runtime_views.get("translated_sentences", []),
+        "cleaned_sentences": runtime_views.get("cleaned_sentences", []),
+        "pure_text_script": runtime_views.get("pure_text_script", []),
+        "sentence_timestamps": runtime_views.get("sentence_timestamps", {}),
+        "domain": runtime_views.get("domain", ""),
+        "main_topic": runtime_views.get("main_topic", ""),
+    }
+    if not any(
+        value not in (None, "", [], {})
+        for value in fingerprint_payload.values()
+    ):
+        return ""
+    return build_runtime_payload_fingerprint(fingerprint_payload)
+
+
+def _stage1_runtime_artifact_payload(runtime_state: Optional[Dict[str, Any]], artifact_name: str) -> Any:
+    if not isinstance(runtime_state, dict):
+        return None
+    runtime_views = get_stage1_repository_views(runtime_state)
+    artifact_field_map = {
+        "step2_correction": "corrected_subtitles",
+        "step3_merge": "merged_sentences",
+        "step3_5_translate": "translated_sentences",
+        "step4_clean_local": "cleaned_sentences",
+        "outputs": "pure_text_script",
+        "sentence_timestamps": "sentence_timestamps",
+    }
+    field_name = artifact_field_map.get(str(artifact_name or "").strip(), "")
+    if not field_name:
+        return None
+    return runtime_views.get(field_name)
+
+
 def _build_input_fingerprint(video_path: str, subtitle_path: str = "", extra: Optional[Dict[str, Any]] = None) -> str:
     """构建输入指纹。"""
     payload = {
@@ -591,7 +932,7 @@ def _build_input_fingerprint(video_path: str, subtitle_path: str = "", extra: Op
         "extra": extra or {},
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+    return md5_text_compat(raw)
 
 
 def _resource_meta_path(resource_path: str) -> str:
@@ -676,11 +1017,17 @@ def _write_resource_meta(
     priority: bool = False,
 ) -> None:
     """写入资源元数据。"""
-    meta_path = _resource_meta_path(resource_path)
+    normalized_resource_path = os.path.abspath(str(resource_path or "").strip()) if resource_path else ""
+    if not normalized_resource_path or not os.path.exists(normalized_resource_path):
+        return
+    meta_path = _resource_meta_path(normalized_resource_path)
+    meta_parent = os.path.dirname(meta_path)
+    if meta_parent:
+        os.makedirs(meta_parent, exist_ok=True)
     payload = {
         "schema_version": RESUME_META_SCHEMA_VERSION,
         "created_at": _utc_now_iso(),
-        "resource_path": os.path.abspath(resource_path),
+        "resource_path": normalized_resource_path,
         "group": group,
         "input_fingerprint": input_fingerprint,
         "dependencies": dependencies or {},
@@ -734,21 +1081,105 @@ def _validate_resource_reuse(
 
 
 def _phase2a_semantic_units_candidates(output_dir: str) -> List[str]:
-    """返回 Phase2A 语义单元产物候选路径（主路径优先，兼容 intermediates）。"""
-    abs_output_dir = os.path.abspath(output_dir)
-    candidates = [
-        os.path.join(abs_output_dir, "semantic_units_phase2a.json"),
-        os.path.join(abs_output_dir, "intermediates", "semantic_units_phase2a.json"),
-    ]
-    deduplicated: List[str] = []
-    seen = set()
-    for candidate in candidates:
-        normalized = os.path.normcase(os.path.normpath(candidate))
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        deduplicated.append(candidate)
-    return deduplicated
+    """返回 Phase2A 语义单元候选路径，统一复用 canonical + legacy 契约。"""
+    return helper_phase2a_semantic_units_candidates(output_dir)
+
+
+def _phase2a_semantic_units_virtual_path(output_dir: str) -> str:
+    return str(helper_phase2a_semantic_units_path(output_dir))
+
+
+def _load_phase2a_semantic_units_payload_from_store(output_dir: str, *, task_id: str = "") -> Optional[Any]:
+    normalized_output_dir = str(output_dir or "").strip()
+    if not normalized_output_dir:
+        return None
+    try:
+        store = RuntimeRecoveryStore(
+            output_dir=normalized_output_dir,
+            task_id=task_id or Path(normalized_output_dir).name,
+            storage_key=Path(normalized_output_dir).name,
+        )
+        return store.load_projection_payload(stage="phase2a", projection_name="semantic_units")
+    except Exception as error:
+        logger.warning("Load phase2a semantic_units artifact failed: output_dir=%s err=%s", normalized_output_dir, error)
+        return None
+
+
+def _load_phase2b_runtime_outputs_from_store(output_dir: str, *, task_id: str = "") -> Optional[Dict[str, Any]]:
+    normalized_output_dir = str(output_dir or "").strip()
+    if not normalized_output_dir:
+        return None
+    try:
+        store = RuntimeRecoveryStore(
+            output_dir=normalized_output_dir,
+            task_id=task_id or Path(normalized_output_dir).name,
+            storage_key=Path(normalized_output_dir).name,
+        )
+        restored = store.load_latest_committed_chunk_payload(
+            stage="phase2b",
+            chunk_id="phase2b.document_assemble.wave_0001",
+        )
+        if not isinstance(restored, dict):
+            return None
+        result_payload = dict(restored.get("result_payload", {}) or {})
+        markdown_path = str(result_payload.get("markdown_path", "") or "").strip()
+        json_path = str(result_payload.get("json_path", "") or "").strip()
+        title = str(result_payload.get("title", "") or "").strip()
+        if not markdown_path and not json_path:
+            return None
+        return {
+            "markdown_path": markdown_path,
+            "json_path": json_path,
+            "title": title,
+            "reused": True,
+        }
+    except Exception as error:
+        logger.warning("Load phase2b runtime outputs failed: output_dir=%s err=%s", normalized_output_dir, error)
+        return None
+
+
+def _persist_phase2a_semantic_units_payload(output_dir: str, payload: Any, *, task_id: str = "") -> List[str]:
+    """将 Phase2A 语义单元提交为 chunk projection，恢复时再从 chunk 投影。"""
+    normalized_output_dir = str(output_dir or "").strip()
+    if not normalized_output_dir:
+        return []
+    try:
+        store = RuntimeRecoveryStore(
+            output_dir=normalized_output_dir,
+            task_id=task_id or Path(normalized_output_dir).name,
+            storage_key=Path(normalized_output_dir).name,
+        )
+        if not isinstance(payload, dict):
+            return []
+        store.commit_projection_payload(
+            stage="phase2a",
+            projection_name="semantic_units",
+            payload=payload,
+        )
+        return [_phase2a_semantic_units_virtual_path(normalized_output_dir)]
+    except Exception as error:
+        logger.warning("Persist phase2a semantic_units artifact failed: output_dir=%s err=%s", normalized_output_dir, error)
+        return []
+
+
+def _resolve_phase2a_output_dir_from_semantic_units_path(path_text: str) -> str:
+    normalized_path = os.path.abspath(str(path_text or "").strip())
+    if not normalized_path:
+        return ""
+    path_obj = Path(normalized_path)
+    if path_obj.name == "semantic_units.json" and len(path_obj.parents) >= 5:
+        return str(path_obj.parents[4])
+    if path_obj.name == "semantic_units_phase2a.json":
+        parent = path_obj.parent
+        if parent.name.lower() == "intermediates":
+            return str(parent.parent)
+        return str(parent)
+    if path_obj.name.startswith("semantic_units_from_rpc_"):
+        parent = path_obj.parent
+        if parent.name.lower() == "intermediates":
+            return str(parent.parent)
+        return str(parent)
+    return str(path_obj.parent)
 
 
 def _resolve_reuse_candidate(
@@ -791,6 +1222,595 @@ def _resolve_reuse_candidate(
             continue
         return candidate, "legacy_exists"
     return None, "missing_resource"
+
+
+def _collect_latest_scope_dependency_fingerprints(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    stage: str,
+    scope_type: str,
+) -> Dict[str, str]:
+    if runtime_store is None:
+        return {}
+    latest_by_scope_id: Dict[str, Dict[str, Any]] = {}
+    for node_payload in runtime_store.list_scope_nodes(stage=stage, scope_type=scope_type):
+        scope_id = str(node_payload.get("scope_id", "") or "").strip()
+        scope_ref = str(node_payload.get("scope_ref", "") or "").strip()
+        input_fingerprint = str(node_payload.get("input_fingerprint", "") or "").strip()
+        scope_variant = str(node_payload.get("scope_variant", "") or "").strip().lower()
+        if not scope_id or not scope_ref or not input_fingerprint:
+            continue
+        if scope_type == "chunk" and scope_variant == "projection":
+            continue
+        previous = latest_by_scope_id.get(scope_id)
+        if previous is None or int(node_payload.get("updated_at_ms", 0) or 0) >= int(previous.get("updated_at_ms", 0) or 0):
+            latest_by_scope_id[scope_id] = node_payload
+    dependency_fingerprints: Dict[str, str] = {}
+    for node_payload in latest_by_scope_id.values():
+        scope_ref = str(node_payload.get("scope_ref", "") or "").strip()
+        input_fingerprint = str(node_payload.get("input_fingerprint", "") or "").strip()
+        if scope_ref and input_fingerprint:
+            dependency_fingerprints[scope_ref] = input_fingerprint
+    return dict(sorted(dependency_fingerprints.items()))
+
+
+def _build_runtime_artifact_scope_ref(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    stage: str,
+    artifact_name: str,
+) -> str:
+    if runtime_store is None:
+        return ""
+    return runtime_store.build_scope_ref(
+        stage=stage,
+        scope_type="artifact",
+        scope_id=artifact_name,
+    )
+
+
+def _upsert_runtime_input_scope(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    stage: str,
+    input_name: str,
+    input_fingerprint: str,
+    dependency_fingerprints: Optional[Dict[str, str]] = None,
+    extra_payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    if runtime_store is None:
+        return ""
+    scope_ref = runtime_store.build_scope_ref(
+        stage=stage,
+        scope_type="input",
+        scope_id=input_name,
+    )
+    runtime_store.upsert_scope_node(
+        scope_ref=scope_ref,
+        stage=stage,
+        scope_type="input",
+        scope_id=input_name,
+        status=STATUS_SUCCESS,
+        input_fingerprint=input_fingerprint,
+        dependency_fingerprints=dependency_fingerprints,
+        extra_payload=extra_payload,
+    )
+    return scope_ref
+
+
+def _upsert_runtime_artifact_scope(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    stage: str,
+    artifact_name: str,
+    input_fingerprint: str,
+    local_path: str,
+    dependency_fingerprints: Optional[Dict[str, str]] = None,
+    extra_payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    if runtime_store is None:
+        return ""
+    scope_ref = _build_runtime_artifact_scope_ref(
+        runtime_store,
+        stage=stage,
+        artifact_name=artifact_name,
+    )
+    runtime_store.upsert_scope_node(
+        scope_ref=scope_ref,
+        stage=stage,
+        scope_type="artifact",
+        scope_id=artifact_name,
+        status=STATUS_SUCCESS,
+        input_fingerprint=input_fingerprint,
+        local_path=str(local_path or ""),
+        dependency_fingerprints=dependency_fingerprints,
+        extra_payload=extra_payload,
+    )
+    return scope_ref
+
+
+def _build_runtime_artifact_reuse_plan(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    stage: str,
+    artifact_name: str,
+    expected_input_fingerprint: str,
+    current_dependency_fingerprints: Optional[Dict[str, str]] = None,
+    candidate_path: str = "",
+    bootstrap_on_missing_scope: bool = True,
+ ) -> Dict[str, Any]:
+    base_plan: Dict[str, Any] = {
+        "stage": str(stage or "").strip(),
+        "artifact_name": str(artifact_name or "").strip(),
+        "can_restore": True,
+        "reason": "runtime_store_unavailable",
+        "dirty_scope_refs": [],
+        "dirty_scope_count": 0,
+        "scope_ref": "",
+    }
+    if runtime_store is None:
+        return base_plan
+    scope_ref = _build_runtime_artifact_scope_ref(
+        runtime_store,
+        stage=stage,
+        artifact_name=artifact_name,
+    )
+    base_plan["scope_ref"] = scope_ref
+    reuse_plan = runtime_store.plan_scope_reuse(
+        scope_ref=scope_ref,
+        expected_input_fingerprint=expected_input_fingerprint,
+        current_dependency_fingerprints=current_dependency_fingerprints,
+    )
+    if isinstance(reuse_plan, dict):
+        base_plan.update(reuse_plan)
+    if bool(reuse_plan.get("can_restore", False)):
+        return base_plan
+    if bootstrap_on_missing_scope and str(reuse_plan.get("reason", "") or "") == "missing_scope_node":
+        _upsert_runtime_artifact_scope(
+            runtime_store,
+            stage=stage,
+            artifact_name=artifact_name,
+            input_fingerprint=expected_input_fingerprint,
+            local_path=candidate_path,
+            dependency_fingerprints=current_dependency_fingerprints,
+            extra_payload={
+                "bootstrapped_from_existing_artifact": True,
+            },
+        )
+        base_plan.update(
+            {
+                "can_restore": True,
+                "reason": "scope_bootstrapped_from_existing_artifact",
+                "dirty_scope_refs": [],
+                "dirty_scope_count": 0,
+            }
+        )
+        return base_plan
+    return base_plan
+
+
+def _plan_runtime_artifact_reuse(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    stage: str,
+    artifact_name: str,
+    expected_input_fingerprint: str,
+    current_dependency_fingerprints: Optional[Dict[str, str]] = None,
+    candidate_path: str = "",
+    bootstrap_on_missing_scope: bool = True,
+) -> Tuple[bool, str]:
+    reuse_plan = _build_runtime_artifact_reuse_plan(
+        runtime_store,
+        stage=stage,
+        artifact_name=artifact_name,
+        expected_input_fingerprint=expected_input_fingerprint,
+        current_dependency_fingerprints=current_dependency_fingerprints,
+        candidate_path=candidate_path,
+        bootstrap_on_missing_scope=bootstrap_on_missing_scope,
+    )
+    return bool(reuse_plan.get("can_restore", False)), str(reuse_plan.get("reason", "") or "restore_blocked")
+
+
+def _collect_scope_dependency_fingerprints_by_scope_refs(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    scope_refs: List[str],
+) -> Dict[str, str]:
+    if runtime_store is None:
+        return {}
+    dependency_fingerprints: Dict[str, str] = {}
+    for scope_ref in list(scope_refs or []):
+        normalized_scope_ref = str(scope_ref or "").strip()
+        if not normalized_scope_ref:
+            continue
+        node_payload = runtime_store.load_scope_node(normalized_scope_ref)
+        input_fingerprint = str(
+            isinstance(node_payload, dict) and node_payload.get("input_fingerprint", "") or ""
+        ).strip()
+        if input_fingerprint:
+            dependency_fingerprints[normalized_scope_ref] = input_fingerprint
+    return dict(sorted(dependency_fingerprints.items()))
+
+
+def _next_stage1_step_name(step_name: str) -> str:
+    ordered_steps = [
+        "step1_validate",
+        "step2_correction",
+        "step3_merge",
+        "step3_5_translate",
+        "step4_clean_local",
+        "step5_6_dedup_merge",
+    ]
+    normalized_step_name = str(step_name or "").strip()
+    if not normalized_step_name:
+        return "step1_validate"
+    try:
+        step_index = ordered_steps.index(normalized_step_name)
+    except ValueError:
+        return ""
+    if step_index >= len(ordered_steps) - 1:
+        return ""
+    return ordered_steps[step_index + 1]
+
+
+def _build_stage1_resume_plan(
+    *,
+    reuse_enabled: bool,
+    stage1_store: Optional[RuntimeRecoveryStore],
+    expected_input_fingerprint: str,
+    stage1_input_scope_ref: str,
+    stage1_artifact_scope_refs: Dict[str, str],
+    step2_path: str,
+    step3_path: str,
+    step35_path: str,
+    step4_path: str,
+    step6_path: str,
+    local_sentence_ts: str,
+    need_sentence_timestamps: bool,
+    runtime_stage1_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    artifact_decisions: Dict[str, Dict[str, Any]] = {}
+    dirty_scope_refs: List[str] = []
+    dirty_scope_seen = set()
+
+    def _append_dirty_scope_refs(scope_refs: List[str]) -> None:
+        for scope_ref in list(scope_refs or []):
+            normalized_scope_ref = str(scope_ref or "").strip()
+            if not normalized_scope_ref or normalized_scope_ref in dirty_scope_seen:
+                continue
+            dirty_scope_seen.add(normalized_scope_ref)
+            dirty_scope_refs.append(normalized_scope_ref)
+
+    def _mark_artifact_dirty(scope_ref: str, *, reason: str) -> Dict[str, Any]:
+        if stage1_store is None:
+            return {
+                "dirty_scope_refs": [],
+                "dirty_scope_count": 0,
+                "plan_digest": build_runtime_payload_fingerprint(
+                    {
+                        "scope_ref": str(scope_ref or ""),
+                        "reason": str(reason or ""),
+                    }
+                ),
+            }
+        dirty_plan = stage1_store.mark_scope_dirty(
+            scope_ref,
+            reason=str(reason or ""),
+            include_descendants=True,
+        )
+        _append_dirty_scope_refs(list(dirty_plan.get("dirty_scope_refs", []) or []))
+        return dirty_plan
+
+    def _evaluate_artifact(
+        *,
+        artifact_name: str,
+        resource_path: str,
+        upstream_scope_refs: List[str],
+    ) -> Dict[str, Any]:
+        scope_ref = str(stage1_artifact_scope_refs.get(artifact_name, "") or "").strip()
+        dependency_fingerprints = _collect_scope_dependency_fingerprints_by_scope_refs(
+            stage1_store,
+            scope_refs=upstream_scope_refs,
+        )
+        runtime_payload = _stage1_runtime_artifact_payload(runtime_stage1_state, artifact_name)
+        valid_resource = False
+        resource_reason = "missing_resource"
+        if resource_path:
+            valid_resource, resource_reason = _validate_resource_reuse(
+                resource_path,
+                group="stage1_text",
+                expected_input_fingerprint=expected_input_fingerprint,
+            )
+        if not valid_resource and runtime_payload not in (None, "", [], {}):
+            valid_resource = True
+            resource_reason = "runtime_projected_payload"
+        if valid_resource:
+            scope_plan = _build_runtime_artifact_reuse_plan(
+                stage1_store,
+                stage="stage1",
+                artifact_name=artifact_name,
+                expected_input_fingerprint=expected_input_fingerprint,
+                current_dependency_fingerprints=dependency_fingerprints,
+                candidate_path=resource_path,
+                bootstrap_on_missing_scope=True,
+            )
+            _append_dirty_scope_refs(list(scope_plan.get("dirty_scope_refs", []) or []))
+            can_reuse = bool(scope_plan.get("can_restore", False))
+            scope_reason = str(scope_plan.get("reason", "") or "restore_blocked")
+            if can_reuse:
+                if scope_reason and scope_reason != "restore_allowed":
+                    reason = f"{resource_reason}|{scope_reason}" if resource_reason else scope_reason
+                else:
+                    reason = resource_reason
+            else:
+                reason = f"{resource_reason}|scope_plan:{scope_reason}" if resource_reason else f"scope_plan:{scope_reason}"
+        else:
+            scope_plan = _mark_artifact_dirty(
+                scope_ref,
+                reason=f"artifact_resource_invalid:{resource_reason}",
+            )
+            can_reuse = False
+            reason = resource_reason
+        decision = {
+            "artifact_name": artifact_name,
+            "resource_path": resource_path,
+            "scope_ref": scope_ref,
+            "can_reuse": can_reuse,
+            "reason": reason,
+            "dependency_fingerprints": dependency_fingerprints,
+            "dirty_scope_refs": list(scope_plan.get("dirty_scope_refs", []) or []),
+            "dirty_scope_count": int(scope_plan.get("dirty_scope_count", 0) or 0),
+            "scope_plan": scope_plan,
+        }
+        artifact_decisions[artifact_name] = decision
+        return decision
+
+    plan: Dict[str, Any] = {
+        "mode": "recompute",
+        "reason": "stage1_reuse_disabled" if not reuse_enabled else "stage1_recompute_required",
+        "reused_stage1": False,
+        "resume_state": {},
+        "resume_from_step": "",
+        "resume_entry_step": "",
+        "resume_last_completed_index": -1,
+        "retry_entry_point": "step1_validate",
+        "reused_artifact_names": [],
+        "invalidated_artifact_names": [],
+        "artifact_decisions": artifact_decisions,
+        "dirty_scope_refs": [],
+        "dirty_scope_count": 0,
+        "failed_scope_kind": "",
+        "failed_scope_id": "",
+        "failed_scope_ref": "",
+        "invalidated_descendants_count": 0,
+    }
+    if not reuse_enabled:
+        plan["plan_digest"] = build_runtime_payload_fingerprint(
+            {
+                "mode": plan["mode"],
+                "reason": plan["reason"],
+            }
+        )
+        return plan
+
+    step2_decision = _evaluate_artifact(
+        artifact_name="step2_correction",
+        resource_path=step2_path,
+        upstream_scope_refs=[stage1_input_scope_ref],
+    )
+    step3_decision = _evaluate_artifact(
+        artifact_name="step3_merge",
+        resource_path=step3_path,
+        upstream_scope_refs=[stage1_artifact_scope_refs.get("step2_correction", "")],
+    )
+    step35_decision = _evaluate_artifact(
+        artifact_name="step3_5_translate",
+        resource_path=step35_path,
+        upstream_scope_refs=[stage1_artifact_scope_refs.get("step3_merge", "")],
+    )
+    step4_decision = _evaluate_artifact(
+        artifact_name="step4_clean_local",
+        resource_path=step4_path,
+        upstream_scope_refs=[
+            stage1_artifact_scope_refs.get("step3_merge", ""),
+            stage1_artifact_scope_refs.get("step3_5_translate", ""),
+        ],
+    )
+    outputs_decision = _evaluate_artifact(
+        artifact_name="outputs",
+        resource_path=step6_path,
+        upstream_scope_refs=[stage1_artifact_scope_refs.get("step5_6_dedup_merge", "")],
+    )
+
+    runtime_sentence_timestamps = _stage1_runtime_artifact_payload(runtime_stage1_state, "sentence_timestamps")
+    valid_sentence_timestamps = False
+    sentence_timestamps_reason = "missing_sentence_timestamps"
+    if isinstance(runtime_sentence_timestamps, dict) and runtime_sentence_timestamps:
+        valid_sentence_timestamps = True
+        sentence_timestamps_reason = "runtime_projected_payload"
+    elif not need_sentence_timestamps:
+        valid_sentence_timestamps, sentence_timestamps_reason = _validate_resource_reuse(
+            local_sentence_ts,
+            group="stage1_text",
+            expected_input_fingerprint=expected_input_fingerprint,
+        )
+
+    sentence_timestamps_decision = {
+        "artifact_name": "sentence_timestamps",
+        "resource_path": local_sentence_ts,
+        "scope_ref": "",
+        "can_reuse": bool(valid_sentence_timestamps),
+        "reason": sentence_timestamps_reason,
+        "dirty_scope_refs": [],
+        "dirty_scope_count": 0,
+    }
+    artifact_decisions["sentence_timestamps"] = sentence_timestamps_decision
+
+    partial_step_specs = [
+        ("step2_correction", "corrected_subtitles", "corrected_subtitles"),
+        ("step3_merge", "merged_sentences", "merged_sentences"),
+        ("step3_5_translate", "translated_sentences", "translated_sentences"),
+        ("step4_clean_local", "cleaned_sentences", "cleaned_sentences"),
+    ]
+    first_invalid_artifact_name = ""
+    for artifact_name, output_field, state_key in partial_step_specs:
+        decision = artifact_decisions[artifact_name]
+        if not bool(decision.get("can_reuse", False)):
+            first_invalid_artifact_name = artifact_name
+            break
+        runtime_payload = _stage1_runtime_artifact_payload(runtime_stage1_state, artifact_name)
+        if isinstance(runtime_payload, list):
+            payload = list(runtime_payload)
+            payload_reason = "runtime_projected_payload"
+        else:
+            payload, payload_reason = _load_stage1_output_list(
+                str(decision.get("resource_path", "") or ""),
+                output_field,
+            )
+        if payload is None:
+            decision["can_reuse"] = False
+            decision["reason"] = payload_reason
+            dirty_plan = _mark_artifact_dirty(
+                str(decision.get("scope_ref", "") or ""),
+                reason=f"artifact_payload_invalid:{payload_reason}",
+            )
+            decision["dirty_scope_refs"] = list(dirty_plan.get("dirty_scope_refs", []) or [])
+            decision["dirty_scope_count"] = int(dirty_plan.get("dirty_scope_count", 0) or 0)
+            decision["scope_plan"] = dirty_plan
+            first_invalid_artifact_name = artifact_name
+            break
+        plan["resume_state"][state_key] = payload
+        plan["reused_artifact_names"].append(artifact_name)
+        plan["resume_from_step"] = artifact_name
+        plan["resume_last_completed_index"] = int(_TRANSCRIPT_STEP_INDEX_MAP.get(artifact_name, 0) or 0)
+        plan["resume_entry_step"] = _next_stage1_step_name(artifact_name)
+
+    if isinstance(runtime_sentence_timestamps, dict) and runtime_sentence_timestamps:
+        plan["resume_state"]["sentence_timestamps"] = dict(runtime_sentence_timestamps)
+
+    if (
+        bool(step2_decision.get("can_reuse", False))
+        and bool(outputs_decision.get("can_reuse", False))
+        and bool(valid_sentence_timestamps)
+    ):
+        plan["mode"] = "full_reuse"
+        plan["reason"] = "stage1_outputs_reusable"
+        plan["reused_stage1"] = True
+        plan["retry_entry_point"] = "stage1_already_completed"
+        plan["resume_entry_step"] = ""
+        plan["resume_last_completed_index"] = int(_TRANSCRIPT_STEP_INDEX_MAP.get("step5_6_dedup_merge", 6) or 6)
+        plan["reused_artifact_names"] = [
+            artifact_name
+            for artifact_name in (
+                "step2_correction",
+                "step3_merge",
+                "step3_5_translate",
+                "step4_clean_local",
+                "outputs",
+                "sentence_timestamps",
+            )
+            if bool(artifact_decisions.get(artifact_name, {}).get("can_reuse", False))
+        ]
+    elif plan["resume_from_step"]:
+        plan["mode"] = "partial_resume"
+        plan["reason"] = f"resume_after_{plan['resume_from_step']}"
+        plan["retry_entry_point"] = str(plan.get("resume_entry_step") or "stage1_complete")
+    else:
+        plan["mode"] = "recompute"
+        plan["reason"] = (
+            str(artifact_decisions.get(first_invalid_artifact_name, {}).get("reason", "") or "").strip()
+            or "stage1_recompute_required"
+        )
+        plan["retry_entry_point"] = "step1_validate"
+
+    if bool(valid_sentence_timestamps) and plan["resume_from_step"] == "step4_clean_local":
+        if "sentence_timestamps" not in plan["reused_artifact_names"]:
+            plan["reused_artifact_names"].append("sentence_timestamps")
+
+    stage1_artifact_order = [
+        "step2_correction",
+        "step3_merge",
+        "step3_5_translate",
+        "step4_clean_local",
+        "outputs",
+    ]
+    invalidated_artifact_names: List[str] = []
+    if plan["reused_stage1"]:
+        invalidated_artifact_names = []
+    elif plan["resume_from_step"]:
+        try:
+            resume_artifact_index = stage1_artifact_order.index(plan["resume_from_step"])
+        except ValueError:
+            resume_artifact_index = -1
+        invalidated_artifact_names.extend(stage1_artifact_order[resume_artifact_index + 1 :])
+        if plan["resume_from_step"] != "step4_clean_local":
+            invalidated_artifact_names.append("sentence_timestamps")
+    else:
+        invalidated_artifact_names.extend(stage1_artifact_order)
+        invalidated_artifact_names.append("sentence_timestamps")
+    if not valid_sentence_timestamps and "sentence_timestamps" not in invalidated_artifact_names:
+        invalidated_artifact_names.append("sentence_timestamps")
+    invalidated_artifact_names = [
+        artifact_name
+        for artifact_name in invalidated_artifact_names
+        if str(artifact_name or "").strip()
+    ]
+    plan["invalidated_artifact_names"] = invalidated_artifact_names
+
+    for artifact_name in invalidated_artifact_names:
+        decision = artifact_decisions.get(artifact_name, {})
+        scope_ref = str(decision.get("scope_ref", "") or "").strip()
+        if scope_ref:
+            plan["failed_scope_kind"] = "artifact"
+            plan["failed_scope_id"] = artifact_name
+            plan["failed_scope_ref"] = scope_ref
+            break
+
+    plan["dirty_scope_refs"] = dirty_scope_refs
+    plan["dirty_scope_count"] = len(dirty_scope_refs)
+    plan["invalidated_descendants_count"] = max(
+        len(invalidated_artifact_names),
+        len(dirty_scope_refs),
+    )
+    plan["plan_digest"] = build_runtime_payload_fingerprint(
+        {
+            "mode": plan["mode"],
+            "reason": plan["reason"],
+            "resume_from_step": plan["resume_from_step"],
+            "resume_entry_step": plan["resume_entry_step"],
+            "resume_state_fields": sorted(plan["resume_state"].keys()),
+            "reused_artifact_names": plan["reused_artifact_names"],
+            "invalidated_artifact_names": invalidated_artifact_names,
+            "dirty_scope_refs": dirty_scope_refs,
+        }
+    )
+    return plan
+
+
+def _collect_scope_dependency_fingerprints_by_stage_steps(
+    runtime_store: Optional[RuntimeRecoveryStore],
+    *,
+    stage: str,
+    scope_type: str,
+    stage_steps: List[str],
+) -> Dict[str, str]:
+    if runtime_store is None:
+        return {}
+    allowed_stage_steps = {
+        str(item or "").strip()
+        for item in list(stage_steps or [])
+        if str(item or "").strip()
+    }
+    dependency_fingerprints: Dict[str, str] = {}
+    for node_payload in runtime_store.list_scope_nodes(stage=stage, scope_type=scope_type):
+        stage_step = str(node_payload.get("stage_step", "") or "").strip()
+        if allowed_stage_steps and stage_step not in allowed_stage_steps:
+            continue
+        scope_ref = str(node_payload.get("scope_ref", "") or "").strip()
+        input_fingerprint = str(node_payload.get("input_fingerprint", "") or "").strip()
+        if scope_ref and input_fingerprint:
+            dependency_fingerprints[scope_ref] = input_fingerprint
+    return dict(sorted(dependency_fingerprints.items()))
 
 
 def _find_stage1_output_conflicts(output_dir: str) -> List[Dict[str, str]]:
@@ -1365,7 +2385,7 @@ def _normalize_output_dir(video_path: str) -> str:
             continue
     
     normalized = os.path.normcase(abs_video_path)
-    path_hash = hashlib.md5(normalized.encode("utf-8")).hexdigest()
+    path_hash = md5_text_compat(normalized)
     return os.path.join(storage_root, path_hash)
 
 
@@ -1636,7 +2656,8 @@ class GlobalResourceManager:
             with self._lock:
                 if self._semantic_unit_segmenter is None:
                     try:
-                        self._semantic_unit_segmenter = SemanticUnitSegmenter()
+                        semantic_unit_segmenter_cls = _get_semantic_unit_segmenter_cls()
+                        self._semantic_unit_segmenter = semantic_unit_segmenter_cls()
                         logger.info("  → SemanticUnitSegmenter loaded lazily")
                     except Exception as e:
                         logger.error(f"SemanticUnitSegmenter init failed: {e}")
@@ -1653,7 +2674,8 @@ class GlobalResourceManager:
         with self._visual_extractors_lock:
             if video_path not in self._visual_extractors:
                 logger.info(f"🔄 Creating VisualFeatureExtractor for: {video_path}")
-                self._visual_extractors[video_path] = VisualFeatureExtractor(video_path)
+                visual_feature_extractor_cls = _get_visual_feature_extractor_cls()
+                self._visual_extractors[video_path] = visual_feature_extractor_cls(video_path)
             return self._visual_extractors[video_path]
 
     def release_visual_extractor(self, video_path: str):
@@ -1955,8 +2977,10 @@ class GlobalResourceManager:
         with self._video_tools_lock:
             if video_path not in self._video_tools:
                 logger.info(f"🔄 Initializing ScreenshotSelector for: {video_path}")
-                extractor = VisualFeatureExtractor(video_path)
-                selector = ScreenshotSelector(visual_extractor=extractor, config=self.config)
+                visual_feature_extractor_cls = _get_visual_feature_extractor_cls()
+                screenshot_selector_cls = _get_screenshot_selector_cls()
+                extractor = visual_feature_extractor_cls(video_path)
+                selector = screenshot_selector_cls(visual_extractor=extractor, config=self.config)
                 self._video_tools[video_path] = {
                     "extractor": extractor,
                     "selector": selector
@@ -2192,6 +3216,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         self._task_lock = threading.Lock()
         self._cache_metrics_task_id = None
         self._resume_report_lock = threading.Lock()
+        self._runtime_stage_repository_registry_lock = threading.Lock()
+        self._runtime_stage_repository_registry = RuntimeStageRepositoryRegistry()
         self._stage1_runtime_cache_lock = threading.Lock()
         # Stage1 运行态缓存：按 output_dir 保留到任务完成，不做 TTL/容量淘汰。
         self._stage1_runtime_cache: Dict[str, Dict[str, Any]] = {}
@@ -2204,7 +3230,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         self._runtime_recovery_stores: Dict[str, RuntimeRecoveryStore] = {}
 
         # LLM 分类并发探测器：AIMD 逐步加压，遇到失败回退
-        self._classify_concurrency_limiter = AdaptiveConcurrencyLimiter(
+        self._classify_concurrency_limiter = ServerAdaptiveConcurrencyLimiter(
             initial_limit=10,
             min_limit=2,
             max_limit=300
@@ -2239,18 +3265,17 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         )
 
         
-        # 创建 ProcessPool (使用 spawn 方式确保 Windows 兼容)
-        from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
-        from services.python_grpc.src.vision_validation.worker import init_cv_worker
-        self.cv_process_pool = create_spawn_process_pool(
-            max_workers=self.cv_worker_count,
-            initializer=init_cv_worker
-        )
-        
-        # SharedFrameRegistry 用于主进程预读帧
-        self.frame_registry = get_shared_frame_registry()
-        
-        logger.info(f"🚀 CV ProcessPool created: {self.cv_worker_count} workers + SharedMemory")
+        self._cv_runtime_lock = threading.Lock()
+        self.cv_process_pool = None
+        self.frame_registry = None
+        eager_cv_runtime = _to_bool(os.getenv("GRPC_SERVER_EAGER_CV_RUNTIME_INIT", ""), False)
+        if eager_cv_runtime:
+            self._ensure_cv_runtime(reason="startup_eager")
+        else:
+            logger.info(
+                "CV runtime deferred until first use: workers=%s (set GRPC_SERVER_EAGER_CV_RUNTIME_INIT=1 to restore eager init)",
+                self.cv_worker_count,
+            )
         logger.info("VideoProcessingServicer initialized (Java controls concurrency)")
         logger.info(
             "Resume control: enabled=%s mode=%s validation=%s retention_days=%s groups=%s",
@@ -2261,74 +3286,656 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             self.resume_control.groups,
         )
 
+    def _ensure_cv_runtime(self, reason: str = "first_use") -> None:
+        """按需初始化 CV 进程池与共享帧注册表，避免冷启动直接触发多进程导入风暴。"""
+        if self.cv_process_pool is not None and self.frame_registry is not None:
+            return
+
+        with self._cv_runtime_lock:
+            if self.cv_process_pool is not None and self.frame_registry is not None:
+                return
+
+            started_at = time.perf_counter()
+            from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
+            from services.python_grpc.src.vision_validation.worker import init_cv_worker
+
+            frame_registry_factory = _get_shared_frame_registry_factory()
+            self.cv_process_pool = create_spawn_process_pool(
+                max_workers=self.cv_worker_count,
+                initializer=init_cv_worker,
+            )
+            self.frame_registry = frame_registry_factory()
+            logger.info(
+                "CV runtime initialized: reason=%s, workers=%s, elapsed=%.2fs",
+                reason,
+                self.cv_worker_count,
+                time.perf_counter() - started_at,
+            )
+
+    def _get_cv_process_pool(self, reason: str = "first_use"):
+        self._ensure_cv_runtime(reason=reason)
+        return self.cv_process_pool
+
+    def _get_frame_registry(self, reason: str = "first_use"):
+        self._ensure_cv_runtime(reason=reason)
+        return self.frame_registry
+
+    def _get_runtime_stage_repository_registry(self) -> RuntimeStageRepositoryRegistry:
+        registry = getattr(self, "_runtime_stage_repository_registry", None)
+        if isinstance(registry, RuntimeStageRepositoryRegistry):
+            return registry
+        bootstrap_lock = getattr(self, "_runtime_stage_repository_registry_lock", None)
+        if bootstrap_lock is None:
+            bootstrap_lock = threading.Lock()
+            self._runtime_stage_repository_registry_lock = bootstrap_lock
+        with bootstrap_lock:
+            registry = getattr(self, "_runtime_stage_repository_registry", None)
+            if not isinstance(registry, RuntimeStageRepositoryRegistry):
+                registry = RuntimeStageRepositoryRegistry()
+                self._runtime_stage_repository_registry = registry
+        return registry
+
+    @staticmethod
+    def _build_transcribe_runtime_repository_id(output_dir: str) -> str:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        return f"transcribe::{normalized_output_dir}"
+
+    @staticmethod
+    def _build_download_runtime_repository_id(output_dir: str) -> str:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        return f"download::{normalized_output_dir}"
+
+    def _seed_download_runtime_repository(
+        self,
+        *,
+        output_dir: str,
+        task_id: str = "",
+        raw_video_input: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+        cache_entry = build_download_runtime_repository(
+            output_dir=normalized_output_dir,
+            task_id=task_id,
+            raw_video_input=raw_video_input,
+        )
+        self._get_runtime_stage_repository_registry().put(
+            stage="download",
+            output_dir=normalized_output_dir,
+            payload=cache_entry,
+            repository_id=self._build_download_runtime_repository_id(normalized_output_dir),
+            schema_version=DOWNLOAD_REPOSITORY_SCHEMA_VERSION,
+        )
+        return cache_entry
+
+    def _mark_download_runtime_outputs_ready(
+        self,
+        *,
+        output_dir: str,
+        flow_result: Any,
+        reused: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        def _mutator(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if not payload:
+                payload.update(
+                    build_download_runtime_repository(
+                        output_dir=normalized_output_dir,
+                    )
+                )
+            return update_download_repository_views(
+                payload,
+                flow_result=flow_result,
+                reused=reused,
+            )
+
+        updated_entry = self._get_runtime_stage_repository_registry().mutate(
+            stage="download",
+            output_dir=normalized_output_dir,
+            repository_id=self._build_download_runtime_repository_id(normalized_output_dir),
+            schema_version=DOWNLOAD_REPOSITORY_SCHEMA_VERSION,
+            mutator=_mutator,
+        )
+        return updated_entry.clone_payload()
+
+    def _clear_transcribe_runtime_cache(self, output_dir: str) -> None:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return
+        removed = self._get_runtime_stage_repository_registry().clear(
+            stage="transcribe",
+            output_dir=normalized_output_dir,
+        )
+        if removed is not None:
+            logger.info("Transcribe runtime cache cleared: output_dir=%s", normalized_output_dir)
+
+    def _seed_transcribe_runtime_outputs(
+        self,
+        *,
+        output_dir: str,
+        subtitle_path: str,
+        task_id: str = "",
+        video_path: str = "",
+        language: str = "",
+        input_fingerprint: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+        cache_entry = build_transcribe_runtime_repository(
+            output_dir=normalized_output_dir,
+            subtitle_path=subtitle_path,
+            task_id=task_id,
+            video_path=video_path,
+            language=language,
+            input_fingerprint=input_fingerprint,
+        )
+        self._get_runtime_stage_repository_registry().put(
+            stage="transcribe",
+            output_dir=normalized_output_dir,
+            payload=cache_entry,
+            repository_id=self._build_transcribe_runtime_repository_id(normalized_output_dir),
+            schema_version=TRANSCRIBE_REPOSITORY_SCHEMA_VERSION,
+        )
+        return copy.deepcopy(cache_entry)
+
+    def _upsert_transcribe_runtime_segment(
+        self,
+        *,
+        output_dir: str,
+        subtitle_path: str,
+        segment: Optional[Dict[str, Any]],
+        total_segments: int,
+        chunk_id: str,
+        input_fingerprint: str,
+        status: str,
+        scope_ref: str = "",
+        result_payload: Optional[Dict[str, Any]] = None,
+        error: Any = None,
+        source: str = "runtime",
+        task_id: str = "",
+        video_path: str = "",
+        language: str = "",
+        stage_input_fingerprint: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        def _mutator(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if not payload:
+                payload.update(
+                    build_transcribe_runtime_repository(
+                        output_dir=normalized_output_dir,
+                        subtitle_path=subtitle_path,
+                        task_id=task_id,
+                        video_path=video_path,
+                        language=language,
+                        input_fingerprint=stage_input_fingerprint,
+                    )
+                )
+            elif subtitle_path and not payload.get("subtitle_path"):
+                payload["subtitle_path"] = os.path.abspath(str(subtitle_path or "").strip())
+            if language and not payload.get("language"):
+                payload["language"] = str(language or "").strip()
+            if stage_input_fingerprint and not payload.get("input_fingerprint"):
+                payload["input_fingerprint"] = str(stage_input_fingerprint or "").strip()
+            return upsert_transcribe_runtime_segment(
+                payload,
+                segment=segment,
+                total_segments=total_segments,
+                chunk_id=chunk_id,
+                input_fingerprint=input_fingerprint,
+                status=status,
+                scope_ref=scope_ref,
+                result_payload=result_payload,
+                error=error,
+                source=source,
+            )
+
+        updated_entry = self._get_runtime_stage_repository_registry().mutate(
+            stage="transcribe",
+            output_dir=normalized_output_dir,
+            repository_id=self._build_transcribe_runtime_repository_id(normalized_output_dir),
+            schema_version=TRANSCRIBE_REPOSITORY_SCHEMA_VERSION,
+            mutator=_mutator,
+        )
+        return updated_entry.clone_payload()
+
+    def _mark_transcribe_runtime_outputs_ready(
+        self,
+        *,
+        output_dir: str,
+        subtitle_path: str,
+        subtitle_text: str,
+        reused: bool = False,
+        task_id: str = "",
+        video_path: str = "",
+        language: str = "",
+        input_fingerprint: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        def _mutator(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if not payload:
+                payload.update(
+                    build_transcribe_runtime_repository(
+                        output_dir=normalized_output_dir,
+                        subtitle_path=subtitle_path,
+                        task_id=task_id,
+                        video_path=video_path,
+                        language=language,
+                        input_fingerprint=input_fingerprint,
+                    )
+                )
+            return mark_transcribe_repository_completed(
+                payload,
+                subtitle_path=subtitle_path,
+                subtitle_text=subtitle_text,
+                reused=reused,
+            )
+
+        updated_entry = self._get_runtime_stage_repository_registry().mutate(
+            stage="transcribe",
+            output_dir=normalized_output_dir,
+            repository_id=self._build_transcribe_runtime_repository_id(normalized_output_dir),
+            schema_version=TRANSCRIBE_REPOSITORY_SCHEMA_VERSION,
+            mutator=_mutator,
+        )
+        return updated_entry.clone_payload()
+
+    def _get_transcribe_runtime_outputs(
+        self,
+        *,
+        output_dir: str,
+        subtitle_path: str = "",
+        deep_copy: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+        normalized_subtitle_path = os.path.abspath(str(subtitle_path or "").strip()) if subtitle_path else os.path.join(
+            normalized_output_dir,
+            "subtitles.txt",
+        )
+
+        repository_entry = self._get_runtime_stage_repository_registry().get(
+            stage="transcribe",
+            output_dir=normalized_output_dir,
+        )
+        if repository_entry is not None:
+            return repository_entry.clone_payload() if deep_copy else repository_entry.payload
+
+        rebuilt_payload: Optional[Dict[str, Any]] = None
+        transcribe_store = self._get_runtime_recovery_store(output_dir=normalized_output_dir, task_id="")
+        if transcribe_store is not None:
+            committed_rows = transcribe_store.list_sqlite_chunk_records(
+                stage="transcribe",
+                status=STATUS_SUCCESS,
+                limit=4096,
+            )
+            restore_requests: List[Dict[str, Any]] = []
+            for row in list(committed_rows or []):
+                if not isinstance(row, dict):
+                    continue
+                chunk_id = str(row.get("chunk_id", "") or "").strip()
+                input_fingerprint = str(row.get("input_fingerprint", "") or "").strip()
+                if not chunk_id or not input_fingerprint:
+                    continue
+                restore_requests.append(
+                    {
+                        "stage": "transcribe",
+                        "chunk_id": chunk_id,
+                        "input_fingerprint": input_fingerprint,
+                    }
+                )
+            restored_rows = (
+                transcribe_store.batch_load_committed_chunk_payloads(restore_requests)
+                if restore_requests
+                else []
+            )
+            if restored_rows:
+                rebuilt_payload = build_transcribe_repository_from_restored_rows(
+                    output_dir=normalized_output_dir,
+                    subtitle_path=normalized_subtitle_path,
+                    restored_rows=restored_rows,
+                )
+
+        if rebuilt_payload is None and os.path.exists(normalized_subtitle_path):
+            try:
+                with open(normalized_subtitle_path, "r", encoding="utf-8") as subtitle_file:
+                    subtitle_text = subtitle_file.read()
+            except Exception:
+                subtitle_text = ""
+            if subtitle_text:
+                rebuilt_payload = build_transcribe_runtime_repository(
+                    output_dir=normalized_output_dir,
+                    subtitle_path=normalized_subtitle_path,
+                )
+                rebuilt_payload = mark_transcribe_repository_completed(
+                    rebuilt_payload,
+                    subtitle_path=normalized_subtitle_path,
+                    subtitle_text=subtitle_text,
+                    reused=True,
+                )
+
+        if not isinstance(rebuilt_payload, dict):
+            return None
+
+        self._get_runtime_stage_repository_registry().put(
+            stage="transcribe",
+            output_dir=normalized_output_dir,
+            payload=rebuilt_payload,
+            repository_id=self._build_transcribe_runtime_repository_id(normalized_output_dir),
+            schema_version=TRANSCRIBE_REPOSITORY_SCHEMA_VERSION,
+        )
+        return copy.deepcopy(rebuilt_payload) if deep_copy else rebuilt_payload
+
+    def _materialize_subtitle_from_transcribe_runtime(
+        self,
+        *,
+        output_dir: str,
+        subtitle_path: str,
+    ) -> bool:
+        runtime_state = self._get_transcribe_runtime_outputs(
+            output_dir=output_dir,
+            subtitle_path=subtitle_path,
+            deep_copy=True,
+        )
+        if not isinstance(runtime_state, dict):
+            return False
+        subtitle_text = str(runtime_state.get("subtitle_text", "") or "")
+        if not subtitle_text:
+            return False
+        normalized_subtitle_path = os.path.abspath(str(subtitle_path or "").strip())
+        if not normalized_subtitle_path:
+            return False
+        os.makedirs(os.path.dirname(normalized_subtitle_path), exist_ok=True)
+        with open(normalized_subtitle_path, "w", encoding="utf-8") as subtitle_file:
+            subtitle_file.write(subtitle_text)
+        logger.info(
+            "Subtitle materialized from transcribe runtime repository: output_dir=%s, subtitle_path=%s, subtitle_chars=%s",
+            output_dir,
+            normalized_subtitle_path,
+            len(subtitle_text),
+        )
+        return True
+
     def _clear_stage1_runtime_cache(self, output_dir: str) -> None:
         """任务完成后清理指定 output_dir 的 Stage1 运行态缓存。"""
         normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
         if not normalized_output_dir:
             return
-        with self._stage1_runtime_cache_lock:
-            removed = self._stage1_runtime_cache.pop(normalized_output_dir, None)
+        removed = self._get_runtime_stage_repository_registry().clear(
+            stage="stage1",
+            output_dir=normalized_output_dir,
+        )
         if removed is not None:
             logger.info("Stage1 runtime cache cleared: output_dir=%s", normalized_output_dir)
 
-    def _cache_stage1_runtime_outputs(self, output_dir: str, final_state: Optional[Dict[str, Any]]) -> None:
-        """缓存 Stage1 关键产物到内存，供非复用链路直接透传。"""
-        if not isinstance(final_state, dict):
-            return
-
-        corrected_subtitles = final_state.get("corrected_subtitles", [])
-        pure_text_script = final_state.get("pure_text_script", [])
-        if not isinstance(corrected_subtitles, list):
-            corrected_subtitles = []
-        if not isinstance(pure_text_script, list):
-            pure_text_script = []
-        if not corrected_subtitles and not pure_text_script:
-            return
-
+    @staticmethod
+    def _build_stage1_runtime_repository_id(output_dir: str) -> str:
         normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
-        if not normalized_output_dir:
-            return
+        return f"stage1::{normalized_output_dir}"
 
-        cache_entry = {
-            "step2_subtitles": copy.deepcopy(corrected_subtitles),
-            "step6_paragraphs": copy.deepcopy(pure_text_script),
-        }
-        with self._stage1_runtime_cache_lock:
-            self._stage1_runtime_cache[normalized_output_dir] = cache_entry
-
-        logger.info(
-            "Stage1 runtime cache updated (retain-until-task-complete): output_dir=%s, step2_items=%s, step6_paragraphs=%s",
-            normalized_output_dir,
-            len(corrected_subtitles),
-            len(pure_text_script),
+    @staticmethod
+    def _build_stage1_runtime_cache_entry(final_state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        payload = build_stage1_runtime_repository(output_dir=".", max_step=6)
+        payload = mark_stage1_runtime_outputs_ready(
+            payload,
+            final_state=final_state,
+            reused=False,
         )
+        if not payload.get("ready", False):
+            return None
+        return payload
 
-    def _get_stage1_runtime_outputs(self, output_dir: str) -> Optional[Dict[str, Any]]:
-        """读取 Stage1 进程内缓存命中，未命中返回 None。"""
+    def _seed_stage1_runtime_repository(
+        self,
+        *,
+        output_dir: str,
+        task_id: str = "",
+        video_path: str = "",
+        subtitle_path: str = "",
+        max_step: int = 6,
+        input_fingerprint: str = "",
+        resume_from_step: str = "",
+        resume_entry_step: str = "",
+        recovery_plan_digest: str = "",
+    ) -> Optional[Dict[str, Any]]:
         normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
         if not normalized_output_dir:
             return None
 
-        with self._stage1_runtime_cache_lock:
-            entry = self._stage1_runtime_cache.get(normalized_output_dir)
-            if entry is None:
-                return None
-            return {
-                "step2_subtitles": copy.deepcopy(entry.get("step2_subtitles", [])),
-                "step6_paragraphs": copy.deepcopy(entry.get("step6_paragraphs", [])),
-            }
+        def _mutator(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if not payload:
+                payload.update(
+                    build_stage1_runtime_repository(
+                        output_dir=normalized_output_dir,
+                        subtitle_path=subtitle_path,
+                        task_id=task_id,
+                        video_path=video_path,
+                        max_step=max_step,
+                        input_fingerprint=input_fingerprint,
+                        resume_from_step=resume_from_step,
+                        resume_entry_step=resume_entry_step,
+                        recovery_plan_digest=recovery_plan_digest,
+                    )
+                )
+            payload["task_id"] = str(task_id or payload.get("task_id", "") or "").strip()
+            payload["video_path"] = str(video_path or payload.get("video_path", "") or "").strip()
+            if subtitle_path:
+                payload["subtitle_path"] = os.path.abspath(str(subtitle_path or "").strip())
+            payload["max_step"] = max(1, _to_int(max_step, _to_int(payload.get("max_step", 6), 6)))
+            if input_fingerprint:
+                payload["input_fingerprint"] = str(input_fingerprint or "").strip()
+            payload["resume_from_step"] = str(resume_from_step or payload.get("resume_from_step", "") or "").strip()
+            payload["resume_entry_step"] = str(resume_entry_step or payload.get("resume_entry_step", "") or "").strip()
+            payload["recovery_plan_digest"] = str(
+                recovery_plan_digest or payload.get("recovery_plan_digest", "") or ""
+            ).strip()
+            payload["updated_at_ms"] = int(time.time() * 1000)
+            return payload
+
+        updated_entry = self._get_runtime_stage_repository_registry().mutate(
+            stage="stage1",
+            output_dir=normalized_output_dir,
+            repository_id=self._build_stage1_runtime_repository_id(normalized_output_dir),
+            schema_version=STAGE1_REPOSITORY_SCHEMA_VERSION,
+            mutator=_mutator,
+        )
+        return updated_entry.clone_payload()
+
+    def _record_stage1_runtime_progress_event(
+        self,
+        *,
+        output_dir: str,
+        event: Optional[Dict[str, Any]],
+        task_id: str = "",
+        video_path: str = "",
+        subtitle_path: str = "",
+        max_step: int = 6,
+        input_fingerprint: str = "",
+        resume_from_step: str = "",
+        resume_entry_step: str = "",
+        recovery_plan_digest: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        def _mutator(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if not payload:
+                payload.update(
+                    build_stage1_runtime_repository(
+                        output_dir=normalized_output_dir,
+                        subtitle_path=subtitle_path,
+                        task_id=task_id,
+                        video_path=video_path,
+                        max_step=max_step,
+                        input_fingerprint=input_fingerprint,
+                        resume_from_step=resume_from_step,
+                        resume_entry_step=resume_entry_step,
+                        recovery_plan_digest=recovery_plan_digest,
+                    )
+                )
+            payload["task_id"] = str(task_id or payload.get("task_id", "") or "").strip()
+            payload["video_path"] = str(video_path or payload.get("video_path", "") or "").strip()
+            if subtitle_path:
+                payload["subtitle_path"] = os.path.abspath(str(subtitle_path or "").strip())
+            if input_fingerprint:
+                payload["input_fingerprint"] = str(input_fingerprint or "").strip()
+            payload["resume_from_step"] = str(resume_from_step or payload.get("resume_from_step", "") or "").strip()
+            payload["resume_entry_step"] = str(resume_entry_step or payload.get("resume_entry_step", "") or "").strip()
+            payload["recovery_plan_digest"] = str(
+                recovery_plan_digest or payload.get("recovery_plan_digest", "") or ""
+            ).strip()
+            payload["max_step"] = max(1, _to_int(max_step, _to_int(payload.get("max_step", 6), 6)))
+            return apply_stage1_progress_event(payload, event=event)
+
+        updated_entry = self._get_runtime_stage_repository_registry().mutate(
+            stage="stage1",
+            output_dir=normalized_output_dir,
+            repository_id=self._build_stage1_runtime_repository_id(normalized_output_dir),
+            schema_version=STAGE1_REPOSITORY_SCHEMA_VERSION,
+            mutator=_mutator,
+        )
+        return updated_entry.clone_payload()
+
+    def _cache_stage1_runtime_outputs(
+        self,
+        output_dir: str,
+        final_state: Optional[Dict[str, Any]],
+        *,
+        task_id: str = "",
+        video_path: str = "",
+        subtitle_path: str = "",
+        max_step: int = 6,
+        input_fingerprint: str = "",
+        reused: bool = False,
+        resume_from_step: str = "",
+        resume_entry_step: str = "",
+        recovery_plan_digest: str = "",
+    ) -> None:
+        """缓存 Stage1 关键产物到内存，供非复用链路直接透传。"""
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return
+
+        def _mutator(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if not payload:
+                payload.update(
+                    build_stage1_runtime_repository(
+                        output_dir=normalized_output_dir,
+                        subtitle_path=subtitle_path,
+                        task_id=task_id,
+                        video_path=video_path,
+                        max_step=max_step,
+                        input_fingerprint=input_fingerprint,
+                        resume_from_step=resume_from_step,
+                        resume_entry_step=resume_entry_step,
+                        recovery_plan_digest=recovery_plan_digest,
+                    )
+                )
+            payload["task_id"] = str(task_id or payload.get("task_id", "") or "").strip()
+            payload["video_path"] = str(video_path or payload.get("video_path", "") or "").strip()
+            if subtitle_path:
+                payload["subtitle_path"] = os.path.abspath(str(subtitle_path or "").strip())
+            payload["max_step"] = max(1, _to_int(max_step, _to_int(payload.get("max_step", 6), 6)))
+            if input_fingerprint:
+                payload["input_fingerprint"] = str(input_fingerprint or "").strip()
+            payload["resume_from_step"] = str(resume_from_step or payload.get("resume_from_step", "") or "").strip()
+            payload["resume_entry_step"] = str(resume_entry_step or payload.get("resume_entry_step", "") or "").strip()
+            payload["recovery_plan_digest"] = str(
+                recovery_plan_digest or payload.get("recovery_plan_digest", "") or ""
+            ).strip()
+            return mark_stage1_runtime_outputs_ready(
+                payload,
+                final_state=final_state,
+                reused=reused,
+            )
+
+        updated_entry = self._get_runtime_stage_repository_registry().mutate(
+            stage="stage1",
+            output_dir=normalized_output_dir,
+            repository_id=self._build_stage1_runtime_repository_id(normalized_output_dir),
+            schema_version=STAGE1_REPOSITORY_SCHEMA_VERSION,
+            mutator=_mutator,
+        )
+        cache_entry = updated_entry.clone_payload()
+        if not cache_entry.get("ready", False):
+            return
+        cache_views = get_stage1_repository_views(cache_entry)
+
+        logger.info(
+            "Stage1 runtime cache updated (retain-until-task-complete): output_dir=%s, step2_items=%s, step6_paragraphs=%s, sentence_timestamps=%s, current_step=%s, reused=%s",
+            normalized_output_dir,
+            len(cache_views.get("step2_subtitles", []) or []),
+            len(cache_views.get("step6_paragraphs", []) or []),
+            len(cache_views.get("sentence_timestamps", {}) or {}),
+            str(cache_entry.get("current_step", "") or ""),
+            bool(cache_entry.get("reused", False)),
+        )
+
+    def _get_stage1_runtime_outputs(self, output_dir: str) -> Optional[Dict[str, Any]]:
+        """读取 Stage1 运行态缓存，未命中时尝试从任务内 SQLite 投影恢复。"""
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        repository_entry = self._get_runtime_stage_repository_registry().get(
+            stage="stage1",
+            output_dir=normalized_output_dir,
+        )
+        entry = repository_entry.payload if repository_entry is not None else None
+        if entry is not None:
+            return copy.deepcopy(entry)
+
+        try:
+            projector_cls = _get_stage1_projection_repository_cls()
+            projected_state = projector_cls(output_dir=normalized_output_dir).load_projected_state()
+        except Exception as error:
+            logger.warning("Stage1 runtime projection failed: output_dir=%s error=%s", normalized_output_dir, error)
+            return None
+        cache_entry = build_stage1_repository_from_projected_state(
+            output_dir=normalized_output_dir,
+            projected_state=projected_state,
+        )
+        if cache_entry is None:
+            return None
+        self._get_runtime_stage_repository_registry().put(
+            stage="stage1",
+            output_dir=normalized_output_dir,
+            payload=cache_entry,
+            repository_id=self._build_stage1_runtime_repository_id(normalized_output_dir),
+            schema_version=STAGE1_REPOSITORY_SCHEMA_VERSION,
+        )
+        cache_views = get_stage1_repository_views(cache_entry)
+        logger.info(
+            "Stage1 runtime projection restored: output_dir=%s, step2_items=%s, step6_paragraphs=%s, sentence_timestamps=%s, current_step=%s",
+            normalized_output_dir,
+            len(cache_views.get("step2_subtitles", []) or []),
+            len(cache_views.get("step6_paragraphs", []) or []),
+            len(cache_views.get("sentence_timestamps", {}) or {}),
+            str(cache_entry.get("current_step", "") or ""),
+        )
+        return copy.deepcopy(cache_entry)
 
     def _clear_phase2a_runtime_cache(self, output_dir: str) -> None:
         """任务完成后清理指定 output_dir 的 Phase2A 运行态缓存。"""
         normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
         if not normalized_output_dir:
             return
-        with self._phase2a_runtime_cache_lock:
-            removed = self._phase2a_runtime_cache.pop(normalized_output_dir, None)
-            if isinstance(removed, dict):
-                removed_ref_id = str(removed.get("ref_id", "")).strip()
-                if removed_ref_id:
-                    self._phase2a_ref_cache.pop(removed_ref_id, None)
+        removed = self._get_runtime_stage_repository_registry().clear(
+            stage="phase2a",
+            output_dir=normalized_output_dir,
+        )
         if removed is not None:
             logger.info("Phase2A runtime cache cleared: output_dir=%s", normalized_output_dir)
 
@@ -2347,66 +3954,30 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         if not normalized_output_dir:
             return None
 
-        normalized_path = os.path.abspath(str(semantic_units_path or "").strip()) if semantic_units_path else ""
-        canonical_bytes = json.dumps(
-            semantic_units,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-        fingerprint = hashlib.sha256(canonical_bytes).hexdigest()
-        compressed_bytes = gzip.compress(canonical_bytes)
-        if len(compressed_bytes) < len(canonical_bytes):
-            inline_payload = compressed_bytes
-            inline_codec = "json-utf8-gzip"
-        else:
-            inline_payload = canonical_bytes
-            inline_codec = "json-utf8"
-        inline_sha256 = hashlib.sha256(inline_payload).hexdigest()
-
-        ref_id = f"{(task_id or 'phase2a')}_{uuid.uuid4().hex}"
-        cache_entry = {
-            "semantic_units_path": normalized_path,
-            "semantic_units": copy.deepcopy(semantic_units),
-            "output_dir": normalized_output_dir,
-            "task_id": str(task_id or "").strip(),
-            "ref_id": ref_id,
-            "unit_count": len(semantic_units),
-            "schema_version": "phase2a.v1",
-            "fingerprint": fingerprint,
-            "inline_payload": inline_payload,
-            "inline_codec": inline_codec,
-            "inline_sha256": inline_sha256,
-        }
-        with self._phase2a_runtime_cache_lock:
-            previous = self._phase2a_runtime_cache.get(normalized_output_dir)
-            if isinstance(previous, dict):
-                previous_ref_id = str(previous.get("ref_id", "")).strip()
-                if previous_ref_id:
-                    self._phase2a_ref_cache.pop(previous_ref_id, None)
-            self._phase2a_runtime_cache[normalized_output_dir] = cache_entry
-            self._phase2a_ref_cache[ref_id] = cache_entry
+        repository_entry = build_phase2a_runtime_repository(
+            output_dir=normalized_output_dir,
+            semantic_units_path=semantic_units_path,
+            semantic_units=semantic_units,
+            task_id=task_id,
+        )
+        ref_id = str(repository_entry.get("ref_id", "") or "").strip()
+        self._get_runtime_stage_repository_registry().put(
+            stage="phase2a",
+            output_dir=normalized_output_dir,
+            payload=repository_entry,
+            repository_id=ref_id,
+            schema_version=PHASE2A_REPOSITORY_SCHEMA_VERSION,
+        )
+        phase2a_views = get_phase2a_repository_views(repository_entry)
 
         logger.info(
             "Phase2A runtime cache updated: output_dir=%s, semantic_units=%s, path=%s, ref_id=%s",
             normalized_output_dir,
             len(semantic_units),
-            normalized_path,
+            str(phase2a_views.get("semantic_units_path", "") or ""),
             ref_id,
         )
-        return {
-            "semantic_units_path": normalized_path,
-            "output_dir": normalized_output_dir,
-            "task_id": str(task_id or "").strip(),
-            "ref_id": ref_id,
-            "unit_count": len(semantic_units),
-            "schema_version": "phase2a.v1",
-            "fingerprint": fingerprint,
-            "inline_payload": inline_payload,
-            "inline_codec": inline_codec,
-            "inline_sha256": inline_sha256,
-        }
+        return copy.deepcopy(repository_entry)
 
     def _get_phase2a_runtime_semantic_units(
         self,
@@ -2419,12 +3990,30 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         if not normalized_output_dir:
             return None
 
-        with self._phase2a_runtime_cache_lock:
-            entry = self._phase2a_runtime_cache.get(normalized_output_dir)
-            if entry is None:
+        repository_entry = self._get_runtime_stage_repository_registry().get(
+            stage="phase2a",
+            output_dir=normalized_output_dir,
+        )
+        entry = repository_entry.payload if repository_entry is not None else None
+        if entry is None:
+            artifact_payload = _load_phase2a_semantic_units_payload_from_store(output_dir=normalized_output_dir)
+            if artifact_payload in (None, "", [], {}):
                 return None
-            cached_units = entry.get("semantic_units")
-            cached_path = str(entry.get("semantic_units_path", "")).strip()
+            normalized_units = self._normalize_semantic_units_payload(artifact_payload)
+            cache_entry = self._cache_phase2a_runtime_semantic_units(
+                output_dir=normalized_output_dir,
+                semantic_units_path=_phase2a_semantic_units_virtual_path(normalized_output_dir),
+                semantic_units=normalized_units,
+            )
+            if not isinstance(cache_entry, dict):
+                return None
+            cache_views = get_phase2a_repository_views(cache_entry)
+            cached_units = cache_views.get("semantic_units")
+            cached_path = str(cache_views.get("semantic_units_path", "")).strip()
+        else:
+            cache_views = get_phase2a_repository_views(entry)
+            cached_units = cache_views.get("semantic_units")
+            cached_path = str(cache_views.get("semantic_units_path", "")).strip()
 
         if not isinstance(cached_units, list):
             return None
@@ -2450,32 +4039,137 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         normalized_ref_id = str(ref_id or "").strip()
         if not normalized_ref_id:
             return None
-        with self._phase2a_runtime_cache_lock:
-            entry = self._phase2a_ref_cache.get(normalized_ref_id)
-            if entry is None:
-                return None
-            if deep_copy:
-                return copy.deepcopy(entry)
-            return entry
+        repository_entry = self._get_runtime_stage_repository_registry().get_by_repository_id(normalized_ref_id)
+        if repository_entry is None:
+            return None
+        if deep_copy:
+            return repository_entry.clone_payload()
+        return repository_entry.payload
+
+    def _build_phase2b_runtime_repository_id(self, output_dir: str) -> str:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return ""
+        return f"phase2b::{normalized_output_dir}"
+
+    def _cache_phase2b_runtime_outputs(
+        self,
+        output_dir: str,
+        markdown_path: str,
+        json_path: str,
+        title: str = "",
+        task_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+        repository_id = self._build_phase2b_runtime_repository_id(normalized_output_dir)
+        repository_entry = build_phase2b_runtime_repository(
+            output_dir=normalized_output_dir,
+            task_id=task_id,
+            title=title,
+        )
+        update_phase2b_repository_views(
+            repository_entry,
+            markdown_path=markdown_path,
+            json_path=json_path,
+            title=title,
+        )
+        self._get_runtime_stage_repository_registry().put(
+            stage="phase2b",
+            output_dir=normalized_output_dir,
+            payload=repository_entry,
+            repository_id=repository_id,
+            schema_version=PHASE2B_REPOSITORY_SCHEMA_VERSION,
+        )
+        logger.info(
+            "Phase2B runtime cache updated: output_dir=%s, markdown=%s, json=%s",
+            normalized_output_dir,
+            str(markdown_path or ""),
+            str(json_path or ""),
+        )
+        return copy.deepcopy(repository_entry)
+
+    def _get_phase2b_runtime_outputs(
+        self,
+        output_dir: str,
+        deep_copy: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+        repository_entry = self._get_runtime_stage_repository_registry().get(
+            stage="phase2b",
+            output_dir=normalized_output_dir,
+        )
+        if repository_entry is None:
+            restored_views = _load_phase2b_runtime_outputs_from_store(output_dir=normalized_output_dir)
+            if isinstance(restored_views, dict):
+                cached_payload = self._cache_phase2b_runtime_outputs(
+                    output_dir=normalized_output_dir,
+                    markdown_path=str(restored_views.get("markdown_path", "") or ""),
+                    json_path=str(restored_views.get("json_path", "") or ""),
+                    title=str(restored_views.get("title", "") or ""),
+                    task_id=Path(normalized_output_dir).name,
+                )
+                if isinstance(cached_payload, dict):
+                    repository_entry = self._get_runtime_stage_repository_registry().get(
+                        stage="phase2b",
+                        output_dir=normalized_output_dir,
+                    )
+        if repository_entry is None:
+            return None
+        payload = repository_entry.clone_payload() if deep_copy else repository_entry.payload
+        return get_phase2b_repository_views(payload)
+
+    def _get_phase2b_runtime_cache_entry_by_ref(
+        self,
+        ref_id: str,
+        deep_copy: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_ref_id = str(ref_id or "").strip()
+        if not normalized_ref_id:
+            return None
+        repository_entry = self._get_runtime_stage_repository_registry().get_by_repository_id(normalized_ref_id)
+        if repository_entry is None:
+            return None
+        if deep_copy:
+            return repository_entry.clone_payload()
+        return repository_entry.payload
+
+    def _clear_phase2b_runtime_cache(self, output_dir: str) -> None:
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return
+        removed = self._get_runtime_stage_repository_registry().clear(
+            stage="phase2b",
+            output_dir=normalized_output_dir,
+        )
+        if removed is not None:
+            logger.info("Phase2B runtime cache cleared: output_dir=%s", normalized_output_dir)
 
     def _iter_semantic_unit_nodes(self, data: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         """遍历语义单元节点并附带分组元信息。"""
-        return shared_iter_semantic_unit_nodes(data)
+        semantic_payload_runtime = _get_semantic_payload_runtime()
+        return semantic_payload_runtime["iter_semantic_unit_nodes"](data)
 
     def _build_semantic_unit_index(self, data: Any) -> Dict[str, Dict[str, Any]]:
         """为语义单元 payload 建立 `unit_id -> unit_node` 索引。"""
-        return shared_build_semantic_unit_index(data)
+        semantic_payload_runtime = _get_semantic_payload_runtime()
+        return semantic_payload_runtime["build_semantic_unit_index"](data)
 
     def _normalize_semantic_units_payload(self, data: Any) -> List[Dict[str, Any]]:
         """规范化语义单元载荷，统一返回扁平 List[Dict]。"""
-        return shared_normalize_semantic_units_payload(data)
+        semantic_payload_runtime = _get_semantic_payload_runtime()
+        return semantic_payload_runtime["normalize_semantic_units_payload"](data)
 
     def _build_grouped_semantic_units_payload(
         self,
         semantic_units: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """将扁平语义单元重建为 `knowledge_groups` 结构。"""
-        return shared_build_grouped_semantic_units_payload(
+        semantic_payload_runtime = _get_semantic_payload_runtime()
+        return semantic_payload_runtime["build_grouped_semantic_units_payload"](
             semantic_units,
             schema_version="phase2a.grouped.v1",
             default_group_reason="同一核心论点聚合",
@@ -2487,8 +4181,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         normalized_path = os.path.abspath(str(json_path or "").strip())
         if not normalized_path:
             return []
-        with open(normalized_path, "r", encoding="utf-8") as file_obj:
-            data = json.load(file_obj)
+        if os.path.exists(normalized_path):
+            with open(normalized_path, "r", encoding="utf-8") as file_obj:
+                data = json.load(file_obj)
+        else:
+            output_dir = _resolve_phase2a_output_dir_from_semantic_units_path(normalized_path)
+            data = _load_phase2a_semantic_units_payload_from_store(output_dir=output_dir)
+            if data in (None, "", [], {}):
+                return []
         return self._normalize_semantic_units_payload(data)
 
     def _build_semantic_units_inline_message(
@@ -2499,12 +4199,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         """将语义单元编码为 inline protobuf（优先 gzip 以降低传输体积）。"""
         inline_msg = video_processing_pb2.SemanticUnitsInline()
         if isinstance(cache_entry, dict):
-            cached_payload = bytes(cache_entry.get("inline_payload") or b"")
+            cache_views = get_phase2a_repository_views(cache_entry)
+            cached_payload = bytes(cache_views.get("inline_payload") or b"")
             if cached_payload:
                 inline_msg.payload = cached_payload
-                inline_msg.codec = str(cache_entry.get("inline_codec", "") or "json-utf8")
-                inline_msg.unit_count = int(cache_entry.get("unit_count", 0) or 0)
-                inline_msg.sha256 = str(cache_entry.get("inline_sha256", "") or hashlib.sha256(cached_payload).hexdigest())
+                inline_msg.codec = str(cache_views.get("inline_codec", "") or "json-utf8")
+                inline_msg.unit_count = int(cache_views.get("unit_count", 0) or 0)
+                inline_msg.sha256 = str(cache_views.get("inline_sha256", "") or sha256_bytes(cached_payload))
                 return inline_msg
 
         if not isinstance(semantic_units, list):
@@ -2527,7 +4228,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         inline_msg.payload = payload
         inline_msg.codec = codec
         inline_msg.unit_count = len(semantic_units)
-        inline_msg.sha256 = hashlib.sha256(payload).hexdigest()
+        inline_msg.sha256 = sha256_bytes(payload)
         return inline_msg
 
     def _decode_semantic_units_inline_message(
@@ -2646,18 +4347,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         semantic_units: List[Dict[str, Any]],
     ) -> str:
         """
-        将内存语义单元落盘到 intermediates，供 Phase2B assemble_only 复用既有文件装配链路。
-        为什么：在不改动 RichTextPipeline 输入契约的前提下，消除 Java->Python 路径传递依赖。
+        将内存语义单元转为任务内 SQLite 恢复产物，供 Phase2B 在路径缺失时按虚拟路径回读。
+        为什么：消除 semantic_units_from_rpc_*.json 这类纯运行态 JSON。
         """
-        intermediates_dir = os.path.join(output_dir, "intermediates")
-        os.makedirs(intermediates_dir, exist_ok=True)
         grouped_payload = self._build_grouped_semantic_units_payload(semantic_units)
-        suffix = hashlib.sha256(json.dumps(grouped_payload, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:12]
-        task_tag = str(task_id or "unknown")
-        materialized_path = os.path.join(intermediates_dir, f"semantic_units_from_rpc_{task_tag}_{suffix}.json")
-        with open(materialized_path, "w", encoding="utf-8") as file_obj:
-            json.dump(grouped_payload, file_obj, ensure_ascii=False, indent=2)
-        return materialized_path
+        persisted_paths = _persist_phase2a_semantic_units_payload(output_dir, grouped_payload, task_id=task_id)
+        return persisted_paths[0] if persisted_paths else _phase2a_semantic_units_virtual_path(output_dir)
 
 
 
@@ -2772,7 +4467,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         }
         try:
             task_source = _build_task_dir_encoding_source(raw_video_input)
-            task_hash = hashlib.md5(task_source.encode("utf-8")).hexdigest()
+            task_hash = md5_text_compat(task_source)
             predicted_output_dir = os.path.join(_get_primary_storage_root(), task_hash)
         except Exception:
             predicted_output_dir = str(request.output_dir or "").strip()
@@ -2789,10 +4484,98 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             if predicted_output_dir
             else None
         )
+        download_store = (
+            self._get_runtime_recovery_store(output_dir=predicted_output_dir, task_id=task_id)
+            if predicted_output_dir
+            else None
+        )
+        download_stage_input_fingerprint = ""
+        download_fetch_substage_scope_ref = ""
+        download_fetch_substage_scope_id = ""
+        download_fetch_chunk_id = "download.fetch.wave_0001"
+        download_fetch_chunk_metadata: Dict[str, Any] = {}
+        download_verify_substage_scope_ref = ""
+        download_verify_substage_scope_id = ""
+        download_verify_chunk_id = "download.verify.wave_0001"
+        download_verify_chunk_metadata: Dict[str, Any] = {}
+        if download_store is not None:
+            download_stage_input_fingerprint = build_runtime_payload_fingerprint(
+                {
+                    "stage": "download",
+                    "raw_video_input": raw_video_input,
+                    "output_dir": predicted_output_dir,
+                },
+                extra={"stage": "download"},
+            )
+            download_runtime_base_payload["input_fingerprint"] = download_stage_input_fingerprint
+            download_fetch_substage_scope_ref = download_store.build_substage_scope_ref(
+                stage="download",
+                substage_name="fetch",
+                wave_id="wave_0001",
+            )
+            download_fetch_substage_scope_id = download_store.build_substage_scope_id(
+                substage_name="fetch",
+                wave_id="wave_0001",
+            )
+            download_fetch_chunk_metadata = {
+                "storage_backend": "sqlite",
+                "scope_variant": "download_fetch",
+                "stage_step": "download.fetch",
+                "substage_scope_ref": download_fetch_substage_scope_ref,
+                "substage_name": "fetch",
+                "wave_id": "wave_0001",
+            }
+            download_verify_substage_scope_ref = download_store.build_substage_scope_ref(
+                stage="download",
+                substage_name="verify",
+                wave_id="wave_0001",
+            )
+            download_verify_substage_scope_id = download_store.build_substage_scope_id(
+                substage_name="verify",
+                wave_id="wave_0001",
+            )
+            download_store.reset_running_scopes_to_planned(
+                stage="download",
+                scope_type="substage",
+                reason="process_restarted",
+            )
+            download_store.reset_running_scopes_to_planned(
+                stage="download",
+                scope_type="chunk",
+                reason="process_restarted",
+            )
+            download_store.plan_substage_scope(
+                stage="download",
+                substage_name="fetch",
+                wave_id="wave_0001",
+                input_fingerprint=download_stage_input_fingerprint,
+                plan_context={
+                    "work_units": [
+                        {
+                            "scope_type": "chunk",
+                            "chunk_id": download_fetch_chunk_id,
+                            "kind": "file_download",
+                        }
+                    ],
+                    "raw_video_input": raw_video_input,
+                },
+            )
+            download_store.record_chunk_state(
+                stage="download",
+                chunk_id=download_fetch_chunk_id,
+                input_fingerprint=download_stage_input_fingerprint,
+                status=STATUS_PLANNED,
+                metadata=download_fetch_chunk_metadata,
+            )
         soft_heartbeat_stop = threading.Event()
         soft_heartbeat_thread: Optional[threading.Thread] = None
         if predicted_output_dir:
             try:
+                self._seed_download_runtime_repository(
+                    output_dir=predicted_output_dir,
+                    task_id=task_id,
+                    raw_video_input=raw_video_input,
+                )
                 download_watchdog = TaskWatchdogSignalWriter(
                     task_id=task_id,
                     output_dir=predicted_output_dir,
@@ -2861,6 +4644,35 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
         try:
             self._increment_tasks()
+            if download_store is not None:
+                download_store.transition_scope_node(
+                    scope_ref=download_fetch_substage_scope_ref,
+                    stage="download",
+                    scope_type="substage",
+                    scope_id=download_fetch_substage_scope_id,
+                    status=STATUS_RUNNING,
+                    input_fingerprint=download_stage_input_fingerprint,
+                    plan_context={
+                        "substage_name": "fetch",
+                        "wave_id": "wave_0001",
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "chunk_id": download_fetch_chunk_id,
+                                "kind": "file_download",
+                            }
+                        ],
+                        "raw_video_input": raw_video_input,
+                    },
+                    attempt_count=1,
+                )
+                download_store.record_chunk_state(
+                    stage="download",
+                    chunk_id=download_fetch_chunk_id,
+                    input_fingerprint=download_stage_input_fingerprint,
+                    status=STATUS_RUNNING,
+                    metadata=download_fetch_chunk_metadata,
+                )
             if download_runtime_session is not None:
                 download_runtime_session.mark(
                     status="running",
@@ -2890,6 +4702,204 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 write_video_meta_file=_write_video_meta_file,
                 logger=logger,
             )
+            if predicted_output_dir and flow_result.success:
+                fetch_commit_payload = None
+                verify_commit_payload = None
+                if download_store is not None:
+                    fetch_commit_payload = download_store.commit_chunk_payload(
+                        stage="download",
+                        chunk_id=download_fetch_chunk_id,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        result_payload={
+                            "video_path": str(flow_result.video_path or ""),
+                            "file_size_bytes": int(flow_result.file_size_bytes or 0),
+                            "duration_sec": float(flow_result.duration_sec or 0.0),
+                            "resolved_url": str(flow_result.resolved_url or ""),
+                            "source_platform": str(flow_result.source_platform or ""),
+                            "canonical_id": str(flow_result.canonical_id or ""),
+                            "link_resolver": str(flow_result.link_resolver or ""),
+                            "video_title": str(flow_result.video_title or ""),
+                            "content_type": str(flow_result.content_type or "unknown"),
+                        },
+                        metadata=download_fetch_chunk_metadata,
+                    )
+                    download_store.transition_scope_node(
+                        scope_ref=download_fetch_substage_scope_ref,
+                        stage="download",
+                        scope_type="substage",
+                        scope_id=download_fetch_substage_scope_id,
+                        status=STATUS_SUCCESS,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        local_path=str(flow_result.video_path or ""),
+                        plan_context={
+                            "substage_name": "fetch",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": download_fetch_chunk_id,
+                                    "kind": "file_download",
+                                }
+                            ],
+                            "raw_video_input": raw_video_input,
+                        },
+                        attempt_count=1,
+                        result_hash=str((fetch_commit_payload or {}).get("result_hash", "") or ""),
+                    )
+                    download_verify_chunk_metadata = {
+                        "storage_backend": "sqlite",
+                        "scope_variant": "download_verify",
+                        "stage_step": "download.verify",
+                        "substage_scope_ref": download_verify_substage_scope_ref,
+                        "substage_name": "verify",
+                        "wave_id": "wave_0001",
+                        "dependency_fingerprints": {
+                            download_fetch_substage_scope_ref: str((fetch_commit_payload or {}).get("result_hash", "") or ""),
+                        },
+                    }
+                    download_store.plan_substage_scope(
+                        stage="download",
+                        substage_name="verify",
+                        wave_id="wave_0001",
+                        input_fingerprint=download_stage_input_fingerprint,
+                        dependency_fingerprints={
+                            download_fetch_substage_scope_ref: str((fetch_commit_payload or {}).get("result_hash", "") or ""),
+                        },
+                        plan_context={
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": download_verify_chunk_id,
+                                    "kind": "file_verify",
+                                }
+                            ],
+                            "video_path": str(flow_result.video_path or ""),
+                        },
+                    )
+                    download_store.record_chunk_state(
+                        stage="download",
+                        chunk_id=download_verify_chunk_id,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        status=STATUS_PLANNED,
+                        metadata=download_verify_chunk_metadata,
+                    )
+                    download_store.transition_scope_node(
+                        scope_ref=download_verify_substage_scope_ref,
+                        stage="download",
+                        scope_type="substage",
+                        scope_id=download_verify_substage_scope_id,
+                        status=STATUS_RUNNING,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        dependency_fingerprints=download_verify_chunk_metadata.get("dependency_fingerprints"),
+                        plan_context={
+                            "substage_name": "verify",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": download_verify_chunk_id,
+                                    "kind": "file_verify",
+                                }
+                            ],
+                            "video_path": str(flow_result.video_path or ""),
+                        },
+                        attempt_count=1,
+                    )
+                    download_store.record_chunk_state(
+                        stage="download",
+                        chunk_id=download_verify_chunk_id,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        status=STATUS_RUNNING,
+                        metadata=download_verify_chunk_metadata,
+                    )
+                    verified_video_path = str(flow_result.video_path or "").strip()
+                    if not verified_video_path or not os.path.exists(verified_video_path):
+                        raise FileNotFoundError(f"download verify missing video file: {verified_video_path}")
+                    verified_file_size = int(os.path.getsize(verified_video_path))
+                    if verified_file_size <= 0:
+                        raise RuntimeError(f"download verify empty video file: {verified_video_path}")
+                    verify_commit_payload = download_store.commit_chunk_payload(
+                        stage="download",
+                        chunk_id=download_verify_chunk_id,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        result_payload={
+                            "verified": True,
+                            "video_path": verified_video_path,
+                            "file_size_bytes": verified_file_size,
+                            "duration_sec": float(flow_result.duration_sec or 0.0),
+                            "content_type": str(flow_result.content_type or "unknown"),
+                        },
+                        metadata=download_verify_chunk_metadata,
+                    )
+                    download_store.transition_scope_node(
+                        scope_ref=download_verify_substage_scope_ref,
+                        stage="download",
+                        scope_type="substage",
+                        scope_id=download_verify_substage_scope_id,
+                        status=STATUS_SUCCESS,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        local_path=verified_video_path,
+                        dependency_fingerprints=download_verify_chunk_metadata.get("dependency_fingerprints"),
+                        plan_context={
+                            "substage_name": "verify",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": download_verify_chunk_id,
+                                    "kind": "file_verify",
+                                }
+                            ],
+                            "video_path": verified_video_path,
+                        },
+                        attempt_count=1,
+                        result_hash=str((verify_commit_payload or {}).get("result_hash", "") or ""),
+                    )
+                self._mark_download_runtime_outputs_ready(
+                    output_dir=predicted_output_dir,
+                    flow_result=flow_result,
+                    reused=False,
+                )
+            elif download_store is not None:
+                download_error = RuntimeError(str(flow_result.error_msg or "download failed"))
+                error_info = classify_runtime_error(download_error)
+                download_store.fail_chunk_payload(
+                    stage="download",
+                    chunk_id=download_fetch_chunk_id,
+                    input_fingerprint=download_stage_input_fingerprint,
+                    error=download_error,
+                    metadata=download_fetch_chunk_metadata,
+                )
+                download_store.transition_scope_node(
+                    scope_ref=download_fetch_substage_scope_ref,
+                    stage="download",
+                    scope_type="substage",
+                    scope_id=download_fetch_substage_scope_id,
+                    status=_derive_scope_failure_status(error_info.get("error_class", "")),
+                    input_fingerprint=download_stage_input_fingerprint,
+                    plan_context={
+                        "substage_name": "fetch",
+                        "wave_id": "wave_0001",
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "chunk_id": download_fetch_chunk_id,
+                                "kind": "file_download",
+                            }
+                        ],
+                        "raw_video_input": raw_video_input,
+                    },
+                    resource_snapshot={
+                        "error_class": error_info.get("error_class", ""),
+                        "error_code": error_info.get("error_code", ""),
+                        "error_message": error_info.get("error_message", ""),
+                    },
+                    attempt_count=1,
+                    required_action=str(error_info.get("action_hint", "") or ""),
+                    error_class=str(error_info.get("error_class", "") or ""),
+                    error_code=str(error_info.get("error_code", "") or ""),
+                    error_message=str(error_info.get("error_message", "") or ""),
+                )
             soft_heartbeat_stop.set()
 
             if download_runtime_session is not None:
@@ -2948,6 +4958,90 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         except Exception as e:
             soft_heartbeat_stop.set()
             logger.error(f"[{task_id}] DownloadVideo failed: {e}")
+            if download_store is not None:
+                download_error_info = classify_runtime_error(e)
+                verify_scope_node = (
+                    download_store.load_scope_node(download_verify_substage_scope_ref)
+                    if download_verify_substage_scope_ref
+                    else None
+                )
+                verify_scope_status = str((verify_scope_node or {}).get("status", "") or "").strip().upper()
+                if verify_scope_status in {STATUS_PLANNED, STATUS_RUNNING}:
+                    download_store.fail_chunk_payload(
+                        stage="download",
+                        chunk_id=download_verify_chunk_id,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        error=e,
+                        metadata=download_verify_chunk_metadata,
+                    )
+                    download_store.transition_scope_node(
+                        scope_ref=download_verify_substage_scope_ref,
+                        stage="download",
+                        scope_type="substage",
+                        scope_id=download_verify_substage_scope_id,
+                        status=_derive_scope_failure_status(download_error_info.get("error_class", "")),
+                        input_fingerprint=download_stage_input_fingerprint,
+                        dependency_fingerprints=download_verify_chunk_metadata.get("dependency_fingerprints"),
+                        plan_context={
+                            "substage_name": "verify",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": download_verify_chunk_id,
+                                    "kind": "file_verify",
+                                }
+                            ],
+                        },
+                        resource_snapshot={
+                            "error_class": download_error_info.get("error_class", ""),
+                            "error_code": download_error_info.get("error_code", ""),
+                            "error_message": download_error_info.get("error_message", ""),
+                        },
+                        attempt_count=1,
+                        required_action=str(download_error_info.get("action_hint", "") or ""),
+                        error_class=str(download_error_info.get("error_class", "") or ""),
+                        error_code=str(download_error_info.get("error_code", "") or ""),
+                        error_message=str(download_error_info.get("error_message", "") or ""),
+                    )
+                else:
+                    download_store.fail_chunk_payload(
+                        stage="download",
+                        chunk_id=download_fetch_chunk_id,
+                        input_fingerprint=download_stage_input_fingerprint,
+                        error=e,
+                        metadata=download_fetch_chunk_metadata,
+                    )
+                    download_store.transition_scope_node(
+                        scope_ref=download_fetch_substage_scope_ref,
+                        stage="download",
+                        scope_type="substage",
+                        scope_id=download_fetch_substage_scope_id,
+                        status=_derive_scope_failure_status(download_error_info.get("error_class", "")),
+                        input_fingerprint=download_stage_input_fingerprint,
+                        plan_context={
+                            "substage_name": "fetch",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": download_fetch_chunk_id,
+                                    "kind": "file_download",
+                                }
+                            ],
+                            "raw_video_input": raw_video_input,
+                        },
+                        resource_snapshot={
+                            "error_class": download_error_info.get("error_class", ""),
+                            "error_code": download_error_info.get("error_code", ""),
+                            "error_message": download_error_info.get("error_message", ""),
+                        },
+                        attempt_count=1,
+                        required_action=str(download_error_info.get("action_hint", "") or ""),
+                        error_class=str(download_error_info.get("error_class", "") or ""),
+                        error_code=str(download_error_info.get("error_code", "") or ""),
+                        error_message=str(download_error_info.get("error_message", "") or ""),
+                    )
             if download_runtime_session is not None:
                 try:
                     download_runtime_session.mark_failed(
@@ -3311,6 +5405,147 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 video_path,
                 extra={"language": fingerprint_language, "stage": "transcribe"},
             )
+            transcribe_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+            transcribe_input_scope_ref = _upsert_runtime_input_scope(
+                transcribe_store,
+                stage="transcribe",
+                input_name="main",
+                input_fingerprint=reuse_fingerprint,
+                extra_payload={
+                    "video_path": video_path,
+                    "language": str(fingerprint_language or ""),
+                },
+            )
+            transcribe_input_dependency_fingerprints = (
+                {transcribe_input_scope_ref: reuse_fingerprint} if transcribe_input_scope_ref else {}
+            )
+            transcribe_segment_scope_refs: set[str] = set()
+            transcribe_segment_runtime_stats = {
+                "planned_segments": 0,
+                "restored_segments": 0,
+                "committed_segments": 0,
+                "failed_segments": 0,
+            }
+            transcribe_segment_dispatch_substage_scope_ref = ""
+            transcribe_segment_dispatch_substage_scope_id = ""
+            transcribe_finalize_substage_scope_ref = ""
+            transcribe_finalize_substage_scope_id = ""
+            transcribe_finalize_chunk_id = "transcript.finalize.wave_0001"
+            transcribe_finalize_chunk_metadata: Dict[str, Any] = {}
+            if transcribe_store is not None:
+                transcribe_store.reset_running_scopes_to_planned(
+                    stage="transcribe",
+                    scope_type="substage",
+                    reason="process_restarted",
+                )
+                transcribe_store.reset_running_scopes_to_planned(
+                    stage="transcribe",
+                    scope_type="chunk",
+                    reason="process_restarted",
+                )
+                transcribe_segment_dispatch_substage_scope_ref = transcribe_store.build_substage_scope_ref(
+                    stage="transcribe",
+                    substage_name="segment_dispatch",
+                    wave_id="wave_0001",
+                )
+                transcribe_segment_dispatch_substage_scope_id = transcribe_store.build_substage_scope_id(
+                    substage_name="segment_dispatch",
+                    wave_id="wave_0001",
+                )
+                transcribe_finalize_substage_scope_ref = transcribe_store.build_substage_scope_ref(
+                    stage="transcribe",
+                    substage_name="finalize",
+                    wave_id="wave_0001",
+                )
+                transcribe_finalize_substage_scope_id = transcribe_store.build_substage_scope_id(
+                    substage_name="finalize",
+                    wave_id="wave_0001",
+                )
+                transcribe_finalize_chunk_metadata = {
+                    "storage_backend": "sqlite",
+                    "scope_variant": "finalize",
+                    "stage_step": "transcript.finalize",
+                    "substage_scope_ref": transcribe_finalize_substage_scope_ref,
+                    "substage_name": "finalize",
+                    "wave_id": "wave_0001",
+                }
+                transcribe_store.plan_substage_scope(
+                    stage="transcribe",
+                    substage_name="segment_dispatch",
+                    wave_id="wave_0001",
+                    input_fingerprint=reuse_fingerprint,
+                    dependency_fingerprints=transcribe_input_dependency_fingerprints,
+                    plan_context={
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "kind": "segment_transcribe",
+                                "fanout": "dynamic",
+                            }
+                        ],
+                        "subtitle_path": subtitle_path,
+                    },
+                )
+                transcribe_store.plan_substage_scope(
+                    stage="transcribe",
+                    substage_name="finalize",
+                    wave_id="wave_0001",
+                    input_fingerprint=reuse_fingerprint,
+                    dependency_fingerprints=transcribe_input_dependency_fingerprints,
+                    plan_context={
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "chunk_id": transcribe_finalize_chunk_id,
+                                "kind": "subtitle_finalize",
+                            }
+                        ],
+                        "subtitle_path": subtitle_path,
+                    },
+                )
+                transcribe_store.plan_chunk_scope(
+                    stage="transcribe",
+                    chunk_id=transcribe_finalize_chunk_id,
+                    input_fingerprint=reuse_fingerprint,
+                    dependency_fingerprints=transcribe_input_dependency_fingerprints,
+                    metadata=transcribe_finalize_chunk_metadata,
+                    extra_payload={
+                        "kind": "subtitle_finalize",
+                        "subtitle_path": subtitle_path,
+                        "wave_id": "wave_0001",
+                    },
+                )
+            self._seed_transcribe_runtime_outputs(
+                output_dir=output_dir,
+                subtitle_path=subtitle_path,
+                task_id=task_id,
+                video_path=video_path,
+                language=str(fingerprint_language or ""),
+                input_fingerprint=reuse_fingerprint,
+            )
+            if transcribe_store is not None:
+                transcribe_store.transition_scope_node(
+                    scope_ref=transcribe_segment_dispatch_substage_scope_ref,
+                    stage="transcribe",
+                    scope_type="substage",
+                    scope_id=transcribe_segment_dispatch_substage_scope_id,
+                    status=STATUS_RUNNING,
+                    input_fingerprint=reuse_fingerprint,
+                    dependency_fingerprints=transcribe_input_dependency_fingerprints,
+                    plan_context={
+                        "substage_name": "segment_dispatch",
+                        "wave_id": "wave_0001",
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "kind": "segment_transcribe",
+                                "fanout": "dynamic",
+                            }
+                        ],
+                        "subtitle_path": subtitle_path,
+                    },
+                    attempt_count=1,
+                )
             should_try_reuse = self._is_group_reuse_enabled("transcribe")
             reused = False
 
@@ -3324,6 +5559,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     with open(subtitle_path, "r", encoding="utf-8") as f:
                         subtitle_text = f.read()
                     reused = True
+                    self._mark_transcribe_runtime_outputs_ready(
+                        output_dir=output_dir,
+                        subtitle_path=subtitle_path,
+                        subtitle_text=subtitle_text,
+                        reused=True,
+                        task_id=task_id,
+                        video_path=video_path,
+                        language=str(fingerprint_language or ""),
+                        input_fingerprint=reuse_fingerprint,
+                    )
+                    segment_dispatch_result_hash = _complete_transcribe_segment_dispatch_substage(
+                        reused_flag=True,
+                    )
+                    _complete_transcribe_finalize_substage(
+                        subtitle_text_payload=subtitle_text,
+                        dependency_hash=segment_dispatch_result_hash,
+                        reused_flag=True,
+                    )
                     transcribe_runtime_session.mark(
                         status="completed",
                         checkpoint="transcribe_reused",
@@ -3363,6 +5616,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 # 兼容旧行为：未开启复用控制时沿用文件存在即复用
                 with open(subtitle_path, "r", encoding="utf-8") as f:
                     subtitle_text = f.read()
+                self._mark_transcribe_runtime_outputs_ready(
+                    output_dir=output_dir,
+                    subtitle_path=subtitle_path,
+                    subtitle_text=subtitle_text,
+                    reused=True,
+                    task_id=task_id,
+                    video_path=video_path,
+                    language=str(fingerprint_language or ""),
+                    input_fingerprint=reuse_fingerprint,
+                )
+                segment_dispatch_result_hash = _complete_transcribe_segment_dispatch_substage(
+                    reused_flag=True,
+                )
+                _complete_transcribe_finalize_substage(
+                    subtitle_text_payload=subtitle_text,
+                    dependency_hash=segment_dispatch_result_hash,
+                    reused_flag=True,
+                )
                 transcribe_runtime_session.mark(
                     status="completed",
                     checkpoint="transcribe_reused_legacy",
@@ -3389,6 +5660,426 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     pending=1,
                     extra_payload=transcribe_runtime_base_payload,
                 )
+                from services.python_grpc.src.media_engine.knowledge_engine.core.parallel_transcription import (
+                    TranscriptionSegmentRuntimeHooks,
+                )
+
+                whisper_cfg = resource_config.get("whisper", {}) if isinstance(resource_config, dict) else {}
+                beam_size = max(1, _to_int(whisper_cfg.get("beam_size", 4), 4))
+                vad_filter = bool(whisper_cfg.get("vad_filter", False))
+
+                def _build_transcribe_segment_chunk_id(segment: Optional[Dict[str, Any]]) -> str:
+                    safe_segment_index = max(0, _to_int(isinstance(segment, dict) and segment.get("id", 0) or 0, 0))
+                    if transcribe_store is not None:
+                        return transcribe_store.build_chunk_id(chunk_index=safe_segment_index, prefix="ts")
+                    return f"ts{safe_segment_index + 1:06d}"
+
+                def _build_transcribe_segment_scope_ref(segment: Optional[Dict[str, Any]]) -> str:
+                    if transcribe_store is None:
+                        return ""
+                    return transcribe_store.build_scope_ref(
+                        stage="transcribe",
+                        scope_type="chunk",
+                        scope_id=_build_transcribe_segment_chunk_id(segment),
+                        scope_variant="segment",
+                    )
+
+                def _build_transcribe_segment_fingerprint(
+                    segment: Optional[Dict[str, Any]],
+                    total_segments: int,
+                ) -> str:
+                    safe_segment = dict(segment or {})
+                    return build_runtime_payload_fingerprint(
+                        {
+                            "schema_version": "transcribe_segment_runtime_v1",
+                            "video_signature": transcribe_runtime_base_payload.get("video_signature", {}),
+                            "language": str(fingerprint_language or ""),
+                            "model_size": str(getattr(transcriber, "model_size", "") or ""),
+                            "device": str(getattr(transcriber, "device", "") or ""),
+                            "compute_type": str(getattr(transcriber, "compute_type", "") or ""),
+                            "segment_duration": int(getattr(transcriber, "segment_duration", 0) or 0),
+                            "beam_size": int(beam_size),
+                            "vad_filter": bool(vad_filter),
+                            "total_segments": int(total_segments or 0),
+                            "segment": {
+                                "id": max(0, _to_int(safe_segment.get("id", 0), 0)),
+                                "start": float(safe_segment.get("start", 0.0) or 0.0),
+                                "end": float(safe_segment.get("end", 0.0) or 0.0),
+                                "duration": float(safe_segment.get("duration", 0.0) or 0.0),
+                            },
+                        }
+                    )
+
+                def _build_transcribe_segment_runtime_metadata(
+                    segment: Dict[str, Any],
+                    total_segments: int,
+                ) -> Dict[str, Any]:
+                    segment_dependencies = dict(transcribe_input_dependency_fingerprints)
+                    if transcribe_segment_dispatch_substage_scope_ref:
+                        segment_dependencies[transcribe_segment_dispatch_substage_scope_ref] = reuse_fingerprint
+                    return {
+                        "scope_variant": "segment",
+                        "storage_backend": "sqlite",
+                        "dependency_fingerprints": segment_dependencies,
+                        "substage_scope_ref": transcribe_segment_dispatch_substage_scope_ref,
+                        "substage_name": "segment_dispatch",
+                        "wave_id": "wave_0001",
+                        "stage_step": "transcript.segment_dispatch",
+                        "segment_id": max(0, _to_int(segment.get("id", 0), 0)),
+                        "segment_index": max(0, _to_int(segment.get("id", 0), 0)) + 1,
+                        "total_segments": int(total_segments or 0),
+                        "segment_start_sec": float(segment.get("start", 0.0) or 0.0),
+                        "segment_end_sec": float(segment.get("end", 0.0) or 0.0),
+                        "segment_duration_sec": float(segment.get("duration", 0.0) or 0.0),
+                        "language": str(fingerprint_language or ""),
+                    }
+
+                def _complete_transcribe_segment_dispatch_substage(
+                    *,
+                    reused_flag: bool,
+                ) -> str:
+                    if transcribe_store is None:
+                        return ""
+                    result_hash = build_runtime_payload_fingerprint(
+                        {
+                            "segment_scope_refs": sorted(transcribe_segment_scope_refs),
+                            "segment_runtime_stats": dict(transcribe_segment_runtime_stats),
+                            "reused": bool(reused_flag),
+                        },
+                        extra={"stage": "transcribe", "substage": "segment_dispatch"},
+                    )
+                    transcribe_store.transition_scope_node(
+                        scope_ref=transcribe_segment_dispatch_substage_scope_ref,
+                        stage="transcribe",
+                        scope_type="substage",
+                        scope_id=transcribe_segment_dispatch_substage_scope_id,
+                        status=STATUS_SUCCESS,
+                        input_fingerprint=reuse_fingerprint,
+                        local_path=subtitle_path,
+                        dependency_fingerprints=transcribe_input_dependency_fingerprints,
+                        plan_context={
+                            "substage_name": "segment_dispatch",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "kind": "segment_transcribe",
+                                    "fanout": "dynamic",
+                                }
+                            ],
+                            "subtitle_path": subtitle_path,
+                            "reused": bool(reused_flag),
+                        },
+                        attempt_count=1,
+                        result_hash=result_hash,
+                    )
+                    return result_hash
+
+                def _complete_transcribe_finalize_substage(
+                    *,
+                    subtitle_text_payload: str,
+                    dependency_hash: str,
+                    reused_flag: bool,
+                ) -> str:
+                    if transcribe_store is None:
+                        return ""
+                    finalize_dependencies = dict(transcribe_input_dependency_fingerprints)
+                    if transcribe_segment_dispatch_substage_scope_ref and dependency_hash:
+                        finalize_dependencies[transcribe_segment_dispatch_substage_scope_ref] = dependency_hash
+                    transcribe_store.plan_chunk_scope(
+                        stage="transcribe",
+                        chunk_id=transcribe_finalize_chunk_id,
+                        input_fingerprint=reuse_fingerprint,
+                        dependency_fingerprints=finalize_dependencies,
+                        metadata=transcribe_finalize_chunk_metadata,
+                        extra_payload={
+                            "kind": "subtitle_finalize",
+                            "subtitle_path": subtitle_path,
+                            "reused": bool(reused_flag),
+                            "wave_id": "wave_0001",
+                        },
+                    )
+                    transcribe_store.record_chunk_state(
+                        stage="transcribe",
+                        chunk_id=transcribe_finalize_chunk_id,
+                        input_fingerprint=reuse_fingerprint,
+                        status=STATUS_RUNNING,
+                        metadata={
+                            **transcribe_finalize_chunk_metadata,
+                            "dependency_fingerprints": finalize_dependencies,
+                        },
+                    )
+                    transcribe_store.transition_scope_node(
+                        scope_ref=transcribe_finalize_substage_scope_ref,
+                        stage="transcribe",
+                        scope_type="substage",
+                        scope_id=transcribe_finalize_substage_scope_id,
+                        status=STATUS_RUNNING,
+                        input_fingerprint=reuse_fingerprint,
+                        dependency_fingerprints=finalize_dependencies,
+                        plan_context={
+                            "substage_name": "finalize",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": transcribe_finalize_chunk_id,
+                                    "kind": "subtitle_finalize",
+                                }
+                            ],
+                            "subtitle_path": subtitle_path,
+                            "reused": bool(reused_flag),
+                        },
+                        attempt_count=1,
+                    )
+                    finalize_commit_payload = transcribe_store.commit_chunk_payload(
+                        stage="transcribe",
+                        chunk_id=transcribe_finalize_chunk_id,
+                        input_fingerprint=reuse_fingerprint,
+                        result_payload={
+                            "subtitle_path": subtitle_path,
+                            "subtitle_char_count": len(str(subtitle_text_payload or "")),
+                            "segment_runtime_stats": dict(transcribe_segment_runtime_stats),
+                            "reused": bool(reused_flag),
+                        },
+                        metadata={
+                            **transcribe_finalize_chunk_metadata,
+                            "dependency_fingerprints": finalize_dependencies,
+                        },
+                    )
+                    transcribe_store.transition_scope_node(
+                        scope_ref=transcribe_finalize_substage_scope_ref,
+                        stage="transcribe",
+                        scope_type="substage",
+                        scope_id=transcribe_finalize_substage_scope_id,
+                        status=STATUS_SUCCESS,
+                        input_fingerprint=reuse_fingerprint,
+                        local_path=subtitle_path,
+                        dependency_fingerprints=finalize_dependencies,
+                        plan_context={
+                            "substage_name": "finalize",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": transcribe_finalize_chunk_id,
+                                    "kind": "subtitle_finalize",
+                                }
+                            ],
+                            "subtitle_path": subtitle_path,
+                            "reused": bool(reused_flag),
+                        },
+                        attempt_count=1,
+                        result_hash=str((finalize_commit_payload or {}).get("result_hash", "") or ""),
+                    )
+                    return str((finalize_commit_payload or {}).get("result_hash", "") or "")
+
+                def _restore_committed_transcribe_segments(
+                    segments: List[Dict[str, Any]],
+                    total_segments: int,
+                ) -> Dict[int, Dict[str, Any]]:
+                    transcribe_segment_runtime_stats["planned_segments"] = max(
+                        int(transcribe_segment_runtime_stats.get("planned_segments", 0) or 0),
+                        len(list(segments or [])),
+                    )
+                    if transcribe_store is None:
+                        return {}
+                    requests = []
+                    for segment in list(segments or []):
+                        if not isinstance(segment, dict):
+                            continue
+                        segment_id = max(0, _to_int(segment.get("id", 0), 0))
+                        requests.append(
+                            {
+                                "stage": "transcribe",
+                                "chunk_id": _build_transcribe_segment_chunk_id(segment),
+                                "input_fingerprint": _build_transcribe_segment_fingerprint(segment, total_segments),
+                                "segment_id": segment_id,
+                            }
+                        )
+                    restored_map: Dict[int, Dict[str, Any]] = {}
+                    for row in transcribe_store.batch_load_committed_chunk_payloads(requests):
+                        request_payload = dict(row.get("request", {}) or {})
+                        restored_payload = dict(row.get("restored", {}) or {})
+                        result_payload = dict(restored_payload.get("result_payload", {}) or {})
+                        subtitles = result_payload.get("subtitles")
+                        if not isinstance(subtitles, list):
+                            continue
+                        segment_id = max(0, _to_int(request_payload.get("segment_id", -1), -1))
+                        if segment_id < 0:
+                            continue
+                        restored_map[segment_id] = result_payload
+                        scope_ref = _build_transcribe_segment_scope_ref(
+                            {
+                                "id": segment_id,
+                            }
+                        )
+                        if scope_ref:
+                            transcribe_segment_scope_refs.add(scope_ref)
+                        self._upsert_transcribe_runtime_segment(
+                            output_dir=output_dir,
+                            subtitle_path=subtitle_path,
+                            segment=result_payload.get("segment") if isinstance(result_payload.get("segment"), dict) else {"id": segment_id},
+                            total_segments=total_segments,
+                            chunk_id=str(request_payload.get("chunk_id", "") or ""),
+                            input_fingerprint=str(request_payload.get("input_fingerprint", "") or ""),
+                            status="SUCCESS",
+                            scope_ref=scope_ref,
+                            result_payload=result_payload,
+                            source="sqlite_restore",
+                            task_id=task_id,
+                            video_path=video_path,
+                            language=str(fingerprint_language or ""),
+                            stage_input_fingerprint=reuse_fingerprint,
+                        )
+                    transcribe_segment_runtime_stats["restored_segments"] = len(restored_map)
+                    return restored_map
+
+                def _plan_pending_transcribe_segments(
+                    segments: List[Dict[str, Any]],
+                    total_segments: int,
+                ) -> None:
+                    if transcribe_store is None:
+                        return
+                    for segment in list(segments or []):
+                        if not isinstance(segment, dict):
+                            continue
+                        scope_ref = _build_transcribe_segment_scope_ref(segment)
+                        transcribe_store.record_chunk_state(
+                            stage="transcribe",
+                            chunk_id=_build_transcribe_segment_chunk_id(segment),
+                            input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                            status=STATUS_PLANNED,
+                            metadata=_build_transcribe_segment_runtime_metadata(segment, total_segments),
+                        )
+                        if scope_ref:
+                            transcribe_segment_scope_refs.add(scope_ref)
+                        self._upsert_transcribe_runtime_segment(
+                            output_dir=output_dir,
+                            subtitle_path=subtitle_path,
+                            segment=segment,
+                            total_segments=total_segments,
+                            chunk_id=_build_transcribe_segment_chunk_id(segment),
+                            input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                            status="PLANNED",
+                            scope_ref=scope_ref,
+                            source="planning",
+                            task_id=task_id,
+                            video_path=video_path,
+                            language=str(fingerprint_language or ""),
+                            stage_input_fingerprint=reuse_fingerprint,
+                        )
+
+                def _mark_transcribe_segment_runtime_running(
+                    segment: Dict[str, Any],
+                    total_segments: int,
+                ) -> None:
+                    if transcribe_store is None:
+                        return
+                    scope_ref = _build_transcribe_segment_scope_ref(segment)
+                    transcribe_store.record_chunk_state(
+                        stage="transcribe",
+                        chunk_id=_build_transcribe_segment_chunk_id(segment),
+                        input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                        status=STATUS_RUNNING,
+                        metadata=_build_transcribe_segment_runtime_metadata(segment, total_segments),
+                    )
+                    if scope_ref:
+                        transcribe_segment_scope_refs.add(scope_ref)
+                    self._upsert_transcribe_runtime_segment(
+                        output_dir=output_dir,
+                        subtitle_path=subtitle_path,
+                        segment=segment,
+                        total_segments=total_segments,
+                        chunk_id=_build_transcribe_segment_chunk_id(segment),
+                        input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                        status="RUNNING",
+                        scope_ref=scope_ref,
+                        source="runtime",
+                        task_id=task_id,
+                        video_path=video_path,
+                        language=str(fingerprint_language or ""),
+                        stage_input_fingerprint=reuse_fingerprint,
+                    )
+
+                def _commit_transcribe_segment_runtime(
+                    segment: Dict[str, Any],
+                    total_segments: int,
+                    result_payload: Dict[str, Any],
+                ) -> None:
+                    if transcribe_store is None:
+                        return
+                    chunk_id = _build_transcribe_segment_chunk_id(segment)
+                    scope_ref = _build_transcribe_segment_scope_ref(segment)
+                    transcribe_store.commit_chunk_payload(
+                        stage="transcribe",
+                        chunk_id=chunk_id,
+                        input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                        result_payload=result_payload,
+                        metadata={
+                            **_build_transcribe_segment_runtime_metadata(segment, total_segments),
+                            "subtitle_count": len(list(result_payload.get("subtitles", []) or [])),
+                        },
+                    )
+                    transcribe_segment_runtime_stats["committed_segments"] = int(
+                        transcribe_segment_runtime_stats.get("committed_segments", 0) or 0
+                    ) + 1
+                    if scope_ref:
+                        transcribe_segment_scope_refs.add(scope_ref)
+                    self._upsert_transcribe_runtime_segment(
+                        output_dir=output_dir,
+                        subtitle_path=subtitle_path,
+                        segment=segment,
+                        total_segments=total_segments,
+                        chunk_id=chunk_id,
+                        input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                        status="SUCCESS",
+                        scope_ref=scope_ref,
+                        result_payload=result_payload,
+                        source="runtime",
+                        task_id=task_id,
+                        video_path=video_path,
+                        language=str(fingerprint_language or ""),
+                        stage_input_fingerprint=reuse_fingerprint,
+                    )
+
+                def _mark_transcribe_segment_runtime_failed(
+                    segment: Dict[str, Any],
+                    total_segments: int,
+                    error: Exception,
+                ) -> None:
+                    if transcribe_store is None:
+                        return
+                    chunk_id = _build_transcribe_segment_chunk_id(segment)
+                    scope_ref = _build_transcribe_segment_scope_ref(segment)
+                    transcribe_store.fail_chunk_payload(
+                        stage="transcribe",
+                        chunk_id=chunk_id,
+                        input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                        error=error,
+                        metadata=_build_transcribe_segment_runtime_metadata(segment, total_segments),
+                    )
+                    transcribe_segment_runtime_stats["failed_segments"] = int(
+                        transcribe_segment_runtime_stats.get("failed_segments", 0) or 0
+                    ) + 1
+                    if scope_ref:
+                        transcribe_segment_scope_refs.add(scope_ref)
+                    self._upsert_transcribe_runtime_segment(
+                        output_dir=output_dir,
+                        subtitle_path=subtitle_path,
+                        segment=segment,
+                        total_segments=total_segments,
+                        chunk_id=chunk_id,
+                        input_fingerprint=_build_transcribe_segment_fingerprint(segment, total_segments),
+                        status="FAILED",
+                        scope_ref=scope_ref,
+                        error=error,
+                        source="runtime",
+                        task_id=task_id,
+                        video_path=video_path,
+                        language=str(fingerprint_language or ""),
+                        stage_input_fingerprint=reuse_fingerprint,
+                    )
                 
                 # transcribe 是异步方法
                 def _on_transcribe_segment_completed(event: Optional[Dict[str, Any]]) -> None:
@@ -3399,6 +6090,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         checkpoint = str(
                             event.get("checkpoint") or "transcribe_segment_completed"
                         ).strip() or "transcribe_segment_completed"
+                        signal_type = str(event.get("signal_type") or "hard").strip().lower() or "hard"
+                        if signal_type not in {"hard", "soft"}:
+                            signal_type = "hard"
                         completed = max(0, _to_int(event.get("completed", 0), 0))
                         pending = max(0, _to_int(event.get("pending", 0), 0))
                         extra: Dict[str, Any] = {}
@@ -3410,6 +6104,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             checkpoint=checkpoint,
                             completed=completed,
                             pending=pending,
+                            signal_type=signal_type,
                             extra_watchdog=extra or None,
                             extra_payload={
                                 **transcribe_runtime_base_payload,
@@ -3426,6 +6121,26 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     video_path,
                     language=whisper_language,
                     progress_callback=_on_transcribe_segment_completed,
+                    segment_runtime_hooks=TranscriptionSegmentRuntimeHooks(
+                        restore_committed_segments=_restore_committed_transcribe_segments,
+                        plan_pending_segments=_plan_pending_transcribe_segments,
+                        mark_segment_running=_mark_transcribe_segment_runtime_running,
+                        commit_segment=_commit_transcribe_segment_runtime,
+                        fail_segment=_mark_transcribe_segment_runtime_failed,
+                    ),
+                )
+                self._mark_transcribe_runtime_outputs_ready(
+                    output_dir=output_dir,
+                    subtitle_path=subtitle_path,
+                    subtitle_text=subtitle_text,
+                    reused=False,
+                    task_id=task_id,
+                    video_path=video_path,
+                    language=str(fingerprint_language or ""),
+                    input_fingerprint=reuse_fingerprint,
+                )
+                segment_dispatch_result_hash = _complete_transcribe_segment_dispatch_substage(
+                    reused_flag=False,
                 )
                 
                 # 🔑 保存字幕文件为 subtitles.txt（异步写盘进程，不阻塞主流程）
@@ -3462,6 +6177,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         f"subtitle_path not ready after async persist wait: {subtitle_path} "
                         f"(flush={flushed}, wait_sec={persist_wait_sec})"
                     )
+                _complete_transcribe_finalize_substage(
+                    subtitle_text_payload=subtitle_text,
+                    dependency_hash=segment_dispatch_result_hash,
+                    reused_flag=False,
+                )
                 transcribe_runtime_session.mark(
                     status="completed",
                     checkpoint="transcribe_response_ready",
@@ -3476,6 +6196,40 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 )
 
                 logger.info(f"[{task_id}] Subtitles persisted: {subtitle_path} (flush={flushed})")
+
+            transcribe_artifact_dependencies = (
+                {transcribe_input_scope_ref: reuse_fingerprint} if transcribe_input_scope_ref else {}
+            )
+            transcribe_artifact_dependencies.update(
+                _collect_scope_dependency_fingerprints_by_scope_refs(
+                    transcribe_store,
+                    scope_refs=sorted(transcribe_segment_scope_refs),
+                )
+            )
+            if transcribe_store is not None:
+                transcribe_store.write_stage_outputs_manifest(
+                    stage="transcribe",
+                    payload={
+                        "subtitle_path": subtitle_path,
+                        "language": str(fingerprint_language or ""),
+                        "reused": bool(reused),
+                        "segment_scope_refs": sorted(transcribe_segment_scope_refs),
+                        "segment_runtime_stats": dict(transcribe_segment_runtime_stats),
+                    },
+                )
+            _upsert_runtime_artifact_scope(
+                transcribe_store,
+                stage="transcribe",
+                artifact_name="subtitles",
+                input_fingerprint=reuse_fingerprint,
+                local_path=subtitle_path,
+                dependency_fingerprints=transcribe_artifact_dependencies,
+                extra_payload={
+                    "subtitle_path": subtitle_path,
+                    "language": str(fingerprint_language or ""),
+                    "reused": bool(reused),
+                },
+            )
             
             return video_processing_pb2.TranscribeResponse(
                 success=True,
@@ -3487,6 +6241,89 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             
         except Exception as e:
             logger.error(f"[{task_id}] TranscribeVideo failed: {e}")
+            if transcribe_store is not None:
+                transcribe_error_info = classify_runtime_error(e)
+                finalize_scope_node = (
+                    transcribe_store.load_scope_node(transcribe_finalize_substage_scope_ref)
+                    if transcribe_finalize_substage_scope_ref
+                    else None
+                )
+                finalize_scope_status = str((finalize_scope_node or {}).get("status", "") or "").strip().upper()
+                if finalize_scope_status in {STATUS_PLANNED, STATUS_RUNNING} and transcribe_finalize_chunk_metadata:
+                    transcribe_store.fail_chunk_payload(
+                        stage="transcribe",
+                        chunk_id=transcribe_finalize_chunk_id,
+                        input_fingerprint=reuse_fingerprint,
+                        error=e,
+                        metadata={
+                            **transcribe_finalize_chunk_metadata,
+                            "dependency_fingerprints": dict(transcribe_input_dependency_fingerprints),
+                        },
+                    )
+                    transcribe_store.transition_scope_node(
+                        scope_ref=transcribe_finalize_substage_scope_ref,
+                        stage="transcribe",
+                        scope_type="substage",
+                        scope_id=transcribe_finalize_substage_scope_id,
+                        status=_derive_scope_failure_status(transcribe_error_info.get("error_class", "")),
+                        input_fingerprint=reuse_fingerprint,
+                        dependency_fingerprints=dict(transcribe_input_dependency_fingerprints),
+                        plan_context={
+                            "substage_name": "finalize",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "chunk_id": transcribe_finalize_chunk_id,
+                                    "kind": "subtitle_finalize",
+                                }
+                            ],
+                            "subtitle_path": subtitle_path,
+                        },
+                        resource_snapshot={
+                            "error_class": transcribe_error_info.get("error_class", ""),
+                            "error_code": transcribe_error_info.get("error_code", ""),
+                            "error_message": transcribe_error_info.get("error_message", ""),
+                        },
+                        attempt_count=1,
+                        required_action=str(transcribe_error_info.get("action_hint", "") or ""),
+                        error_class=str(transcribe_error_info.get("error_class", "") or ""),
+                        error_code=str(transcribe_error_info.get("error_code", "") or ""),
+                        error_message=str(transcribe_error_info.get("error_message", "") or ""),
+                    )
+                else:
+                    transcribe_store.transition_scope_node(
+                        scope_ref=transcribe_segment_dispatch_substage_scope_ref,
+                        stage="transcribe",
+                        scope_type="substage",
+                        scope_id=transcribe_segment_dispatch_substage_scope_id,
+                        status=_derive_scope_failure_status(transcribe_error_info.get("error_class", "")),
+                        input_fingerprint=reuse_fingerprint,
+                        dependency_fingerprints=transcribe_input_dependency_fingerprints,
+                        plan_context={
+                            "substage_name": "segment_dispatch",
+                            "wave_id": "wave_0001",
+                            "work_units": [
+                                {
+                                    "scope_type": "chunk",
+                                    "kind": "segment_transcribe",
+                                    "fanout": "dynamic",
+                                }
+                            ],
+                            "subtitle_path": subtitle_path,
+                        },
+                        resource_snapshot={
+                            "error_class": transcribe_error_info.get("error_class", ""),
+                            "error_code": transcribe_error_info.get("error_code", ""),
+                            "error_message": transcribe_error_info.get("error_message", ""),
+                            "segment_runtime_stats": dict(transcribe_segment_runtime_stats),
+                        },
+                        attempt_count=1,
+                        required_action=str(transcribe_error_info.get("action_hint", "") or ""),
+                        error_class=str(transcribe_error_info.get("error_class", "") or ""),
+                        error_code=str(transcribe_error_info.get("error_code", "") or ""),
+                        error_message=str(transcribe_error_info.get("error_message", "") or ""),
+                    )
             if transcribe_runtime_session is not None:
                 try:
                     transcribe_runtime_session.mark_failed(
@@ -3538,12 +6375,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         subtitle_path = os.path.abspath(request.subtitle_path) # Convert to absolute path immediately
         max_step = request.max_step or 24
         
-        # 统一输出目录到 storage/{hash}：做什么是聚合中间产物；为什么是保证后续阶段可复用；权衡是需要额外路径计算
+        # 统一输出目录到 storage/{hash}：做什么是聚合任务内恢复与运行时缓存；为什么是后续阶段只依赖同一任务目录；
+        # 权衡是阶段产物默认不再落 intermediates JSON，而是以内存态/SQLite 投影继续流动。
         output_dir = _normalize_output_dir(video_path)
-        intermediates_dir = os.path.join(output_dir, "intermediates")
-        
-        # 确保目录存在
-        os.makedirs(intermediates_dir, exist_ok=True)
         stage1_runtime_base_payload = {
             "video_path": video_path,
             "video_signature": _file_signature(video_path),
@@ -3577,12 +6411,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             default_pending=max_step,
         )
         
-        # 输出文件路径
-        step2_path = os.path.join(intermediates_dir, "step2_correction_output.json")
-        step3_path = os.path.join(intermediates_dir, "step3_merge_output.json")
-        step35_path = os.path.join(intermediates_dir, "step3_5_translate_output.json")
-        step4_path = os.path.join(intermediates_dir, "step4_clean_local_output.json")
-        step6_path = os.path.join(intermediates_dir, "step6_merge_cross_output.json")
+        # Stage1 主链不再落 step1-step6 JSON；这些路径仅保留兼容字段，默认返回空值。
+        step2_path = ""
+        step3_path = ""
+        step35_path = ""
+        step4_path = ""
+        step6_path = ""
         
         logger.info(
             f"[{task_id}] ProcessStage1: max_step={max_step}, output_dir={output_dir}, "
@@ -3595,6 +6429,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 🔑 检查是否已存在输出文件（缓存复用）
             # 字幕写盘已异步化；仅当文件未就绪时做一次有界等待，避免阻塞常态路径。
             subtitle_ready = os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0
+            if not subtitle_ready:
+                subtitle_ready = self._materialize_subtitle_from_transcribe_runtime(
+                    output_dir=output_dir,
+                    subtitle_path=subtitle_path,
+                )
             if not subtitle_ready:
                 subtitle_wait_sec = max(
                     1.0,
@@ -3612,8 +6451,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         f"subtitle_path not ready after async wait: {subtitle_path}"
                     )
 
-            local_sentence_ts = os.path.join(output_dir, "local_storage", "sentence_timestamps.json")
-            need_sentence_ts = not os.path.exists(local_sentence_ts)
+            runtime_stage1_state = self._get_stage1_runtime_outputs(output_dir)
+            runtime_stage1_views = get_stage1_repository_views(runtime_stage1_state)
+            local_sentence_ts = ""
+            need_sentence_ts = not bool(
+                isinstance(runtime_stage1_state, dict)
+                and runtime_stage1_views.get("sentence_timestamps")
+            )
 
             stage1_group_enabled = (
                 self._is_group_reuse_enabled("stage1_text")
@@ -3627,6 +6471,81 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 subtitle_path,
                 extra={"max_step": max_step, "stage": "stage1"},
             )
+            stage1_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+            if stage1_store is not None:
+                stage1_store.reset_running_scopes_to_planned(
+                    stage="stage1",
+                    scope_type="substage",
+                    reason="process_restarted",
+                )
+                stage1_store.reset_running_scopes_to_planned(
+                    stage="stage1",
+                    scope_type="llm_call",
+                    reason="process_restarted",
+                )
+                stage1_store.reset_running_scopes_to_planned(
+                    stage="stage1",
+                    scope_type="chunk",
+                    reason="process_restarted",
+                )
+            transcribe_artifact_scope_ref = _build_runtime_artifact_scope_ref(
+                stage1_store,
+                stage="transcribe",
+                artifact_name="subtitles",
+            )
+            transcribe_artifact_node = (
+                stage1_store.load_scope_node(transcribe_artifact_scope_ref)
+                if stage1_store is not None and transcribe_artifact_scope_ref
+                else None
+            )
+            stage1_input_dependency_fingerprints = {}
+            if isinstance(transcribe_artifact_node, dict):
+                transcribe_artifact_fingerprint = str(transcribe_artifact_node.get("input_fingerprint", "") or "").strip()
+                if transcribe_artifact_fingerprint:
+                    stage1_input_dependency_fingerprints[transcribe_artifact_scope_ref] = transcribe_artifact_fingerprint
+            stage1_input_scope_ref = _upsert_runtime_input_scope(
+                stage1_store,
+                stage="stage1",
+                input_name="main",
+                input_fingerprint=stage1_fp,
+                dependency_fingerprints=stage1_input_dependency_fingerprints,
+                extra_payload={
+                    "subtitle_path": subtitle_path,
+                    "max_step": int(max_step),
+                },
+            )
+            stage1_artifact_scope_refs = {
+                "step2_correction": _build_runtime_artifact_scope_ref(
+                    stage1_store,
+                    stage="stage1",
+                    artifact_name="step2_correction",
+                ),
+                "step3_merge": _build_runtime_artifact_scope_ref(
+                    stage1_store,
+                    stage="stage1",
+                    artifact_name="step3_merge",
+                ),
+                "step3_5_translate": _build_runtime_artifact_scope_ref(
+                    stage1_store,
+                    stage="stage1",
+                    artifact_name="step3_5_translate",
+                ),
+                "step4_clean_local": _build_runtime_artifact_scope_ref(
+                    stage1_store,
+                    stage="stage1",
+                    artifact_name="step4_clean_local",
+                ),
+                "step5_6_dedup_merge": _build_runtime_artifact_scope_ref(
+                    stage1_store,
+                    stage="stage1",
+                    artifact_name="step5_6_dedup_merge",
+                ),
+                "outputs": _build_runtime_artifact_scope_ref(
+                    stage1_store,
+                    stage="stage1",
+                    artifact_name="outputs",
+                ),
+            }
 
             path_conflicts = _find_stage1_output_conflicts(output_dir)
             for conflict in path_conflicts:
@@ -3636,110 +6555,132 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     f"conflict={conflict.get('conflict')}"
                 )
 
-            reused_stage1 = False
-            resume_state: Dict[str, Any] = {}
-            resume_from_step = ""
-            if stage1_group_enabled:
-                checks: Dict[str, Tuple[str, bool, str]] = {}
-                for key, resource in (
-                    ("step2", step2_path),
-                    ("step6", step6_path),
-                ):
-                    valid, reason = _validate_resource_reuse(
-                        resource,
-                        group="stage1_text",
-                        expected_input_fingerprint=stage1_fp,
-                    )
-                    checks[key] = (resource, valid, reason)
+            stage1_resume_plan = _build_stage1_resume_plan(
+                reuse_enabled=stage1_group_enabled,
+                stage1_store=stage1_store,
+                expected_input_fingerprint=stage1_fp,
+                stage1_input_scope_ref=stage1_input_scope_ref,
+                stage1_artifact_scope_refs=stage1_artifact_scope_refs,
+                step2_path=step2_path,
+                step3_path=step3_path,
+                step35_path=step35_path,
+                step4_path=step4_path,
+                step6_path=step6_path,
+                local_sentence_ts=local_sentence_ts,
+                need_sentence_timestamps=need_sentence_ts,
+                runtime_stage1_state=runtime_stage1_state,
+            )
+            reused_stage1 = bool(stage1_resume_plan.get("reused_stage1", False))
+            resume_state = dict(stage1_resume_plan.get("resume_state", {}) or {})
+            resume_from_step = str(stage1_resume_plan.get("resume_from_step", "") or "").strip()
+            stage1_graph_resume_plan = stage1_resume_plan if stage1_resume_plan.get("mode") == "partial_resume" else None
+            stage1_recovery_payload = {
+                "recovery_plan_mode": str(stage1_resume_plan.get("mode", "") or ""),
+                "recovery_plan_digest": str(stage1_resume_plan.get("plan_digest", "") or ""),
+                "resume_from_step": resume_from_step,
+                "resume_entry_step": str(stage1_resume_plan.get("resume_entry_step", "") or ""),
+                "retry_entry_point": str(stage1_resume_plan.get("retry_entry_point", "") or ""),
+                "dirty_scope_count": int(stage1_resume_plan.get("dirty_scope_count", 0) or 0),
+                "invalidated_descendants_count": int(stage1_resume_plan.get("invalidated_descendants_count", 0) or 0),
+                "failed_scope_kind": str(stage1_resume_plan.get("failed_scope_kind", "") or ""),
+                "failed_scope_id": str(stage1_resume_plan.get("failed_scope_id", "") or ""),
+                "failed_scope_ref": str(stage1_resume_plan.get("failed_scope_ref", "") or ""),
+                "resume_state_fields": sorted(resume_state.keys()),
+            }
+            self._seed_stage1_runtime_repository(
+                output_dir=output_dir,
+                task_id=task_id,
+                video_path=video_path,
+                subtitle_path=subtitle_path,
+                max_step=max_step,
+                input_fingerprint=stage1_fp,
+                resume_from_step=resume_from_step,
+                resume_entry_step=str(stage1_resume_plan.get("resume_entry_step", "") or ""),
+                recovery_plan_digest=str(stage1_resume_plan.get("plan_digest", "") or ""),
+            )
+            stage1_runtime_session.update_base_payload(stage1_recovery_payload)
+            stage1_runtime_session.mark(
+                status="running",
+                checkpoint="recovery_plan_ready",
+                completed=0,
+                pending=max_step,
+                extra_payload={
+                    **stage1_runtime_base_payload,
+                    **stage1_recovery_payload,
+                },
+            )
+            self._record_stage1_runtime_progress_event(
+                output_dir=output_dir,
+                event={
+                    "event": "recovery_plan_ready",
+                    "stage": "stage1",
+                    "checkpoint": "recovery_plan_ready",
+                    "step_name": str(stage1_resume_plan.get("resume_entry_step", "") or resume_from_step or "pipeline_prepare"),
+                    "completed": 0,
+                    "pending": max_step,
+                    "status": "running",
+                    "timestamp_ms": int(time.time() * 1000),
+                },
+                task_id=task_id,
+                video_path=video_path,
+                subtitle_path=subtitle_path,
+                max_step=max_step,
+                input_fingerprint=stage1_fp,
+                resume_from_step=resume_from_step,
+                resume_entry_step=str(stage1_resume_plan.get("resume_entry_step", "") or ""),
+                recovery_plan_digest=str(stage1_resume_plan.get("plan_digest", "") or ""),
+            )
 
-                valid_ts = False
-                reason_ts = "missing_sentence_timestamps"
-                if not need_sentence_ts:
-                    valid_ts, reason_ts = _validate_resource_reuse(
-                        local_sentence_ts,
-                        group="stage1_text",
-                        expected_input_fingerprint=stage1_fp,
-                    )
-
-                reused_stage1 = (
-                    (not need_sentence_ts)
-                    and checks.get("step2", ("", False, ""))[1]
-                    and checks.get("step6", ("", False, ""))[1]
-                    and valid_ts
+            reused_artifact_names = {
+                str(item or "").strip()
+                for item in list(stage1_resume_plan.get("reused_artifact_names", []) or [])
+                if str(item or "").strip()
+            }
+            for artifact_name in (
+                "step2_correction",
+                "step3_merge",
+                "step3_5_translate",
+                "step4_clean_local",
+                "outputs",
+                "sentence_timestamps",
+            ):
+                decision = dict(stage1_resume_plan.get("artifact_decisions", {}).get(artifact_name, {}) or {})
+                resource_path = str(decision.get("resource_path", "") or "").strip()
+                if not resource_path:
+                    continue
+                can_reuse = bool(decision.get("can_reuse", False))
+                self._append_resume_report(
+                    output_dir=output_dir,
+                    task_id=task_id,
+                    stage="ProcessStage1",
+                    group="stage1_text",
+                    resource_path=resource_path,
+                    action="reuse" if can_reuse and artifact_name in reused_artifact_names else "recompute",
+                    reason=str(decision.get("reason", "") or ""),
+                    priority=False,
                 )
-                for resource, valid, reason in checks.values():
-                    self._append_resume_report(
-                        output_dir=output_dir,
-                        task_id=task_id,
-                        stage="ProcessStage1",
-                        group="stage1_text",
-                        resource_path=resource,
-                        action="reuse" if valid and reused_stage1 else "recompute",
-                        reason=reason,
-                        priority=False,
-                    )
-
-                if need_sentence_ts:
-                    self._append_resume_report(
-                        output_dir=output_dir,
-                        task_id=task_id,
-                        stage="ProcessStage1",
-                        group="stage1_text",
-                        resource_path=local_sentence_ts,
-                        action="recompute",
-                        reason="missing_sentence_timestamps",
-                        priority=False,
-                    )
-
-                if not reused_stage1:
-                    step2_valid = checks.get("step2", ("", False, ""))[1]
-                    if step2_valid:
-                        corrected_subtitles, step2_reason = _load_stage1_output_list(
-                            step2_path,
-                            "corrected_subtitles",
-                        )
-                        if corrected_subtitles is not None:
-                            resume_state["corrected_subtitles"] = corrected_subtitles
-                            resume_from_step = "step2_correction"
-                        else:
-                            logger.warning(
-                                f"[{task_id}] step2 payload invalid for partial reuse: {step2_reason}"
-                            )
-                            step2_valid = False
-
-                    if step2_valid:
-                        for resource, output_field, state_key, step_name in (
-                            (step3_path, "merged_sentences", "merged_sentences", "step3_merge"),
-                            (step35_path, "translated_sentences", "translated_sentences", "step3_5_translate"),
-                            (step4_path, "cleaned_sentences", "cleaned_sentences", "step4_clean_local"),
-                        ):
-                            valid, reason = _validate_resource_reuse(
-                                resource,
-                                group="stage1_text",
-                                expected_input_fingerprint=stage1_fp,
-                            )
-                            if valid:
-                                payload, payload_reason = _load_stage1_output_list(resource, output_field)
-                                if payload is not None:
-                                    resume_state[state_key] = payload
-                                    resume_from_step = step_name
-                                else:
-                                    valid = False
-                                    reason = payload_reason
-
-                            self._append_resume_report(
-                                output_dir=output_dir,
-                                task_id=task_id,
-                                stage="ProcessStage1",
-                                group="stage1_text",
-                                resource_path=resource,
-                                action="reuse" if valid else "recompute",
-                                reason=reason,
-                                priority=False,
-                            )
 
             stage1_final_state: Dict[str, Any] = {}
+            effective_runtime_stage1_state: Dict[str, Any] = (
+                dict(runtime_stage1_state) if isinstance(runtime_stage1_state, dict) else {}
+            )
             if reused_stage1:
+                reused_runtime_stage1_state = self._get_stage1_runtime_outputs(output_dir) or {}
+                self._cache_stage1_runtime_outputs(
+                    output_dir=output_dir,
+                    final_state=reused_runtime_stage1_state,
+                    task_id=task_id,
+                    video_path=video_path,
+                    subtitle_path=subtitle_path,
+                    max_step=max_step,
+                    input_fingerprint=stage1_fp,
+                    reused=True,
+                    resume_from_step=resume_from_step,
+                    resume_entry_step=str(stage1_resume_plan.get("resume_entry_step", "") or ""),
+                    recovery_plan_digest=str(stage1_resume_plan.get("plan_digest", "") or ""),
+                )
+                effective_runtime_stage1_state = self._get_stage1_runtime_outputs(output_dir) or dict(reused_runtime_stage1_state)
+                reused_runtime_stage1_views = get_stage1_repository_views(reused_runtime_stage1_state)
                 stage1_runtime_session.mark(
                     status="completed",
                     checkpoint="reused_stage1_outputs",
@@ -3748,12 +6689,17 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     extra_payload={
                         **stage1_runtime_base_payload,
                         "reused_stage1": True,
-                        "step2_json_path": step2_path,
-                        "step2_signature": _file_signature(step2_path),
-                        "step6_json_path": step6_path,
-                        "step6_signature": _file_signature(step6_path),
-                        "sentence_timestamps_path": local_sentence_ts if os.path.exists(local_sentence_ts) else "",
-                        "sentence_timestamps_signature": _file_signature(local_sentence_ts),
+                        "step2_json_path": "",
+                        "step2_signature": {},
+                        "step6_json_path": "",
+                        "step6_signature": {},
+                        "sentence_timestamps_path": "",
+                        "sentence_timestamps_signature": {},
+                        "step2_count": len(list(reused_runtime_stage1_views.get("corrected_subtitles", []) or [])),
+                        "step6_count": len(list(reused_runtime_stage1_views.get("pure_text_script", []) or [])),
+                        "sentence_timestamps_count": len(
+                            dict(reused_runtime_stage1_views.get("sentence_timestamps", {}) or {})
+                        ),
                     },
                 )
                 logger.info(f"[{task_id}] ✅ Reusing existing Stage1 outputs")
@@ -3773,7 +6719,268 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         f"[{task_id}] Stage1 partial reuse hit: resume_from={resume_from_step}, "
                         f"resume_fields={sorted(resume_state.keys())}"
                     )
+
+                def _apply_stage1_substage_event(event: Dict[str, Any]) -> None:
+                    if stage1_store is None:
+                        return
+                    if str(event.get("scope_type", "") or "").strip().lower() != "substage":
+                        return
+                    substage_name = str(
+                        event.get("substage_name")
+                        or event.get("stage_step")
+                        or event.get("step_name")
+                        or ""
+                    ).strip()
+                    wave_id = str(event.get("wave_id", "") or "").strip() or "wave_0001"
+                    if not substage_name:
+                        return
+                    dependency_fingerprints = (
+                        {stage1_input_scope_ref: stage1_fp}
+                        if stage1_input_scope_ref and stage1_fp
+                        else {}
+                    )
+                    plan_context = {
+                        "substage_name": substage_name,
+                        "wave_id": wave_id,
+                        "checkpoint": str(event.get("checkpoint", "") or ""),
+                        "work_units": list(event.get("work_units", []) or []),
+                        "result_summary": dict(event.get("result_summary", {}) or {}),
+                        "fallback_used": bool(event.get("fallback_used", False)),
+                    }
+                    work_units = list(event.get("work_units", []) or [])
+
+                    def _iter_chunk_work_units() -> List[Dict[str, Any]]:
+                        planned_chunk_units: List[Dict[str, Any]] = []
+                        for work_unit_index, work_unit in enumerate(work_units, start=1):
+                            if not isinstance(work_unit, dict):
+                                continue
+                            if str(work_unit.get("scope_type", "") or "").strip().lower() != "chunk":
+                                continue
+                            work_unit_kind = str(work_unit.get("kind", "") or "").strip()
+                            fallback_chunk_name = work_unit_kind or f"chunk_{work_unit_index:04d}"
+                            chunk_id = (
+                                str(work_unit.get("chunk_id", "") or "").strip()
+                                or f"stage1.{substage_name}.{wave_id}.{fallback_chunk_name}"
+                            )
+                            planned_chunk_units.append(
+                                {
+                                    "chunk_id": chunk_id,
+                                    "kind": work_unit_kind,
+                                    "unit_ids": list(work_unit.get("unit_ids", []) or []),
+                                    "window_size": int(work_unit.get("window_size", 0) or 0),
+                                }
+                            )
+                        return planned_chunk_units
+
+                    event_name = str(event.get("event", "") or "").strip().lower()
+                    scope_ref = stage1_store.build_substage_scope_ref(
+                        stage="stage1",
+                        substage_name=substage_name,
+                        wave_id=wave_id,
+                    )
+                    scope_id = stage1_store.build_substage_scope_id(
+                        substage_name=substage_name,
+                        wave_id=wave_id,
+                    )
+                    if event_name == "substage_planned":
+                        stage1_store.plan_substage_scope(
+                            stage="stage1",
+                            substage_name=substage_name,
+                            wave_id=wave_id,
+                            input_fingerprint=stage1_fp,
+                            dependency_fingerprints=dependency_fingerprints,
+                            plan_context=plan_context,
+                        )
+                        for chunk_unit in _iter_chunk_work_units():
+                            stage1_store.plan_chunk_scope(
+                                stage="stage1",
+                                chunk_id=str(chunk_unit.get("chunk_id", "") or ""),
+                                input_fingerprint=stage1_fp,
+                                dependency_fingerprints=dependency_fingerprints,
+                                metadata={
+                                    "stage_step": substage_name,
+                                    "substage_name": substage_name,
+                                    "wave_id": wave_id,
+                                    "kind": str(chunk_unit.get("kind", "") or ""),
+                                    "unit_ids": list(chunk_unit.get("unit_ids", []) or []),
+                                },
+                                extra_payload=dict(chunk_unit),
+                            )
+                        return
+                    if event_name == "substage_running":
+                        stage1_store.transition_scope_node(
+                            scope_ref=scope_ref,
+                            stage="stage1",
+                            scope_type="substage",
+                            scope_id=scope_id,
+                            status=STATUS_RUNNING,
+                            input_fingerprint=stage1_fp,
+                            dependency_fingerprints=dependency_fingerprints,
+                            stage_step=substage_name,
+                            plan_context=plan_context,
+                        )
+                        for chunk_unit in _iter_chunk_work_units():
+                            chunk_id = str(chunk_unit.get("chunk_id", "") or "")
+                            stage1_store.transition_scope_node(
+                                scope_ref=stage1_store.build_scope_ref(
+                                    stage="stage1",
+                                    scope_type="chunk",
+                                    scope_id=chunk_id,
+                                ),
+                                stage="stage1",
+                                scope_type="chunk",
+                                scope_id=chunk_id,
+                                status=STATUS_RUNNING,
+                                input_fingerprint=stage1_fp,
+                                dependency_fingerprints=dependency_fingerprints,
+                                chunk_id=chunk_id,
+                                stage_step=substage_name,
+                                plan_context={
+                                    "substage_name": substage_name,
+                                    "wave_id": wave_id,
+                                    "kind": str(chunk_unit.get("kind", "") or ""),
+                                    "unit_ids": list(chunk_unit.get("unit_ids", []) or []),
+                                },
+                                extra_payload=dict(chunk_unit),
+                            )
+                        return
+                    if event_name == "substage_completed":
+                        result_hash = build_runtime_payload_fingerprint(
+                            {
+                                "substage_name": substage_name,
+                                "wave_id": wave_id,
+                                "result_summary": dict(event.get("result_summary", {}) or {}),
+                                "fallback_used": bool(event.get("fallback_used", False)),
+                            }
+                        )
+                        stage1_store.transition_scope_node(
+                            scope_ref=scope_ref,
+                            stage="stage1",
+                            scope_type="substage",
+                            scope_id=scope_id,
+                            status=STATUS_SUCCESS,
+                            input_fingerprint=stage1_fp,
+                            dependency_fingerprints=dependency_fingerprints,
+                            stage_step=substage_name,
+                            plan_context=plan_context,
+                            result_hash=result_hash,
+                        )
+                        for chunk_unit in _iter_chunk_work_units():
+                            chunk_id = str(chunk_unit.get("chunk_id", "") or "")
+                            chunk_result_hash = build_runtime_payload_fingerprint(
+                                {
+                                    "substage_name": substage_name,
+                                    "wave_id": wave_id,
+                                    "kind": str(chunk_unit.get("kind", "") or ""),
+                                    "result_summary": dict(event.get("result_summary", {}) or {}),
+                                    "fallback_used": bool(event.get("fallback_used", False)),
+                                }
+                            )
+                            stage1_store.transition_scope_node(
+                                scope_ref=stage1_store.build_scope_ref(
+                                    stage="stage1",
+                                    scope_type="chunk",
+                                    scope_id=chunk_id,
+                                ),
+                                stage="stage1",
+                                scope_type="chunk",
+                                scope_id=chunk_id,
+                                status=STATUS_SUCCESS,
+                                input_fingerprint=stage1_fp,
+                                dependency_fingerprints=dependency_fingerprints,
+                                chunk_id=chunk_id,
+                                stage_step=substage_name,
+                                plan_context={
+                                    "substage_name": substage_name,
+                                    "wave_id": wave_id,
+                                    "kind": str(chunk_unit.get("kind", "") or ""),
+                                    "unit_ids": list(chunk_unit.get("unit_ids", []) or []),
+                                },
+                                result_hash=chunk_result_hash,
+                                extra_payload=dict(chunk_unit),
+                            )
+                        return
+                    if event_name == "substage_failed":
+                        runtime_error = RuntimeError(str(event.get("error", "") or "stage1 substage failed"))
+                        error_info = classify_runtime_error(runtime_error)
+                        if error_info["error_class"] == "AUTO_RETRYABLE":
+                            failure_status = STATUS_ERROR
+                        elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+                            failure_status = STATUS_FAILED
+                        else:
+                            failure_status = STATUS_MANUAL_NEEDED
+                        stage1_store.transition_scope_node(
+                            scope_ref=scope_ref,
+                            stage="stage1",
+                            scope_type="substage",
+                            scope_id=scope_id,
+                            status=failure_status,
+                            input_fingerprint=stage1_fp,
+                            dependency_fingerprints=dependency_fingerprints,
+                            stage_step=substage_name,
+                            plan_context=plan_context,
+                            resource_snapshot={"error": str(runtime_error)},
+                            retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+                            required_action=str(error_info.get("action_hint", "") or ""),
+                            error_class=error_info["error_class"],
+                            error_code=error_info["error_code"],
+                            error_message=error_info["error_message"],
+                        )
+                        for chunk_unit in _iter_chunk_work_units():
+                            chunk_id = str(chunk_unit.get("chunk_id", "") or "")
+                            stage1_store.transition_scope_node(
+                                scope_ref=stage1_store.build_scope_ref(
+                                    stage="stage1",
+                                    scope_type="chunk",
+                                    scope_id=chunk_id,
+                                ),
+                                stage="stage1",
+                                scope_type="chunk",
+                                scope_id=chunk_id,
+                                status=failure_status,
+                                input_fingerprint=stage1_fp,
+                                dependency_fingerprints=dependency_fingerprints,
+                                chunk_id=chunk_id,
+                                stage_step=substage_name,
+                                plan_context={
+                                    "substage_name": substage_name,
+                                    "wave_id": wave_id,
+                                    "kind": str(chunk_unit.get("kind", "") or ""),
+                                    "unit_ids": list(chunk_unit.get("unit_ids", []) or []),
+                                },
+                                resource_snapshot={"error": str(runtime_error)},
+                                retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+                                required_action=str(error_info.get("action_hint", "") or ""),
+                                error_class=error_info["error_class"],
+                                error_code=error_info["error_code"],
+                                error_message=error_info["error_message"],
+                                extra_payload=dict(chunk_unit),
+                            )
+
                 def _stage1_progress_callback(event: Dict[str, Any]) -> None:
+                    try:
+                        _apply_stage1_substage_event(event)
+                    except Exception as stage1_scope_error:
+                        logger.warning(
+                            f"[{task_id}] Stage1 substage runtime state update failed: {stage1_scope_error}"
+                        )
+                    try:
+                        self._record_stage1_runtime_progress_event(
+                            output_dir=output_dir,
+                            event=event,
+                            task_id=task_id,
+                            video_path=video_path,
+                            subtitle_path=subtitle_path,
+                            max_step=max_step,
+                            input_fingerprint=stage1_fp,
+                            resume_from_step=resume_from_step,
+                            resume_entry_step=str(stage1_resume_plan.get("resume_entry_step", "") or ""),
+                            recovery_plan_digest=str(stage1_resume_plan.get("plan_digest", "") or ""),
+                        )
+                    except Exception as repository_error:
+                        logger.warning(
+                            f"[{task_id}] Stage1 runtime repository progress update failed: {repository_error}"
+                        )
                     stage1_runtime_session.mark_from_event(
                         event,
                         default_pending=max_step,
@@ -3783,80 +6990,56 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             "event": str(event.get("event") or ""),
                             "step_name": str(event.get("step_name") or ""),
                             "resume_from_step": str(resume_from_step or ""),
+                            "resume_entry_step": str(stage1_resume_plan.get("resume_entry_step", "") or ""),
+                            "recovery_plan_digest": str(stage1_resume_plan.get("plan_digest", "") or ""),
                             "timestamp_ms": int(event.get("timestamp_ms", 0) or 0),
                         },
                     )
 
-                stage1_final_state = await run_pipeline(
-                   video_path=video_path,
-                   subtitle_path=subtitle_path,
-                   output_dir=output_dir,
-                   max_step=effective_max_step,
-                   output_steps=[
-                       "step2_correction",
-                       "step3_merge",
-                       "step3_5_translate",
-                       "step4_clean_local",
-                       "step5_6_dedup_merge",
-                    ],
-                    resume_state=resume_state or None,
-                    resume_from_step=resume_from_step or None,
+                stage1_run_pipeline = _get_stage1_run_pipeline()
+                stage1_final_state = await stage1_run_pipeline(
+                    video_path=video_path,
+                    subtitle_path=subtitle_path,
+                    output_dir=output_dir,
+                    task_id=task_id,
+                    max_step=effective_max_step,
+                    output_steps=[],
+                    resume_state=None,
+                    resume_from_step=None,
+                    resume_plan=stage1_graph_resume_plan,
                     progress_callback=_stage1_progress_callback,
-                 )
+                    disable_output_persistence=True,
+                )
 
                 # Stage1 step2~step6 产物改为异步落盘后，这里只在关键文件未就绪时等待。
                 required_outputs = [step2_path, step6_path]
-                pending_required = [
-                    path
-                    for path in required_outputs
-                    if (not os.path.exists(path)) or os.path.getsize(path) <= 0
-                ]
-                if pending_required:
-                    persist_wait_sec = max(
-                        1.0,
-                        float(_to_int(os.getenv("TRANSCRIPT_ASYNC_STAGE1_PERSIST_WAIT_SEC", 30), 30)),
-                    )
-                    flushed = flush_async_json_writes(timeout_sec=persist_wait_sec, scope_key=output_dir)
-                    pending_required = [
-                        path
-                        for path in required_outputs
-                        if (not os.path.exists(path)) or os.path.getsize(path) <= 0
-                    ]
-                    if pending_required:
-                        raise RuntimeError(
-                            "Stage1 outputs not ready after async wait: "
-                            f"{pending_required} (flush={flushed}, wait_sec={persist_wait_sec})"
-                        )
-                self._cache_stage1_runtime_outputs(output_dir=output_dir, final_state=stage1_final_state)
+                self._cache_stage1_runtime_outputs(
+                    output_dir=output_dir,
+                    final_state=stage1_final_state,
+                    task_id=task_id,
+                    video_path=video_path,
+                    subtitle_path=subtitle_path,
+                    max_step=max_step,
+                    input_fingerprint=stage1_fp,
+                    reused=False,
+                    resume_from_step=resume_from_step,
+                    resume_entry_step=str(stage1_resume_plan.get("resume_entry_step", "") or ""),
+                    recovery_plan_digest=str(stage1_resume_plan.get("plan_digest", "") or ""),
+                )
 
-                resource_meta_specs = [
-                    (step2_path, {}),
-                    (step3_path, {"step2": _file_signature(step2_path)}),
-                    (step35_path, {"step3": _file_signature(step3_path)}),
-                    (
-                        step4_path,
-                        {
-                            "step3": _file_signature(step3_path),
-                            "step3_5": _file_signature(step35_path),
-                        },
-                    ),
-                    (step6_path, {"step4": _file_signature(step4_path)}),
-                ]
-                for resource, dependencies in resource_meta_specs:
-                    _write_resource_meta(
-                        resource,
-                        group="stage1_text",
-                        input_fingerprint=stage1_fp,
-                        dependencies=dependencies,
-                        priority=False,
-                    )
+                effective_runtime_stage1_state = (
+                    self._get_stage1_runtime_outputs(output_dir)
+                    or self._build_stage1_runtime_cache_entry(stage1_final_state)
+                    or {}
+                )
+            effective_runtime_stage1_views = get_stage1_repository_views(effective_runtime_stage1_state)
             
             # 补齐 sentence_timestamps.json（来自 Stage1 local_storage）
             intermediates_dir = os.path.join(output_dir, "intermediates")
             os.makedirs(intermediates_dir, exist_ok=True)
             inter_sentence_ts = os.path.join(intermediates_dir, "sentence_timestamps.json")
             sentence_timestamps_path = ""
-            if os.path.exists(local_sentence_ts):
+            if False and os.path.exists(local_sentence_ts):
                 try:
                     # 复制到 intermediates，供 Phase2A/Phase2B 统一读取
                     import shutil
@@ -3880,8 +7063,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 logger.warning(f"[{task_id}] sentence_timestamps.json not found at {local_sentence_ts}")
                 sentence_timestamps_path = inter_sentence_ts if os.path.exists(inter_sentence_ts) else ""
 
-            stage1_domain = str((stage1_final_state or {}).get("domain", "") or "").strip()
-            stage1_main_topic = str((stage1_final_state or {}).get("main_topic", "") or "").strip()
+            stage1_domain = str(effective_runtime_stage1_views.get("domain", "") or "").strip()
+            stage1_main_topic = str(effective_runtime_stage1_views.get("main_topic", "") or "").strip()
+            if not stage1_domain:
+                stage1_domain = str((stage1_final_state or {}).get("domain", "") or "").strip()
+            if not stage1_main_topic:
+                stage1_main_topic = str((stage1_final_state or {}).get("main_topic", "") or "").strip()
             if not stage1_domain:
                 stage1_domain = str((resume_state or {}).get("domain", "") or "").strip()
             if not stage1_main_topic:
@@ -3896,6 +7083,106 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 except Exception as topic_meta_error:
                     logger.warning(f"[{task_id}] Failed to update video_meta domain/main_topic: {topic_meta_error}")
 
+            stage1_step_artifact_specs = [
+                (
+                    "step2_correction",
+                    "corrected_subtitles",
+                    [stage1_input_scope_ref],
+                    ["step1_validate", "step2_correction"],
+                ),
+                (
+                    "step3_merge",
+                    "merged_sentences",
+                    [stage1_artifact_scope_refs.get("step2_correction", "")],
+                    ["step3_merge"],
+                ),
+                (
+                    "step3_5_translate",
+                    "translated_sentences",
+                    [stage1_artifact_scope_refs.get("step3_merge", "")],
+                    ["step3_5_translate"],
+                ),
+                (
+                    "step4_clean_local",
+                    "cleaned_sentences",
+                    [
+                        stage1_artifact_scope_refs.get("step3_merge", ""),
+                        stage1_artifact_scope_refs.get("step3_5_translate", ""),
+                    ],
+                    ["step4_clean_local"],
+                ),
+                (
+                    "step5_6_dedup_merge",
+                    "pure_text_script",
+                    [stage1_artifact_scope_refs.get("step4_clean_local", "")],
+                    ["step5_6_dedup_merge"],
+                ),
+            ]
+            for artifact_name, runtime_field, upstream_scope_refs, llm_stage_steps in stage1_step_artifact_specs:
+                artifact_dependency_fingerprints = _collect_scope_dependency_fingerprints_by_scope_refs(
+                    stage1_store,
+                    scope_refs=upstream_scope_refs,
+                )
+                artifact_dependency_fingerprints.update(
+                    _collect_scope_dependency_fingerprints_by_stage_steps(
+                        stage1_store,
+                        stage="stage1",
+                        scope_type="llm_call",
+                        stage_steps=llm_stage_steps,
+                    )
+                )
+                runtime_payload = effective_runtime_stage1_views.get(runtime_field)
+                if isinstance(runtime_payload, (list, tuple, dict)):
+                    payload_count = len(runtime_payload)
+                elif runtime_payload in (None, ""):
+                    payload_count = 0
+                else:
+                    payload_count = 1
+                _upsert_runtime_artifact_scope(
+                    stage1_store,
+                    stage="stage1",
+                    artifact_name=artifact_name,
+                    input_fingerprint=stage1_fp,
+                    local_path="",
+                    dependency_fingerprints=artifact_dependency_fingerprints,
+                    extra_payload={
+                        "artifact_path": "",
+                        "payload_count": payload_count,
+                        "runtime_projected": True,
+                        "reused": bool(reused_stage1),
+                    },
+                )
+
+            stage1_output_dependency_fingerprints = (
+                _collect_scope_dependency_fingerprints_by_scope_refs(
+                    stage1_store,
+                    scope_refs=[stage1_artifact_scope_refs.get("step5_6_dedup_merge", "")],
+                )
+            )
+            _upsert_runtime_artifact_scope(
+                stage1_store,
+                stage="stage1",
+                artifact_name="outputs",
+                input_fingerprint=stage1_fp,
+                local_path="",
+                dependency_fingerprints=stage1_output_dependency_fingerprints,
+                extra_payload={
+                    "step2_json_path": "",
+                    "step6_json_path": "",
+                    "sentence_timestamps_path": "",
+                    "step2_count": len(list(effective_runtime_stage1_views.get("corrected_subtitles", []) or [])),
+                    "step3_count": len(list(effective_runtime_stage1_views.get("merged_sentences", []) or [])),
+                    "step35_count": len(list(effective_runtime_stage1_views.get("translated_sentences", []) or [])),
+                    "step4_count": len(list(effective_runtime_stage1_views.get("cleaned_sentences", []) or [])),
+                    "step6_count": len(list(effective_runtime_stage1_views.get("pure_text_script", []) or [])),
+                    "sentence_timestamps_count": len(dict(effective_runtime_stage1_views.get("sentence_timestamps", {}) or {})),
+                    "runtime_projected": True,
+                    "domain": stage1_domain,
+                    "main_topic": stage1_main_topic,
+                    "reused": bool(reused_stage1),
+                },
+            )
+
             stage1_runtime_session.mark(
                 status="completed",
                 checkpoint="stage1_response_ready",
@@ -3904,12 +7191,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 extra_payload={
                     **stage1_runtime_base_payload,
                     "reused_stage1": bool(reused_stage1),
-                    "step2_json_path": step2_path,
-                    "step2_signature": _file_signature(step2_path),
-                    "step6_json_path": step6_path,
-                    "step6_signature": _file_signature(step6_path),
-                    "sentence_timestamps_path": sentence_timestamps_path,
-                    "sentence_timestamps_signature": _file_signature(sentence_timestamps_path),
+                    "step2_json_path": "",
+                    "step2_signature": {},
+                    "step6_json_path": "",
+                    "step6_signature": {},
+                    "sentence_timestamps_path": "",
+                    "sentence_timestamps_signature": {},
+                    "step2_count": len(list(effective_runtime_stage1_views.get("corrected_subtitles", []) or [])),
+                    "step6_count": len(list(effective_runtime_stage1_views.get("pure_text_script", []) or [])),
+                    "sentence_timestamps_count": len(dict(effective_runtime_stage1_views.get("sentence_timestamps", {}) or {})),
                     "domain": stage1_domain,
                     "main_topic": stage1_main_topic,
                 },
@@ -3917,14 +7207,44 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
               
             return video_processing_pb2.Stage1Response(
                 success=True,
-                step2_json_path=step2_path,
-                step6_json_path=step6_path,
-                sentence_timestamps_path=sentence_timestamps_path,
+                step2_json_path="",
+                step6_json_path="",
+                sentence_timestamps_path="",
                 error_msg=""
             )
             
         except Exception as e:
             logger.error(f"[{task_id}] ProcessStage1 failed: {e}")
+            try:
+                failed_current_step = "unknown"
+                if 'stage1_final_state' in locals() and isinstance(stage1_final_state, dict):
+                    failed_current_step = str(stage1_final_state.get("current_step") or failed_current_step)
+                elif 'resume_from_step' in locals() and str(resume_from_step or "").strip():
+                    failed_current_step = str(resume_from_step or "").strip()
+                self._record_stage1_runtime_progress_event(
+                    output_dir=output_dir,
+                    event={
+                        "event": "pipeline_error",
+                        "stage": "stage1",
+                        "checkpoint": "stage1_failed",
+                        "step_name": failed_current_step,
+                        "completed": 0,
+                        "pending": max_step,
+                        "status": "failed",
+                        "error": str(e),
+                        "timestamp_ms": int(time.time() * 1000),
+                    },
+                    task_id=task_id,
+                    video_path=video_path,
+                    subtitle_path=subtitle_path,
+                    max_step=max_step,
+                    input_fingerprint=stage1_fp if 'stage1_fp' in locals() else "",
+                    resume_from_step=resume_from_step if 'resume_from_step' in locals() else "",
+                    resume_entry_step=str(stage1_resume_plan.get("resume_entry_step", "") or "") if 'stage1_resume_plan' in locals() else "",
+                    recovery_plan_digest=str(stage1_resume_plan.get("plan_digest", "") or "") if 'stage1_resume_plan' in locals() else "",
+                )
+            except Exception as repository_error:
+                logger.warning(f"[{task_id}] Stage1 runtime repository failure update failed: {repository_error}")
             try:
                 stage1_runtime_session.mark_failed(
                     checkpoint="stage1_failed",
@@ -3950,7 +7270,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         """
         执行逻辑：
         1) 归档视频并确定 Phase2A 输出目录。
-        2) 若 semantic_units_phase2a.json 已存在则直接复用并解析。
+        2) 若 Phase2A semantic_units 产物已存在则直接复用并解析。
         3) 否则构建 RichTextPipeline 执行仅语义切分并落盘。
         4) AnalyzeResponse 返回 semantic_units_ref/semantic_units_inline；
            素材请求由后续 Hybrid Analysis 生成。
@@ -3977,6 +7297,22 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         output_dir = _normalize_output_dir(video_path)
         phase2a_candidates = _phase2a_semantic_units_candidates(output_dir)
         semantic_units_path = phase2a_candidates[0]
+        runtime_stage1_outputs = self._get_stage1_runtime_outputs(output_dir)
+        runtime_step2_subtitles: Optional[List[Dict[str, Any]]] = None
+        runtime_step6_paragraphs: Optional[List[Dict[str, Any]]] = None
+        runtime_sentence_timestamps: Optional[Dict[str, Dict[str, Any]]] = None
+        if runtime_stage1_outputs:
+            runtime_stage1_views = get_stage1_repository_views(runtime_stage1_outputs)
+            candidate_step2 = runtime_stage1_views.get("step2_subtitles", [])
+            candidate_step6 = runtime_stage1_views.get("step6_paragraphs", [])
+            candidate_sentence_timestamps = runtime_stage1_views.get("sentence_timestamps", {})
+            if isinstance(candidate_step2, list) and candidate_step2:
+                runtime_step2_subtitles = candidate_step2
+            if isinstance(candidate_step6, list) and candidate_step6:
+                runtime_step6_paragraphs = candidate_step6
+            if isinstance(candidate_sentence_timestamps, dict) and candidate_sentence_timestamps:
+                runtime_sentence_timestamps = candidate_sentence_timestamps
+        runtime_stage1_fingerprint = _build_stage1_runtime_outputs_fingerprint(runtime_stage1_outputs)
         phase2a_runtime_base_payload = {
             "video_path": video_path,
             "video_signature": _file_signature(video_path),
@@ -3984,10 +7320,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             "step2_signature": _file_signature(step2_json_path) if step2_json_path else {},
             "step6_json_path": step6_json_path,
             "step6_signature": _file_signature(step6_json_path) if step6_json_path else {},
+            "stage1_runtime_fingerprint": runtime_stage1_fingerprint,
             "semantic_units_path": semantic_units_path,
             "semantic_units_signature": _file_signature(semantic_units_path),
         }
-        if not sentence_timestamps_path:
+        if not sentence_timestamps_path and not runtime_sentence_timestamps:
             # 默认使用 intermediates 路径（Stage1 已复制到此处）
             sentence_timestamps_path = os.path.join(output_dir, "intermediates", "sentence_timestamps.json")
             if not os.path.exists(sentence_timestamps_path):
@@ -4039,12 +7376,112 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             phase2a_fp = _build_input_fingerprint(
                 video_path,
                 extra={
-                    "step2": _file_signature(step2_json_path),
-                    "step6": _file_signature(step6_json_path),
+                    "stage1_runtime": runtime_stage1_fingerprint,
+                    "step2": _file_signature(step2_json_path) if step2_json_path else None,
+                    "step6": _file_signature(step6_json_path) if step6_json_path else None,
                     "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else None,
                     "stage": "phase2a",
                 },
             )
+            phase2a_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+            phase2a_semantic_wave_id = "wave_0001"
+            phase2a_semantic_chunk_id = "phase2a.semantic_units_build.wave_0001"
+            phase2a_semantic_scope_ref = ""
+            phase2a_semantic_scope_id = ""
+            if phase2a_store is not None:
+                phase2a_store.reset_running_scopes_to_planned(
+                    stage="phase2a",
+                    scope_type="substage",
+                    reason="process_restarted",
+                )
+                phase2a_store.reset_running_scopes_to_planned(
+                    stage="phase2a",
+                    scope_type="llm_call",
+                    reason="process_restarted",
+                )
+                phase2a_store.reset_running_scopes_to_planned(
+                    stage="phase2a",
+                    scope_type="chunk",
+                    reason="process_restarted",
+                )
+                phase2a_semantic_scope_ref = phase2a_store.build_substage_scope_ref(
+                    stage="phase2a",
+                    substage_name="semantic_units_build",
+                    wave_id=phase2a_semantic_wave_id,
+                )
+                phase2a_semantic_scope_id = phase2a_store.build_substage_scope_id(
+                    substage_name="semantic_units_build",
+                    wave_id=phase2a_semantic_wave_id,
+                )
+            stage1_artifact_scope_ref = _build_runtime_artifact_scope_ref(
+                phase2a_store,
+                stage="stage1",
+                artifact_name="outputs",
+            )
+            stage1_artifact_node = (
+                phase2a_store.load_scope_node(stage1_artifact_scope_ref)
+                if phase2a_store is not None and stage1_artifact_scope_ref
+                else None
+            )
+            phase2a_input_dependency_fingerprints = {}
+            if isinstance(stage1_artifact_node, dict):
+                stage1_artifact_fingerprint = str(stage1_artifact_node.get("input_fingerprint", "") or "").strip()
+                if stage1_artifact_fingerprint:
+                    phase2a_input_dependency_fingerprints[stage1_artifact_scope_ref] = stage1_artifact_fingerprint
+            phase2a_input_scope_ref = _upsert_runtime_input_scope(
+                phase2a_store,
+                stage="phase2a",
+                input_name="segmentation_main",
+                input_fingerprint=phase2a_fp,
+                dependency_fingerprints=phase2a_input_dependency_fingerprints,
+                extra_payload={
+                    "step2_json_path": step2_json_path,
+                    "step6_json_path": step6_json_path,
+                    "sentence_timestamps_path": sentence_timestamps_path,
+                    "stage1_runtime_fingerprint": runtime_stage1_fingerprint,
+                },
+            )
+            if phase2a_store is not None:
+                phase2a_store.plan_substage_scope(
+                    stage="phase2a",
+                    substage_name="semantic_units_build",
+                    wave_id=phase2a_semantic_wave_id,
+                    input_fingerprint=phase2a_fp,
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    plan_context={
+                        "semantic_units_path": semantic_units_path,
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "chunk_id": phase2a_semantic_chunk_id,
+                                "kind": "semantic_segmentation",
+                            }
+                        ],
+                    },
+                )
+                phase2a_store.plan_chunk_scope(
+                    stage="phase2a",
+                    chunk_id=phase2a_semantic_chunk_id,
+                    input_fingerprint=phase2a_fp,
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    metadata={
+                        "stage_step": "semantic_units_build",
+                        "substage_name": "semantic_units_build",
+                        "wave_id": phase2a_semantic_wave_id,
+                    },
+                    extra_payload={
+                        "kind": "semantic_segmentation",
+                        "semantic_units_path": semantic_units_path,
+                    },
+                )
             phase2a_reuse_enabled = self._is_group_reuse_enabled("phase2a")
             reuse_candidate_path, phase2a_reason = _resolve_reuse_candidate(
                 phase2a_candidates,
@@ -4052,9 +7489,65 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 expected_input_fingerprint=phase2a_fp,
                 reuse_enabled=phase2a_reuse_enabled,
             )
+            if reuse_candidate_path:
+                can_restore_phase2a, phase2a_scope_reason = _plan_runtime_artifact_reuse(
+                    phase2a_store,
+                    stage="phase2a",
+                    artifact_name="semantic_units",
+                    expected_input_fingerprint=phase2a_fp,
+                    current_dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    candidate_path=reuse_candidate_path,
+                    bootstrap_on_missing_scope=True,
+                )
+                if not can_restore_phase2a:
+                    phase2a_reason = f"{phase2a_reason}|scope_plan:{phase2a_scope_reason}" if phase2a_reason else f"scope_plan:{phase2a_scope_reason}"
+                    reuse_candidate_path = None
+                elif phase2a_scope_reason != "restore_allowed":
+                    phase2a_reason = f"{phase2a_reason}|{phase2a_scope_reason}" if phase2a_reason else phase2a_scope_reason
             
             # 🔑 检查是否已存在 Phase2A 输出（缓存复用）
             if reuse_candidate_path:
+                if phase2a_store is not None and phase2a_semantic_scope_ref and phase2a_semantic_scope_id:
+                    phase2a_store.transition_scope_node(
+                        scope_ref=phase2a_semantic_scope_ref,
+                        stage="phase2a",
+                        scope_type="substage",
+                        scope_id=phase2a_semantic_scope_id,
+                        status=STATUS_RUNNING,
+                        input_fingerprint=phase2a_fp,
+                        dependency_fingerprints={
+                            phase2a_input_scope_ref: phase2a_fp,
+                        }
+                        if phase2a_input_scope_ref
+                        else {},
+                        stage_step="semantic_units_build",
+                        plan_context={"semantic_units_path": semantic_units_path, "reused": True},
+                    )
+                    phase2a_store.transition_scope_node(
+                        scope_ref=phase2a_store.build_scope_ref(
+                            stage="phase2a",
+                            scope_type="chunk",
+                            scope_id=phase2a_semantic_chunk_id,
+                        ),
+                        stage="phase2a",
+                        scope_type="chunk",
+                        scope_id=phase2a_semantic_chunk_id,
+                        status=STATUS_RUNNING,
+                        input_fingerprint=phase2a_fp,
+                        dependency_fingerprints={
+                            phase2a_input_scope_ref: phase2a_fp,
+                        }
+                        if phase2a_input_scope_ref
+                        else {},
+                        chunk_id=phase2a_semantic_chunk_id,
+                        stage_step="semantic_units_build",
+                        plan_context={"semantic_units_path": semantic_units_path, "reused": True},
+                        extra_payload={"kind": "semantic_segmentation"},
+                    )
                 semantic_units_path = reuse_candidate_path
                 logger.warning(
                     f"[{task_id}] ✅ Reusing existing Phase2A output: {semantic_units_path} "
@@ -4101,14 +7594,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     task_id=task_id,
                 )
                 if isinstance(cache_entry, dict):
+                    cache_views = get_phase2a_repository_views(cache_entry)
                     response.semantic_units_ref.CopyFrom(
                         video_processing_pb2.SemanticUnitsRef(
                             ref_id=str(cache_entry.get("ref_id", "")),
                             task_id=task_id,
                             output_dir=output_dir,
-                            unit_count=int(cache_entry.get("unit_count", 0) or 0),
+                            unit_count=int(cache_views.get("unit_count", 0) or 0),
                             schema_version=str(cache_entry.get("schema_version", "phase2a.v1")),
-                            fingerprint=str(cache_entry.get("fingerprint", "")),
+                            fingerprint=str(cache_views.get("fingerprint", "")),
                         )
                     )
                     response.semantic_units_inline.CopyFrom(
@@ -4116,6 +7610,74 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             semantic_units_payload,
                             cache_entry=cache_entry,
                         )
+                    )
+                _upsert_runtime_artifact_scope(
+                    phase2a_store,
+                    stage="phase2a",
+                    artifact_name="semantic_units",
+                    input_fingerprint=phase2a_fp,
+                    local_path=semantic_units_path,
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    extra_payload={
+                        "semantic_units_path": semantic_units_path,
+                        "unit_count": len(semantic_units_payload or []),
+                        "reused": True,
+                    },
+                )
+                if phase2a_store is not None and phase2a_semantic_scope_ref and phase2a_semantic_scope_id:
+                    phase2a_store.transition_scope_node(
+                        scope_ref=phase2a_semantic_scope_ref,
+                        stage="phase2a",
+                        scope_type="substage",
+                        scope_id=phase2a_semantic_scope_id,
+                        status=STATUS_SUCCESS,
+                        input_fingerprint=phase2a_fp,
+                        dependency_fingerprints={
+                            phase2a_input_scope_ref: phase2a_fp,
+                        }
+                        if phase2a_input_scope_ref
+                        else {},
+                        stage_step="semantic_units_build",
+                        plan_context={"semantic_units_path": semantic_units_path, "reused": True},
+                        result_hash=build_runtime_payload_fingerprint(
+                            {
+                                "semantic_units_path": semantic_units_path,
+                                "unit_count": len(semantic_units_payload or []),
+                                "reused": True,
+                            }
+                        ),
+                    )
+                    phase2a_store.transition_scope_node(
+                        scope_ref=phase2a_store.build_scope_ref(
+                            stage="phase2a",
+                            scope_type="chunk",
+                            scope_id=phase2a_semantic_chunk_id,
+                        ),
+                        stage="phase2a",
+                        scope_type="chunk",
+                        scope_id=phase2a_semantic_chunk_id,
+                        status=STATUS_SUCCESS,
+                        input_fingerprint=phase2a_fp,
+                        dependency_fingerprints={
+                            phase2a_input_scope_ref: phase2a_fp,
+                        }
+                        if phase2a_input_scope_ref
+                        else {},
+                        chunk_id=phase2a_semantic_chunk_id,
+                        stage_step="semantic_units_build",
+                        plan_context={"semantic_units_path": semantic_units_path, "reused": True},
+                        result_hash=build_runtime_payload_fingerprint(
+                            {
+                                "semantic_units_path": semantic_units_path,
+                                "unit_count": len(semantic_units_payload or []),
+                                "reused": True,
+                            }
+                        ),
+                        extra_payload={"kind": "semantic_segmentation"},
                     )
                 phase2a_runtime_session.mark(
                     status="completed",
@@ -4151,34 +7713,29 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 确保目录存在
             os.makedirs(output_dir, exist_ok=True)
 
-            runtime_stage1_outputs = self._get_stage1_runtime_outputs(output_dir)
-            runtime_step2_subtitles: Optional[List[Dict[str, Any]]] = None
-            runtime_step6_paragraphs: Optional[List[Dict[str, Any]]] = None
             if runtime_stage1_outputs:
-                candidate_step2 = runtime_stage1_outputs.get("step2_subtitles", [])
-                candidate_step6 = runtime_stage1_outputs.get("step6_paragraphs", [])
-                if isinstance(candidate_step2, list) and candidate_step2:
-                    runtime_step2_subtitles = candidate_step2
-                if isinstance(candidate_step6, list) and candidate_step6:
-                    runtime_step6_paragraphs = candidate_step6
                 logger.info(
                     f"[{task_id}] Stage1 runtime cache hit: "
                     f"step2_items={len(runtime_step2_subtitles or [])}, "
-                    f"step6_paragraphs={len(runtime_step6_paragraphs or [])}"
+                    f"step6_paragraphs={len(runtime_step6_paragraphs or [])}, "
+                    f"sentence_timestamps={len(runtime_sentence_timestamps or {})}"
                 )
             else:
-                logger.info(f"[{task_id}] Stage1 runtime cache miss, fallback to JSON loading")
+                logger.info(f"[{task_id}] Stage1 runtime cache/projector miss, fallback to JSON loading")
              
             # 🔑 创建 RichTextPipeline (使用正确的构造函数签名)
-            pipeline = RichTextPipeline(
+            pipeline_cls = _get_rich_text_pipeline_cls()
+            pipeline = pipeline_cls(
                 video_path=video_path,
-                step2_path=step2_json_path,
-                step6_path=step6_json_path,
+                step2_path="" if runtime_step2_subtitles else step2_json_path,
+                step6_path="" if runtime_step6_paragraphs else step6_json_path,
                 output_dir=output_dir,
-                sentence_timestamps_path=sentence_timestamps_path,
+                task_id=task_id,
+                sentence_timestamps_path="" if runtime_sentence_timestamps else sentence_timestamps_path,
                 segmenter=self.resources.semantic_unit_segmenter,
                 step2_subtitles=runtime_step2_subtitles,
                 step6_paragraphs=runtime_step6_paragraphs,
+                sentence_timestamps=runtime_sentence_timestamps,
             )
 
             # 复用全局单例切分器：做什么是避免每次 new Segmenter/LLMClient；为什么是降低 Phase2A 热路径开销；
@@ -4188,6 +7745,43 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 pipeline.segmenter = shared_segmenter
 
             logger.info(f"[{task_id}] Phase2A segmentation-only mode enabled: skip material request generation")
+            if phase2a_store is not None and phase2a_semantic_scope_ref and phase2a_semantic_scope_id:
+                phase2a_store.transition_scope_node(
+                    scope_ref=phase2a_semantic_scope_ref,
+                    stage="phase2a",
+                    scope_type="substage",
+                    scope_id=phase2a_semantic_scope_id,
+                    status=STATUS_RUNNING,
+                    input_fingerprint=phase2a_fp,
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    stage_step="semantic_units_build",
+                    plan_context={"semantic_units_path": semantic_units_path, "reused": False},
+                )
+                phase2a_store.transition_scope_node(
+                    scope_ref=phase2a_store.build_scope_ref(
+                        stage="phase2a",
+                        scope_type="chunk",
+                        scope_id=phase2a_semantic_chunk_id,
+                    ),
+                    stage="phase2a",
+                    scope_type="chunk",
+                    scope_id=phase2a_semantic_chunk_id,
+                    status=STATUS_RUNNING,
+                    input_fingerprint=phase2a_fp,
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    chunk_id=phase2a_semantic_chunk_id,
+                    stage_step="semantic_units_build",
+                    plan_context={"semantic_units_path": semantic_units_path, "reused": False},
+                    extra_payload={"kind": "semantic_segmentation"},
+                )
             phase2a_runtime_session.mark(
                 status="running",
                 checkpoint="phase2a_segmentation_running",
@@ -4230,8 +7824,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 )
 
             phase2a_dependencies = {
-                "step2": _file_signature(step2_json_path),
-                "step6": _file_signature(step6_json_path),
+                "stage1_runtime": runtime_stage1_fingerprint,
+                "step2": _file_signature(step2_json_path) if step2_json_path else {},
+                "step6": _file_signature(step6_json_path) if step6_json_path else {},
                 "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
             }
             for candidate_path in _phase2a_semantic_units_candidates(output_dir):
@@ -4242,6 +7837,74 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     dependencies=phase2a_dependencies,
                     priority=True,
                 )
+            _upsert_runtime_artifact_scope(
+                phase2a_store,
+                stage="phase2a",
+                artifact_name="semantic_units",
+                input_fingerprint=phase2a_fp,
+                local_path=semantic_units_path,
+                dependency_fingerprints={
+                    phase2a_input_scope_ref: phase2a_fp,
+                }
+                if phase2a_input_scope_ref
+                else {},
+                extra_payload={
+                    "semantic_units_path": semantic_units_path,
+                    "unit_count": len(runtime_semantic_units or []),
+                    "reused": False,
+                },
+            )
+            if phase2a_store is not None and phase2a_semantic_scope_ref and phase2a_semantic_scope_id:
+                phase2a_store.transition_scope_node(
+                    scope_ref=phase2a_semantic_scope_ref,
+                    stage="phase2a",
+                    scope_type="substage",
+                    scope_id=phase2a_semantic_scope_id,
+                    status=STATUS_SUCCESS,
+                    input_fingerprint=phase2a_fp,
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    stage_step="semantic_units_build",
+                    plan_context={"semantic_units_path": semantic_units_path, "reused": False},
+                    result_hash=build_runtime_payload_fingerprint(
+                        {
+                            "semantic_units_path": semantic_units_path,
+                            "unit_count": len(runtime_semantic_units or []),
+                            "reused": False,
+                        }
+                    ),
+                )
+                phase2a_store.transition_scope_node(
+                    scope_ref=phase2a_store.build_scope_ref(
+                        stage="phase2a",
+                        scope_type="chunk",
+                        scope_id=phase2a_semantic_chunk_id,
+                    ),
+                    stage="phase2a",
+                    scope_type="chunk",
+                    scope_id=phase2a_semantic_chunk_id,
+                    status=STATUS_SUCCESS,
+                    input_fingerprint=phase2a_fp,
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if phase2a_input_scope_ref
+                    else {},
+                    chunk_id=phase2a_semantic_chunk_id,
+                    stage_step="semantic_units_build",
+                    plan_context={"semantic_units_path": semantic_units_path, "reused": False},
+                    result_hash=build_runtime_payload_fingerprint(
+                        {
+                            "semantic_units_path": semantic_units_path,
+                            "unit_count": len(runtime_semantic_units or []),
+                            "reused": False,
+                        }
+                    ),
+                    extra_payload={"kind": "semantic_segmentation"},
+                )
             
             response = video_processing_pb2.AnalyzeResponse(
                 success=True,
@@ -4250,14 +7913,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=""
             )
             if isinstance(runtime_semantic_units, list) and isinstance(cache_entry, dict):
+                cache_views = get_phase2a_repository_views(cache_entry)
                 response.semantic_units_ref.CopyFrom(
                     video_processing_pb2.SemanticUnitsRef(
                         ref_id=str(cache_entry.get("ref_id", "")),
                         task_id=task_id,
                         output_dir=output_dir,
-                        unit_count=int(cache_entry.get("unit_count", 0) or 0),
+                        unit_count=int(cache_views.get("unit_count", 0) or 0),
                         schema_version=str(cache_entry.get("schema_version", "phase2a.v1")),
-                        fingerprint=str(cache_entry.get("fingerprint", "")),
+                        fingerprint=str(cache_views.get("fingerprint", "")),
                     )
                 )
                 response.semantic_units_inline.CopyFrom(
@@ -4287,6 +7951,69 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         except Exception as e:
             logger.error(f"[{task_id}] AnalyzeSemanticUnits failed: {e}")
             logger.exception(e)  # Log full traceback
+            if (
+                'phase2a_store' in locals()
+                and phase2a_store is not None
+                and 'phase2a_semantic_scope_ref' in locals()
+                and phase2a_semantic_scope_ref
+                and 'phase2a_semantic_scope_id' in locals()
+                and phase2a_semantic_scope_id
+            ):
+                error_info = classify_runtime_error(e)
+                if error_info["error_class"] == "AUTO_RETRYABLE":
+                    failure_status = STATUS_ERROR
+                elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+                    failure_status = STATUS_FAILED
+                else:
+                    failure_status = STATUS_MANUAL_NEEDED
+                phase2a_store.transition_scope_node(
+                    scope_ref=phase2a_semantic_scope_ref,
+                    stage="phase2a",
+                    scope_type="substage",
+                    scope_id=phase2a_semantic_scope_id,
+                    status=failure_status,
+                    input_fingerprint=phase2a_fp if 'phase2a_fp' in locals() else "",
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if 'phase2a_input_scope_ref' in locals() and phase2a_input_scope_ref and 'phase2a_fp' in locals()
+                    else {},
+                    stage_step="semantic_units_build",
+                    plan_context={"semantic_units_path": semantic_units_path if 'semantic_units_path' in locals() else ""},
+                    resource_snapshot={"error": str(e)},
+                    retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+                    required_action=str(error_info.get("action_hint", "") or ""),
+                    error_class=error_info["error_class"],
+                    error_code=error_info["error_code"],
+                    error_message=error_info["error_message"],
+                )
+                phase2a_store.transition_scope_node(
+                    scope_ref=phase2a_store.build_scope_ref(
+                        stage="phase2a",
+                        scope_type="chunk",
+                        scope_id=phase2a_semantic_chunk_id,
+                    ),
+                    stage="phase2a",
+                    scope_type="chunk",
+                    scope_id=phase2a_semantic_chunk_id,
+                    status=failure_status,
+                    input_fingerprint=phase2a_fp if 'phase2a_fp' in locals() else "",
+                    dependency_fingerprints={
+                        phase2a_input_scope_ref: phase2a_fp,
+                    }
+                    if 'phase2a_input_scope_ref' in locals() and phase2a_input_scope_ref and 'phase2a_fp' in locals()
+                    else {},
+                    chunk_id=phase2a_semantic_chunk_id,
+                    stage_step="semantic_units_build",
+                    plan_context={"semantic_units_path": semantic_units_path if 'semantic_units_path' in locals() else ""},
+                    resource_snapshot={"error": str(e)},
+                    retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+                    required_action=str(error_info.get("action_hint", "") or ""),
+                    error_class=error_info["error_class"],
+                    error_code=error_info["error_code"],
+                    error_message=error_info["error_message"],
+                    extra_payload={"kind": "semantic_segmentation"},
+                )
             try:
                 phase2a_runtime_session.mark_failed(
                     checkpoint="phase2a_failed",
@@ -4498,7 +8225,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         2) 将 gRPC 单元转为 SemanticUnit 并执行两阶段合并 + 复用 action_units 知识类型过滤。
         3) 为过滤后的动作生成 clip 请求。
         4) 汇总稳定岛，计算截图范围并选择最佳截图。
-        5) 更新 semantic_units_phase2a.json 并返回素材请求。
+        5) 更新 Phase2A semantic_units 产物并返回素材请求。
         实现方式：RichTextPipeline._classify_and_filter_actions + ScreenshotSelector。
         核心价值：统一素材请求生成逻辑，保证截图/剪辑与语义一致。
         决策逻辑：
@@ -4598,9 +8325,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             step6_path = os.path.join(intermediates_dir, "step6_merge_cross_output.json")
             sentence_timestamps_path = os.path.join(intermediates_dir, "sentence_timestamps.json")
             
-            pipeline = RichTextPipeline(
+            pipeline_cls = _get_rich_text_pipeline_cls()
+            pipeline = pipeline_cls(
                 video_path=video_path, 
                 output_dir=output_dir,
+                task_id=task_id,
                 step2_path=step2_path,
                 step6_path=step6_path,
                 sentence_timestamps_path=sentence_timestamps_path,
@@ -4868,7 +8597,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             continue
 
                         future = loop.run_in_executor(
-                            self.cv_process_pool,  # 复用现有的 ProcessPool
+                            self._get_cv_process_pool(reason="assemble_only_screenshot_selection"),
                             functools.partial(
                                 run_screenshot_selection_task,
                                 video_path=video_path,
@@ -4915,11 +8644,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     ))
                 logger.info(f"[{task_id}] Fallback screenshots generated: {len(final_ss)}")
                 
-            # 🚀 V9.0: 更新 semantic_units_phase2a.json 包含完整的素材信息
+            # 🚀 V9.0: 更新 Phase2A semantic_units 产物，保持 canonical + legacy 镜像一致。
             try:
                 output_dir = _normalize_output_dir(video_path)
-                semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
-                
+                semantic_units_candidates = _phase2a_semantic_units_candidates(output_dir)
+                semantic_units_path = next(
+                    (path for path in semantic_units_candidates if os.path.exists(path)),
+                    str(helper_phase2a_semantic_units_path(output_dir)),
+                )
+
                 if os.path.exists(semantic_units_path):
                     import json
                     with open(semantic_units_path, 'r', encoding='utf-8') as f:
@@ -5008,10 +8741,10 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         # 标记 CV 验证完成
                         item["cv_validated"] = True
 
-                    # 保存更新后的 JSON
-                    with open(semantic_units_path, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                    
+                    # 同步写回 canonical + legacy，避免后续阶段读到不同版本的 semantic_units。
+                    persisted_paths = _persist_phase2a_semantic_units_payload(output_dir, data)
+                    semantic_units_path = persisted_paths[0] if persisted_paths else semantic_units_path
+
                     phase2a_fp = _build_input_fingerprint(
                         video_path,
                         extra={
@@ -5021,21 +8754,59 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             "stage": "phase2a",
                         },
                     )
-                    _write_resource_meta(
-                        semantic_units_path,
-                        group="phase2a",
+                    for candidate_path in semantic_units_candidates:
+                        _write_resource_meta(
+                            candidate_path,
+                            group="phase2a",
+                            input_fingerprint=phase2a_fp,
+                            dependencies={
+                                "step2": _file_signature(step2_path),
+                                "step6": _file_signature(step6_path),
+                                "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                            },
+                            priority=True,
+                        )
+                    phase2a_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+                    phase2a_input_scope_ref = _upsert_runtime_input_scope(
+                        phase2a_store,
+                        stage="phase2a",
+                        input_name="segmentation_main",
                         input_fingerprint=phase2a_fp,
-                        dependencies={
-                            "step2": _file_signature(step2_path),
-                            "step6": _file_signature(step6_path),
-                            "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                        extra_payload={
+                            "semantic_units_path": semantic_units_path,
                         },
-                        priority=True,
+                    )
+                    phase2a_output_dependency_fingerprints = (
+                        {phase2a_input_scope_ref: phase2a_fp} if phase2a_input_scope_ref else {}
+                    )
+                    phase2a_output_dependency_fingerprints.update(
+                        _collect_latest_scope_dependency_fingerprints(
+                            phase2a_store,
+                            stage="phase2a",
+                            scope_type="chunk",
+                        )
+                    )
+                    _upsert_runtime_artifact_scope(
+                        phase2a_store,
+                        stage="phase2a",
+                        artifact_name="semantic_units",
+                        input_fingerprint=phase2a_fp,
+                        local_path=semantic_units_path,
+                        dependency_fingerprints=phase2a_output_dependency_fingerprints,
+                        extra_payload={
+                            "semantic_units_path": semantic_units_path,
+                            "screenshots_count": len(final_ss),
+                            "clips_count": len(final_clips),
+                            "material_requests_attached": True,
+                        },
                     )
 
-                    logger.info(f"[{task_id}] Updated semantic_units_phase2a.json with {len(final_ss)} screenshots, {len(final_clips)} clips")
+                    logger.info(
+                        f"[{task_id}] Updated phase2a semantic_units payload: "
+                        f"paths={semantic_units_candidates}, screenshots={len(final_ss)}, clips={len(final_clips)}"
+                    )
             except Exception as e:
-                logger.warning(f"[{task_id}] Failed to update semantic_units_phase2a.json: {e}")
+                logger.warning(f"[{task_id}] Failed to update phase2a semantic_units payload: {e}")
             
             return video_processing_pb2.GenerateMaterialRequestsResponse(
                 success=True,
@@ -5177,7 +8948,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 ref_id = str(request.semantic_units_ref.ref_id or "").strip()
                 ref_entry = self._get_phase2a_runtime_cache_entry_by_ref(ref_id)
                 if isinstance(ref_entry, dict):
-                    semantic_units_payload = ref_entry.get("semantic_units", []) or []
+                    ref_views = get_phase2a_repository_views(ref_entry)
+                    semantic_units_payload = ref_views.get("semantic_units", []) or []
                     phase2b_runtime_session.mark(
                         status="running",
                         checkpoint="phase2b_semantic_ref_ready",
@@ -5258,11 +9030,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 🔑 创建 RichTextPipeline
             # 注意: Phase2B 主要使用 semantic_units_json，step2/step6 在 Phase2A 已处理
             # 此处使用占位值，实际逻辑在 assemble_only 中加载 semantic_units_json
-            pipeline = RichTextPipeline(
+            pipeline_cls = _get_rich_text_pipeline_cls()
+            pipeline = pipeline_cls(
                 video_path=video_path,
                 step2_path="",  # Phase2B 不需要
                 step6_path="",  # Phase2B 不需要
                 output_dir=output_dir,
+                task_id=task_id,
                 segmenter=self.resources.semantic_unit_segmenter,
             )
             
@@ -5289,6 +9063,75 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 },
             )
 
+            phase2b_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+            phase2b_category_input_fingerprint = build_runtime_payload_fingerprint(
+                {
+                    "json_signature": _file_signature(json_path) if json_path else {},
+                    "title": title,
+                    "stage": "phase2b.category_classify",
+                }
+            )
+            phase2b_category_scope_ref = ""
+            phase2b_category_scope_id = ""
+            phase2b_category_chunk_id = "phase2b.category_classify.wave_0001"
+            phase2b_category_metadata = {
+                "storage_backend": "sqlite",
+                "scope_variant": "category_classify",
+                "stage_step": "phase2b.category_classify",
+                "title": title,
+                "json_path": json_path,
+            }
+            if phase2b_store is not None:
+                phase2b_category_scope_ref = phase2b_store.build_substage_scope_ref(
+                    stage="phase2b",
+                    substage_name="category_classify",
+                    wave_id="wave_0001",
+                )
+                phase2b_category_scope_id = phase2b_store.build_substage_scope_id(
+                    substage_name="category_classify",
+                    wave_id="wave_0001",
+                )
+                phase2b_store.plan_substage_scope(
+                    stage="phase2b",
+                    substage_name="category_classify",
+                    wave_id="wave_0001",
+                    input_fingerprint=phase2b_category_input_fingerprint,
+                    plan_context={
+                        "title": title,
+                        "json_path": json_path,
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "chunk_id": phase2b_category_chunk_id,
+                                "kind": "category_classify",
+                            }
+                        ],
+                    },
+                )
+                phase2b_store.record_chunk_state(
+                    stage="phase2b",
+                    chunk_id=phase2b_category_chunk_id,
+                    input_fingerprint=phase2b_category_input_fingerprint,
+                    status=STATUS_PLANNED,
+                    metadata=phase2b_category_metadata,
+                )
+                phase2b_store.transition_scope_node(
+                    scope_ref=phase2b_category_scope_ref,
+                    stage="phase2b",
+                    scope_type="substage",
+                    scope_id=phase2b_category_scope_id,
+                    status=STATUS_RUNNING,
+                    input_fingerprint=phase2b_category_input_fingerprint,
+                    stage_step="category_classify",
+                    plan_context={"title": title, "json_path": json_path},
+                )
+                phase2b_store.record_chunk_state(
+                    stage="phase2b",
+                    chunk_id=phase2b_category_chunk_id,
+                    input_fingerprint=phase2b_category_input_fingerprint,
+                    status=STATUS_RUNNING,
+                    metadata=phase2b_category_metadata,
+                )
             try:
                 from services.python_grpc.src.content_pipeline.phase2b.video_category_service import (
                     classify_phase2b_output,
@@ -5299,7 +9142,59 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     title=title,
                     result_json_path=json_path,
                 )
+                if phase2b_store is not None and phase2b_category_scope_ref and phase2b_category_scope_id:
+                    phase2b_store.commit_chunk_payload(
+                        stage="phase2b",
+                        chunk_id=phase2b_category_chunk_id,
+                        input_fingerprint=phase2b_category_input_fingerprint,
+                        result_payload={"title": title, "json_path": json_path, "classified": True},
+                        metadata=phase2b_category_metadata,
+                    )
+                    phase2b_store.transition_scope_node(
+                        scope_ref=phase2b_category_scope_ref,
+                        stage="phase2b",
+                        scope_type="substage",
+                        scope_id=phase2b_category_scope_id,
+                        status=STATUS_SUCCESS,
+                        input_fingerprint=phase2b_category_input_fingerprint,
+                        stage_step="category_classify",
+                        plan_context={"title": title, "json_path": json_path},
+                        result_hash=build_runtime_payload_fingerprint(
+                            {"title": title, "json_path": json_path, "classified": True}
+                        ),
+                    )
             except Exception as category_error:
+                if phase2b_store is not None and phase2b_category_scope_ref and phase2b_category_scope_id:
+                    error_info = classify_runtime_error(category_error)
+                    if error_info["error_class"] == "AUTO_RETRYABLE":
+                        failure_status = STATUS_ERROR
+                    elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+                        failure_status = STATUS_FAILED
+                    else:
+                        failure_status = STATUS_MANUAL_NEEDED
+                    phase2b_store.fail_chunk_payload(
+                        stage="phase2b",
+                        chunk_id=phase2b_category_chunk_id,
+                        input_fingerprint=phase2b_category_input_fingerprint,
+                        error=category_error,
+                        metadata=phase2b_category_metadata,
+                    )
+                    phase2b_store.transition_scope_node(
+                        scope_ref=phase2b_category_scope_ref,
+                        stage="phase2b",
+                        scope_type="substage",
+                        scope_id=phase2b_category_scope_id,
+                        status=failure_status,
+                        input_fingerprint=phase2b_category_input_fingerprint,
+                        stage_step="category_classify",
+                        plan_context={"title": title, "json_path": json_path},
+                        resource_snapshot={"error": str(category_error)},
+                        retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+                        required_action=str(error_info.get("action_hint", "") or ""),
+                        error_class=error_info["error_class"],
+                        error_code=error_info["error_code"],
+                        error_message=error_info["error_message"],
+                    )
                 logger.warning(f"[{task_id}] Phase2B category classification failed: {category_error}")
              
             # 统计信息
@@ -5309,6 +9204,68 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 screenshots_count=len(os.listdir(screenshots_dir)) if os.path.exists(screenshots_dir) else 0,
                 text_only_count=0,
                 vision_validated_count=0
+            )
+            phase2a_semantic_scope_ref = _build_runtime_artifact_scope_ref(
+                phase2b_store,
+                stage="phase2a",
+                artifact_name="semantic_units",
+            )
+            phase2a_semantic_scope_node = (
+                phase2b_store.load_scope_node(phase2a_semantic_scope_ref)
+                if phase2b_store is not None and phase2a_semantic_scope_ref
+                else None
+            )
+            phase2b_input_dependency_fingerprints = {}
+            if isinstance(phase2a_semantic_scope_node, dict):
+                phase2a_semantic_fingerprint = str(
+                    phase2a_semantic_scope_node.get("input_fingerprint", "") or ""
+                ).strip()
+                if phase2a_semantic_fingerprint:
+                    phase2b_input_dependency_fingerprints[phase2a_semantic_scope_ref] = phase2a_semantic_fingerprint
+            phase2b_input_fingerprint = build_runtime_payload_fingerprint(
+                {
+                    "materialized_semantic_units_signature": _file_signature(materialized_semantic_units_path)
+                    if materialized_semantic_units_path
+                    else {},
+                    "screenshots_signature": _file_signature(screenshots_dir) if screenshots_dir else {},
+                    "clips_signature": _file_signature(clips_dir) if clips_dir else {},
+                    "title": str(title or ""),
+                    "stage": "phase2b",
+                }
+            )
+            phase2b_input_scope_ref = _upsert_runtime_input_scope(
+                phase2b_store,
+                stage="phase2b",
+                input_name="main",
+                input_fingerprint=phase2b_input_fingerprint,
+                dependency_fingerprints=phase2b_input_dependency_fingerprints,
+                extra_payload={
+                    "materialized_semantic_units_path": materialized_semantic_units_path,
+                    "title": title,
+                },
+            )
+            phase2b_output_dependency_fingerprints = (
+                {phase2b_input_scope_ref: phase2b_input_fingerprint} if phase2b_input_scope_ref else {}
+            )
+            phase2b_output_dependency_fingerprints.update(
+                _collect_latest_scope_dependency_fingerprints(
+                    phase2b_store,
+                    stage="phase2b",
+                    scope_type="llm_call",
+                )
+            )
+            _upsert_runtime_artifact_scope(
+                phase2b_store,
+                stage="phase2b",
+                artifact_name="outputs",
+                input_fingerprint=phase2b_input_fingerprint,
+                local_path=json_path or markdown_path,
+                dependency_fingerprints=phase2b_output_dependency_fingerprints,
+                extra_payload={
+                    "markdown_path": markdown_path,
+                    "json_path": json_path,
+                    "title": title,
+                },
             )
             phase2b_runtime_session.mark(
                 status="completed",
@@ -5330,6 +9287,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 },
             )
             
+            self._cache_phase2b_runtime_outputs(
+                output_dir=output_dir,
+                markdown_path=markdown_path,
+                json_path=json_path,
+                title=title,
+                task_id=task_id,
+            )
             return video_processing_pb2.AssembleResponse(
                 success=True,
                 markdown_path=markdown_path,
@@ -5377,6 +9341,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 任务进入最终装配收尾后，释放本任务对应的 Stage1 运行态缓存。
             self._clear_stage1_runtime_cache(output_dir)
             self._clear_phase2a_runtime_cache(output_dir)
+            self._clear_phase2b_runtime_cache(output_dir)
             self._write_cache_metrics(output_dir, task_id, "AssembleRichText")
             self._cleanup_non_priority_resources(output_dir, task_id)
             self._decrement_tasks()
@@ -5586,7 +9551,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             if cached is not None and (not task_id or cached.task_id == str(task_id or "").strip()):
                 return cached
             try:
-                store = RuntimeRecoveryStore(output_dir=safe_output_dir, task_id=task_id)
+                store = RuntimeRecoveryStore(
+                    output_dir=safe_output_dir,
+                    task_id=task_id,
+                    storage_key=Path(safe_output_dir).name,
+                )
             except Exception as error:
                 logger.warning(
                     "[%s] RuntimeRecoveryStore init failed: output_dir=%s error=%s",
@@ -5814,13 +9783,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 retention_days,
             )
 
-    def _create_ephemeral_frame_registry(self, expected_frames: int) -> SharedFrameRegistry:
+    def _create_ephemeral_frame_registry(self, expected_frames: int) -> "SharedFrameRegistry":
         """按批次创建独立 SHM 注册表，避免跨批次 LRU 淘汰相互影响。"""
         safe_expected = max(1, int(expected_frames))
         headroom = max(4, safe_expected // 10)
-        return SharedFrameRegistry(max_frames=safe_expected + headroom)
+        shared_frame_registry_cls = _get_shared_frame_registry_cls()
+        return shared_frame_registry_cls(max_frames=safe_expected + headroom)
 
-    def _cleanup_ephemeral_frame_registry(self, registry: Optional[SharedFrameRegistry]) -> None:
+    def _cleanup_ephemeral_frame_registry(self, registry: Optional["SharedFrameRegistry"]) -> None:
         """释放批次级 SHM 资源，避免命名空间和内存残留。"""
         if registry is None:
             return
@@ -5833,7 +9803,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         self,
         video_path: str,
         units_data: list,
-        frame_registry: Optional[SharedFrameRegistry] = None,
+        frame_registry: Optional["SharedFrameRegistry"] = None,
     ) -> dict:
         """
         执行逻辑：
@@ -5854,7 +9824,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         输出参数：
         - dict：{unit_id: {frame_idx: shm_ref}}。"""
         shm_map = {} # unit_id -> {frame_idx: shm_ref}
-        registry = frame_registry or self.frame_registry
+        registry = frame_registry or self._get_frame_registry(reason="batch_frame_prefetch")
         import cv2
         import time
         import threading
@@ -6031,7 +10001,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         video_path: str, 
         units_data: list,
         coarse_fps: float = 2.0,
-        frame_registry: Optional[SharedFrameRegistry] = None,
+        frame_registry: Optional["SharedFrameRegistry"] = None,
     ) -> dict:
         """
         执行逻辑：
@@ -6054,7 +10024,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         - dict：{unit_id: {timestamp: shm_ref}}。"""
         import cv2
         import time
-        registry = frame_registry or self.frame_registry
+        registry = frame_registry or self._get_frame_registry(reason="coarse_fine_frame_prefetch")
         
         coarse_interval = 1.0 / coarse_fps
         coarse_shm_map = {}
@@ -6253,7 +10223,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         self, 
         video_path: str, 
         screenshot_tasks: List[dict],
-        frame_registry: Optional[SharedFrameRegistry] = None,
+        frame_registry: Optional["SharedFrameRegistry"] = None,
     ) -> Dict[str, Dict[float, dict]]:
         """
         执行逻辑：
@@ -6274,7 +10244,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         输出参数：
         - dict：{unit_id_island: {timestamp: shm_ref}}。"""
         import cv2
-        registry = frame_registry or self.frame_registry
+        registry = frame_registry or self._get_frame_registry(reason="screenshot_range_frame_prefetch")
         
         shm_map = {}
         cap = cv2.VideoCapture(video_path)
@@ -6540,7 +10510,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             def chunk_list(items, size):
                 if not items:
                     return []
-                frame_budget = max(8, int(getattr(self.frame_registry, "max_frames", 80) * 0.9))
+                base_frame_registry = self._get_frame_registry(reason="cv_chunk_planning")
+                frame_budget = max(8, int(getattr(base_frame_registry, "max_frames", 80) * 0.9))
                 chunks = []
                 current = []
                 current_frames = 0
@@ -6770,11 +10741,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                     unit_data,
                                     shm_frames
                                 )
-                                future = loop.run_in_executor(self.cv_process_pool, task_func)
+                                future = loop.run_in_executor(
+                                    self._get_cv_process_pool(reason="phase2a_cv_validation"),
+                                    task_func,
+                                )
                                 pending.add(asyncio.create_task(wrap_task(future, "cv", unit_id)))
                             else:
                                 future = loop.run_in_executor(
-                                    self.cv_process_pool,
+                                    self._get_cv_process_pool(reason="phase2a_coarse_fine_screenshot"),
                                     functools.partial(
                                         run_coarse_fine_screenshot_task,
                                         unit_id=unit_id,
@@ -6870,8 +10844,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         # 统一将本地视频归档到 storage/{hash}，确保 VL 阶段与前序阶段落盘同域
         video_path = _ensure_local_video_in_storage(request.video_path)
         output_dir = _normalize_output_dir(video_path) if video_path else (request.output_dir or "")
-        # 统一语义单元持久化路径：不再接收 Java 传入路径，仅在服务内用于报表/兜底持久化。
-        semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
+        # 统一语义单元持久化路径：以 canonical 路径为主，同时保留 legacy 镜像。
+        semantic_units_path = str(helper_phase2a_semantic_units_path(output_dir))
         semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
         vl_model_name = "qwen-vl-max-2025-08-13"
         vl_runtime_base_payload: Dict[str, Any] = {
@@ -6882,8 +10856,40 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             "semantic_source_case": str(semantic_source_case or ""),
             "vl_model": vl_model_name,
         }
+        phase2a_vl_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+        phase2a_material_finalize_scope_ref = ""
+        phase2a_material_finalize_scope_id = ""
+        phase2a_material_finalize_chunk_id = "phase2a.material_finalize.wave_0001"
+        phase2a_material_finalize_input_fingerprint = ""
+        phase2a_material_finalize_dependency_fingerprints: Dict[str, str] = {}
+        if phase2a_vl_store is not None:
+            phase2a_vl_store.reset_running_scopes_to_planned(
+                stage="phase2a",
+                scope_type="substage",
+                reason="process_restarted",
+            )
+            phase2a_vl_store.reset_running_scopes_to_planned(
+                stage="phase2a",
+                scope_type="llm_call",
+                reason="process_restarted",
+            )
+            phase2a_vl_store.reset_running_scopes_to_planned(
+                stage="phase2a",
+                scope_type="chunk",
+                reason="process_restarted",
+            )
+            phase2a_material_finalize_scope_ref = phase2a_vl_store.build_substage_scope_ref(
+                stage="phase2a",
+                substage_name="material_finalize",
+                wave_id="wave_0001",
+            )
+            phase2a_material_finalize_scope_id = phase2a_vl_store.build_substage_scope_id(
+                substage_name="material_finalize",
+                wave_id="wave_0001",
+            )
 
-        vl_report_writer = VLReportWriter(
+        vl_report_writer_cls = _get_vl_report_writer_cls()
+        vl_report_writer = vl_report_writer_cls(
             task_id=task_id,
             video_path=video_path,
             semantic_units_path=semantic_units_path,
@@ -7132,9 +11138,10 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 ref_id = str(request.semantic_units_ref.ref_id or "").strip()
                 ref_entry = self._get_phase2a_runtime_cache_entry_by_ref(ref_id)
                 if isinstance(ref_entry, dict):
-                    semantic_units = ref_entry.get("semantic_units", []) or []
+                    ref_views = get_phase2a_repository_views(ref_entry)
+                    semantic_units = ref_views.get("semantic_units", []) or []
                     data = semantic_units
-                    ref_semantic_units_path = str(ref_entry.get("semantic_units_path", "") or "").strip()
+                    ref_semantic_units_path = str(ref_views.get("semantic_units_path", "") or "").strip()
                     if ref_semantic_units_path:
                         semantic_units_path = ref_semantic_units_path
                     logger.info(
@@ -7329,7 +11336,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 取舍：每次调用创建轻量级 selector，避免多线程共享状态引发不稳定。
                 """
                 try:
-                    selector = ScreenshotSelector.create_lightweight()
+                    selector = _get_screenshot_selector_cls().create_lightweight()
                     results = selector.select_screenshots_for_range_sync(
                         video_path=video_path,
                         start_sec=start_sec,
@@ -7403,6 +11410,234 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     ),
                 )
 
+            phase2a_material_finalize_input_scope_ref = ""
+
+            def _build_phase2a_material_finalize_semantic_snapshot(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                snapshot: List[Dict[str, Any]] = []
+                for item in list(items or []):
+                    if not isinstance(item, dict):
+                        continue
+                    unit_snapshot: Dict[str, Any] = {}
+                    for field_name in ("unit_id", "start_sec", "end_sec", "knowledge_type", "knowledge_topic", "group_id"):
+                        if field_name not in item:
+                            continue
+                        unit_snapshot[field_name] = copy.deepcopy(item.get(field_name))
+                    if unit_snapshot:
+                        snapshot.append(unit_snapshot)
+                return snapshot
+
+            def _build_phase2a_material_finalize_dependency_fingerprints() -> Dict[str, str]:
+                dependency_fingerprints: Dict[str, str] = {}
+                if phase2a_material_finalize_input_scope_ref and phase2a_material_finalize_input_fingerprint:
+                    dependency_fingerprints[
+                        phase2a_material_finalize_input_scope_ref
+                    ] = phase2a_material_finalize_input_fingerprint
+                if phase2a_vl_store is None:
+                    return dependency_fingerprints
+                dependency_fingerprints.update(
+                    _collect_latest_scope_dependency_fingerprints(
+                        phase2a_vl_store,
+                        stage="phase2a",
+                        scope_type="llm_call",
+                    )
+                )
+                finalize_chunk_scope_ref = phase2a_vl_store.build_scope_ref(
+                    stage="phase2a",
+                    scope_type="chunk",
+                    scope_id=phase2a_material_finalize_chunk_id,
+                )
+                for scope_ref, fingerprint in _collect_latest_scope_dependency_fingerprints(
+                    phase2a_vl_store,
+                    stage="phase2a",
+                    scope_type="chunk",
+                ).items():
+                    if scope_ref == finalize_chunk_scope_ref:
+                        continue
+                    dependency_fingerprints[scope_ref] = fingerprint
+                return dict(sorted(dependency_fingerprints.items()))
+
+            phase2a_material_finalize_input_fingerprint = build_runtime_payload_fingerprint(
+                {
+                    "stage": "phase2a.material_finalize",
+                    "video_signature": _file_signature(video_path) if video_path else {},
+                    "semantic_source_case": str(semantic_source_case or ""),
+                    "semantic_units": _build_phase2a_material_finalize_semantic_snapshot(semantic_units),
+                    "routing": copy.deepcopy(dict(routing_cfg or {})),
+                    "screenshot_optimization": copy.deepcopy(
+                        dict(vl_config.get("screenshot_optimization", {}) or {})
+                    ),
+                    "vl_model": vl_model_name,
+                }
+            )
+            if phase2a_vl_store is not None:
+                phase2a_material_finalize_input_scope_ref = _upsert_runtime_input_scope(
+                    phase2a_vl_store,
+                    stage="phase2a",
+                    input_name="material_finalize_main",
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    extra_payload={
+                        "semantic_units_path": semantic_units_path,
+                        "semantic_units_count": len(semantic_units),
+                        "vl_model": vl_model_name,
+                    },
+                )
+                phase2a_material_finalize_dependency_fingerprints = (
+                    _build_phase2a_material_finalize_dependency_fingerprints()
+                )
+                phase2a_vl_store.plan_substage_scope(
+                    stage="phase2a",
+                    substage_name="material_finalize",
+                    wave_id="wave_0001",
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    dependency_fingerprints=phase2a_material_finalize_dependency_fingerprints,
+                    plan_context={
+                        "semantic_units_path": semantic_units_path,
+                        "work_units": [
+                            {
+                                "scope_type": "chunk",
+                                "chunk_id": phase2a_material_finalize_chunk_id,
+                                "kind": "material_finalize",
+                            }
+                        ],
+                    },
+                )
+                phase2a_vl_store.plan_chunk_scope(
+                    stage="phase2a",
+                    chunk_id=phase2a_material_finalize_chunk_id,
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    dependency_fingerprints=phase2a_material_finalize_dependency_fingerprints,
+                    metadata={
+                        "storage_backend": "sqlite",
+                        "stage_step": "material_finalize",
+                        "substage_name": "material_finalize",
+                        "wave_id": "wave_0001",
+                    },
+                    extra_payload={
+                        "kind": "material_finalize",
+                        "semantic_units_path": semantic_units_path,
+                    },
+                )
+                finalize_reuse_plan = phase2a_vl_store.plan_scope_reuse(
+                    scope_ref=phase2a_vl_store.build_scope_ref(
+                        stage="phase2a",
+                        scope_type="chunk",
+                        scope_id=phase2a_material_finalize_chunk_id,
+                    ),
+                    expected_input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    current_dependency_fingerprints=phase2a_material_finalize_dependency_fingerprints,
+                )
+                if bool(finalize_reuse_plan.get("can_restore", False)):
+                    restored_finalize = phase2a_vl_store.load_committed_chunk_payload(
+                        stage="phase2a",
+                        chunk_id=phase2a_material_finalize_chunk_id,
+                        input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    )
+                    restored_payload = (
+                        dict(restored_finalize.get("result_payload", {}) or {})
+                        if isinstance(restored_finalize, dict)
+                        else {}
+                    )
+                    restored_screenshots = list(restored_payload.get("merged_screenshots", []) or [])
+                    restored_clips = list(restored_payload.get("merged_clips", []) or [])
+                    if restored_screenshots or restored_clips:
+                        screenshot_requests = [
+                            video_processing_pb2.ScreenshotRequest(
+                                screenshot_id=str(ss.get("screenshot_id", "") or ""),
+                                timestamp_sec=float(ss.get("timestamp_sec", 0.0) or 0.0),
+                                label=str(ss.get("label", "") or ""),
+                                semantic_unit_id=str(ss.get("semantic_unit_id", "") or ""),
+                                frame_reason=str(ss.get("frame_reason", "") or ""),
+                            )
+                            for ss in restored_screenshots
+                            if isinstance(ss, dict)
+                        ]
+                        clip_requests = [
+                            self._build_clip_request_pb(clip, clip.get("semantic_unit_id", ""))
+                            for clip in restored_clips
+                            if isinstance(clip, dict)
+                        ]
+                        _persist_task_token_report(
+                            {
+                                "status": "restored",
+                                "vl_enabled": True,
+                                "used_fallback": bool(restored_payload.get("used_fallback", False)),
+                                "vl_model": vl_model_name,
+                                "routing_stats": {},
+                                "token_stats": dict(restored_payload.get("token_stats", {}) or {}),
+                            }
+                        )
+                        _persist_vl_analysis_output(
+                            {
+                                "status": "restored",
+                                "vl_enabled": True,
+                                "used_fallback": bool(restored_payload.get("used_fallback", False)),
+                                "vl_model": vl_model_name,
+                                "routing_stats": {},
+                                "token_stats": dict(restored_payload.get("token_stats", {}) or {}),
+                                "result_counts": {
+                                    "semantic_units_total": len(semantic_units),
+                                    "vl_units": int(restored_payload.get("units_analyzed", 0) or 0),
+                                    "screenshots": len(screenshot_requests),
+                                    "clips": len(clip_requests),
+                                    "vl_clips_generated": int(
+                                        restored_payload.get("vl_clips_generated", len(restored_clips)) or 0
+                                    ),
+                                    "vl_screenshots_generated": int(
+                                        restored_payload.get(
+                                            "vl_screenshots_generated",
+                                            len(restored_screenshots),
+                                        )
+                                        or 0
+                                    ),
+                                },
+                                "merged_screenshots": restored_screenshots,
+                                "merged_clips": restored_clips,
+                            }
+                        )
+                        _update_vl_heartbeat_state(
+                            status="completed",
+                            checkpoint="material_finalize_restored",
+                            completed=1,
+                            pending=0,
+                        )
+                        _emit_vl_heartbeat(signal_type="hard")
+                        phase2a_vl_store.transition_scope_node(
+                            scope_ref=phase2a_material_finalize_scope_ref,
+                            stage="phase2a",
+                            scope_type="substage",
+                            scope_id=phase2a_material_finalize_scope_id,
+                            status=STATUS_SUCCESS,
+                            input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                            dependency_fingerprints=phase2a_material_finalize_dependency_fingerprints,
+                            stage_step="material_finalize",
+                            plan_context={
+                                "semantic_units_path": semantic_units_path,
+                                "restored": True,
+                            },
+                            result_hash=build_runtime_payload_fingerprint(
+                                {
+                                    "screenshots": len(restored_screenshots),
+                                    "clips": len(restored_clips),
+                                    "units_analyzed": int(restored_payload.get("units_analyzed", 0) or 0),
+                                }
+                            ),
+                        )
+                        return video_processing_pb2.VLAnalysisResponse(
+                            success=True,
+                            vl_enabled=True,
+                            used_fallback=bool(restored_payload.get("used_fallback", False)),
+                            screenshot_requests=screenshot_requests,
+                            clip_requests=clip_requests,
+                            units_analyzed=int(restored_payload.get("units_analyzed", 0) or 0),
+                            vl_clips_generated=int(
+                                restored_payload.get("vl_clips_generated", len(restored_clips)) or 0
+                            ),
+                            vl_screenshots_generated=int(
+                                restored_payload.get("vl_screenshots_generated", len(restored_screenshots)) or 0
+                            ),
+                            error_msg="",
+                        )
+
             process_units = []
             for unit in semantic_units:
                 raw_kt = unit.get("knowledge_type", "")
@@ -7412,13 +11647,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             process_route_map = {}
             routing_generator = None
             if process_units:
-                routing_generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
-                process_route_map = await routing_generator.preprocess_process_units_for_routing(
-                    video_path=video_path,
-                    process_units=process_units,
-                    output_dir=output_dir,
-                    force_preprocess=force_process_preprocess,
+                routing_generator = VLMaterialGenerator(
+                    vl_config,
+                    cv_executor=self._get_cv_process_pool(reason="vl_material_generator"),
+                    task_id=task_id,
+                    storage_key=Path(output_dir).name if output_dir else "",
                 )
+                with activate_runtime_llm_context(
+                    stage="phase2a",
+                    output_dir=output_dir,
+                    task_id=task_id,
+                    storage_key=Path(output_dir).name if output_dir else "",
+                ):
+                    process_route_map = await routing_generator.preprocess_process_units_for_routing(
+                        video_path=video_path,
+                        process_units=process_units,
+                        output_dir=output_dir,
+                        force_preprocess=force_process_preprocess,
+                    )
 
             for unit in semantic_units:
                 raw_kt = unit.get("knowledge_type", "")
@@ -7528,9 +11774,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             vl_failure_snapshot: Dict[str, Any] = {}
             if vl_units:
                 vl_t0 = time.perf_counter()
-                generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
+                generator = VLMaterialGenerator(
+                    vl_config,
+                    cv_executor=self._get_cv_process_pool(reason="vl_analysis_generator"),
+                    task_id=task_id,
+                    storage_key=Path(output_dir).name if output_dir else "",
+                )
                 vl_generator = generator
-                vl_task = asyncio.create_task(generator.generate(video_path, vl_units, output_dir))
+                with activate_runtime_llm_context(
+                    stage="phase2a",
+                    output_dir=output_dir,
+                    task_id=task_id,
+                    storage_key=Path(output_dir).name if output_dir else "",
+                ):
+                    vl_task = asyncio.create_task(generator.generate(video_path, vl_units, output_dir))
                 vl_started_at_sec = time.time()
                 _update_vl_heartbeat_state(
                     status="running",
@@ -7642,7 +11899,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
                             try:
                                 result = await loop.run_in_executor(
-                                    self.cv_process_pool,
+                                    self._get_cv_process_pool(reason="range_screenshot_selection"),
                                     functools.partial(
                                         run_select_screenshots_for_range_task,
                                         video_path=video_path,
@@ -8026,6 +12283,38 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # ==================================================================
             # 合并 + 去重 + 稳定排序
             # ==================================================================
+            if (
+                phase2a_vl_store is not None
+                and phase2a_material_finalize_scope_ref
+                and phase2a_material_finalize_scope_id
+            ):
+                phase2a_material_finalize_dependency_fingerprints = (
+                    _build_phase2a_material_finalize_dependency_fingerprints()
+                )
+                phase2a_vl_store.transition_scope_node(
+                    scope_ref=phase2a_material_finalize_scope_ref,
+                    stage="phase2a",
+                    scope_type="substage",
+                    scope_id=phase2a_material_finalize_scope_id,
+                    status=STATUS_RUNNING,
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    dependency_fingerprints=phase2a_material_finalize_dependency_fingerprints,
+                    stage_step="material_finalize",
+                    plan_context={"semantic_units_path": semantic_units_path},
+                )
+                phase2a_vl_store.record_chunk_state(
+                    stage="phase2a",
+                    chunk_id=phase2a_material_finalize_chunk_id,
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    status=STATUS_RUNNING,
+                    metadata={
+                        "storage_backend": "sqlite",
+                        "stage_step": "material_finalize",
+                        "substage_name": "material_finalize",
+                        "wave_id": "wave_0001",
+                        "dependency_fingerprints": phase2a_material_finalize_dependency_fingerprints,
+                    },
+                )
             def _dedup_screenshots(items):
                 seen_index = {}
                 deduped = []
@@ -8121,7 +12410,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     persist_units_map = self._build_semantic_unit_index(persist_payload)
 
                 # 将 AnalyzeWithVL 聚合后的素材请求回写到 semantic_units，确保 process/concrete 的
-                # frame_reason 在 Phase2B 可直接从 semantic_units_phase2a.json 透传使用。
+                # frame_reason 在 Phase2B 可直接从 Phase2A semantic_units 产物透传使用。
                 unit_screenshot_map: Dict[str, List[Dict[str, Any]]] = {}
                 for screenshot in merged_screenshots:
                     if not isinstance(screenshot, dict):
@@ -8397,10 +12686,79 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         )
 
                 if has_updates:
-                    with open(semantic_units_path, "w", encoding="utf-8") as f:
-                        json.dump(persist_payload, f, ensure_ascii=False, indent=2)
+                    persisted_paths = _persist_phase2a_semantic_units_payload(output_dir, persist_payload)
+                    semantic_units_path = persisted_paths[0] if persisted_paths else semantic_units_path
+                    phase2a_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
+                    phase2a_artifact_scope_ref = _build_runtime_artifact_scope_ref(
+                        phase2a_store,
+                        stage="phase2a",
+                        artifact_name="semantic_units",
+                    )
+                    phase2a_artifact_node = (
+                        phase2a_store.load_scope_node(phase2a_artifact_scope_ref)
+                        if phase2a_store is not None and phase2a_artifact_scope_ref
+                        else None
+                    )
+                    phase2a_output_input_fingerprint = str(
+                        isinstance(phase2a_artifact_node, dict)
+                        and phase2a_artifact_node.get("input_fingerprint", "")
+                        or ""
+                    ).strip()
+                    if not phase2a_output_input_fingerprint:
+                        phase2a_output_input_fingerprint = build_runtime_payload_fingerprint(
+                            {
+                                "video_path": video_path,
+                                "semantic_units_signature": _file_signature(semantic_units_path),
+                                "stage": "phase2a",
+                                "source": "analyze_with_vl",
+                            }
+                        )
+                    phase2a_input_scope_ref = _upsert_runtime_input_scope(
+                        phase2a_store,
+                        stage="phase2a",
+                        input_name="segmentation_main",
+                        input_fingerprint=phase2a_output_input_fingerprint,
+                        extra_payload={
+                            "semantic_units_path": semantic_units_path,
+                            "source": "analyze_with_vl",
+                        },
+                    )
+                    phase2a_output_dependency_fingerprints = (
+                        {phase2a_input_scope_ref: phase2a_output_input_fingerprint}
+                        if phase2a_input_scope_ref
+                        else {}
+                    )
+                    phase2a_output_dependency_fingerprints.update(
+                        _collect_latest_scope_dependency_fingerprints(
+                            phase2a_store,
+                            stage="phase2a",
+                            scope_type="chunk",
+                        )
+                    )
+                    phase2a_output_dependency_fingerprints.update(
+                        _collect_latest_scope_dependency_fingerprints(
+                            phase2a_store,
+                            stage="phase2a",
+                            scope_type="llm_call",
+                        )
+                    )
+                    _upsert_runtime_artifact_scope(
+                        phase2a_store,
+                        stage="phase2a",
+                        artifact_name="semantic_units",
+                        input_fingerprint=phase2a_output_input_fingerprint,
+                        local_path=semantic_units_path,
+                        dependency_fingerprints=phase2a_output_dependency_fingerprints,
+                        extra_payload={
+                            "semantic_units_path": semantic_units_path,
+                            "source": "analyze_with_vl",
+                            "material_request_units": updated_material_request_units,
+                            "instructional_units": updated_instructional_units,
+                            "concrete_main_content_units": updated_concrete_main_content_units,
+                        },
+                    )
                     logger.info(
-                        f"[{task_id}] Persisted semantic_units updates to {semantic_units_path} "
+                        f"[{task_id}] Persisted semantic_units updates to {persisted_paths or [semantic_units_path]} "
                         f"(material_request_units={updated_material_request_units}, "
                         f"instructional_units={updated_instructional_units}, "
                         f"concrete_main_content_units={updated_concrete_main_content_units}, "
@@ -8482,7 +12840,54 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 pending=0,
             )
             _emit_vl_heartbeat(signal_type="hard")
-
+            if (
+                phase2a_vl_store is not None
+                and phase2a_material_finalize_scope_ref
+                and phase2a_material_finalize_scope_id
+            ):
+                phase2a_material_finalize_dependency_fingerprints = (
+                    _build_phase2a_material_finalize_dependency_fingerprints()
+                )
+                material_finalize_payload = {
+                    "merged_screenshots": merged_screenshots,
+                    "merged_clips": merged_clips,
+                    "units_analyzed": len(vl_units),
+                    "vl_clips_generated": len(vl_clip_requests),
+                    "vl_screenshots_generated": len(vl_screenshot_requests),
+                    "used_fallback": False,
+                    "token_stats": dict(vl_token_stats or {}),
+                }
+                phase2a_vl_store.commit_chunk_payload(
+                    stage="phase2a",
+                    chunk_id=phase2a_material_finalize_chunk_id,
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    result_payload=material_finalize_payload,
+                    metadata={
+                        "storage_backend": "sqlite",
+                        "stage_step": "material_finalize",
+                        "substage_name": "material_finalize",
+                        "wave_id": "wave_0001",
+                        "dependency_fingerprints": phase2a_material_finalize_dependency_fingerprints,
+                    },
+                )
+                phase2a_vl_store.transition_scope_node(
+                    scope_ref=phase2a_material_finalize_scope_ref,
+                    stage="phase2a",
+                    scope_type="substage",
+                    scope_id=phase2a_material_finalize_scope_id,
+                    status=STATUS_SUCCESS,
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    dependency_fingerprints=phase2a_material_finalize_dependency_fingerprints,
+                    stage_step="material_finalize",
+                    plan_context={"semantic_units_path": semantic_units_path},
+                    result_hash=build_runtime_payload_fingerprint(
+                        {
+                            "screenshots": len(screenshot_requests),
+                            "clips": len(clip_requests),
+                            "vl_units": len(vl_units),
+                        }
+                    ),
+                )
             return video_processing_pb2.VLAnalysisResponse(
                 success=True,
                 vl_enabled=True,
@@ -8498,6 +12903,51 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         except Exception as e:
             error_detail = str(getattr(e, "_display_error_detail", "") or str(e))
             logger.error(f"[{task_id}] AnalyzeWithVL 异常: {error_detail}", exc_info=True)
+            if (
+                phase2a_vl_store is not None
+                and phase2a_material_finalize_scope_ref
+                and phase2a_material_finalize_scope_id
+            ):
+                phase2a_material_finalize_dependency_fingerprints = (
+                    _build_phase2a_material_finalize_dependency_fingerprints()
+                )
+                error_info = classify_runtime_error(e)
+                if error_info["error_class"] == "AUTO_RETRYABLE":
+                    failure_status = STATUS_ERROR
+                elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+                    failure_status = STATUS_FAILED
+                else:
+                    failure_status = STATUS_MANUAL_NEEDED
+                phase2a_vl_store.transition_scope_node(
+                    scope_ref=phase2a_material_finalize_scope_ref,
+                    stage="phase2a",
+                    scope_type="substage",
+                    scope_id=phase2a_material_finalize_scope_id,
+                    status=failure_status,
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    dependency_fingerprints=phase2a_material_finalize_dependency_fingerprints,
+                    stage_step="material_finalize",
+                    plan_context={"semantic_units_path": semantic_units_path},
+                    resource_snapshot={"error": error_detail},
+                    retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+                    required_action=str(error_info.get("action_hint", "") or ""),
+                    error_class=error_info["error_class"],
+                    error_code=error_info["error_code"],
+                    error_message=error_info["error_message"],
+                )
+                phase2a_vl_store.fail_chunk_payload(
+                    stage="phase2a",
+                    chunk_id=phase2a_material_finalize_chunk_id,
+                    input_fingerprint=phase2a_material_finalize_input_fingerprint,
+                    error=e,
+                    metadata={
+                        "storage_backend": "sqlite",
+                        "stage_step": "material_finalize",
+                        "substage_name": "material_finalize",
+                        "wave_id": "wave_0001",
+                        "dependency_fingerprints": phase2a_material_finalize_dependency_fingerprints,
+                    },
+                )
             _update_vl_heartbeat_state(
                 status="failed",
                 checkpoint="vl_exception",
@@ -8679,7 +13129,7 @@ def _bootstrap_grpc_server(host: str, port: int):
     - 不负责阻塞等待与优雅关闭编排。
     """
     server = aio.server()
-    logger.info("初始化 VideoProcessingServicer（首次 warmup 可能较慢）...")
+    logger.info("初始化 VideoProcessingServicer（重资源已延迟到首次使用）...")
     init_t0 = time.perf_counter()
 
     config = _load_server_config()

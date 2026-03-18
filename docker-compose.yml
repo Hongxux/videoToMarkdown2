@@ -11,6 +11,8 @@ services:
   redis:
     init: true
     restart: unless-stopped
+    profiles:
+      - redis
     image: redis:7.2-alpine
     container_name: v2m-redis
     command:
@@ -41,15 +43,12 @@ services:
       dockerfile: deploy/docker/python-grpc.Dockerfile
     container_name: v2m-python-grpc
     shm_size: 1gb
-    depends_on:
-      redis:
-        condition: service_healthy
     environment:
       PYTHONNOUSERSITE: "1"
       PYTHONPATH: /app:/app/contracts/gen/python
       VIDEO_CONFIG_PATH: /app/config/video_config.yaml
       MODULE2_CONFIG_PATH: /app/config/module2_config.yaml
-      TASK_RUNTIME_REDIS_ENABLED: ${TASK_RUNTIME_REDIS_ENABLED:-1}
+      TASK_RUNTIME_REDIS_ENABLED: ${TASK_RUNTIME_REDIS_ENABLED:-0}
       TASK_RUNTIME_REDIS_URL: ${TASK_RUNTIME_REDIS_URL:-redis://redis:6379/0}
       TASK_RUNTIME_REDIS_PREFIX: ${TASK_RUNTIME_REDIS_PREFIX:-rt}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -80,8 +79,6 @@ services:
       dockerfile: deploy/docker/java-orchestrator.Dockerfile
     container_name: v2m-java-orchestrator
     depends_on:
-      redis:
-        condition: service_healthy
       python-grpc:
         condition: service_healthy
     environment:

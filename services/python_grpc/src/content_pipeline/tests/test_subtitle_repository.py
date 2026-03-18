@@ -184,3 +184,21 @@ def test_set_raw_paragraphs_supports_in_memory_paragraph_loading():
     assert paragraphs[0]["paragraph_id"] == "P001"
     assert paragraphs[0]["text"] == "alpha"
 
+
+def test_set_raw_sentence_timestamps_supports_in_memory_lookup():
+    repository = SubtitleRepository()
+    repository.set_raw_subtitles(
+        [
+            {"subtitle_id": "S001", "text": "first", "start_sec": 0.0, "end_sec": 1.0},
+            {"subtitle_id": "S002", "text": "second", "start_sec": 1.0, "end_sec": 2.0},
+        ]
+    )
+    repository.set_raw_sentence_timestamps(
+        {
+            "S010": {"start_sec": 10.0, "end_sec": 12.0},
+        }
+    )
+
+    timestamps = repository.build_sentence_timestamps(prefer_external=False)
+    assert timestamps == {"S010": {"start_sec": 10.0, "end_sec": 12.0}}
+

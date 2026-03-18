@@ -18,6 +18,10 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def _build_tmp_path(target_path: str) -> str:
+    return f"{target_path}.t{time.time_ns():x}"
+
+
 def _fsync_parent_dir(path: str) -> None:
     """尽力同步父目录元数据，降低断电后原子替换丢失风险。"""
     parent_dir = os.path.dirname(os.path.abspath(path))
@@ -53,7 +57,7 @@ def _write_json_atomic(
     parent_dir = os.path.dirname(target_path)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
-    tmp_path = f"{target_path}.tmp.{os.getpid()}.{time.time_ns()}"
+    tmp_path = _build_tmp_path(target_path)
     with open(tmp_path, "w", encoding="utf-8") as output_stream:
         json.dump(payload, output_stream, ensure_ascii=ensure_ascii, indent=indent, default=str)
         output_stream.flush()
@@ -68,7 +72,7 @@ def _write_text_atomic(path: str, content: str) -> None:
     parent_dir = os.path.dirname(target_path)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
-    tmp_path = f"{target_path}.tmp.{os.getpid()}.{time.time_ns()}"
+    tmp_path = _build_tmp_path(target_path)
     with open(tmp_path, "w", encoding="utf-8") as output_stream:
         output_stream.write(content)
         output_stream.flush()

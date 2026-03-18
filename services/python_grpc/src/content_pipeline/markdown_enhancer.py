@@ -36,9 +36,21 @@ from services.python_grpc.src.common.utils.patch_protocol import (
 from services.python_grpc.src.common.utils.runtime_recovery_store import (
     RuntimeRecoveryStore,
     build_llm_input_fingerprint,
+    build_runtime_payload_fingerprint,
+    classify_runtime_error,
+    STATUS_ERROR,
+    STATUS_FAILED,
+    STATUS_MANUAL_NEEDED,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+)
+from services.python_grpc.src.common.utils.stage_artifact_paths import (
+    phase2a_semantic_units_candidates as helper_phase2a_semantic_units_candidates,
 )
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 from services.python_grpc.src.config_paths import resolve_video_config_path
+from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
+from services.python_grpc.src.content_pipeline.infra.llm.fallback_audit import append_llm_fallback_event
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
 
@@ -336,6 +348,7 @@ class EnhancedSection:
     group_name: str = ""
     group_reason: str = ""
     vl_concrete_segments: List[Dict[str, Any]] = field(default_factory=list)
+    fallback_context: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -389,11 +402,13 @@ class MarkdownEnhancer:
             self._llm_client = None
         else:
             self._enabled = True
-            # 🚀 使用集中式 LLMClient
-            from services.python_grpc.src.content_pipeline.infra.llm.llm_client import LLMClient
-            self._llm_client = LLMClient(
+            # 统一复用 llm_gateway 客户端工厂，避免 phase2b 保留旁路 DeepSeek client。
+            normalized_base_url = str(self.base_url or "").rstrip("/")
+            if not normalized_base_url.endswith("/v1"):
+                normalized_base_url = f"{normalized_base_url}/v1"
+            self._llm_client = llm_gateway.get_deepseek_client(
                 api_key=self.api_key,
-                base_url=self.base_url + "/v1"  # LLMClient 需要 /v1 后缀
+                base_url=normalized_base_url,
             )
 
         # 统一走 V3.2 模型路由：默认沿用客户端模型，支持配置文件与环境变量覆盖。
@@ -408,7 +423,15 @@ class MarkdownEnhancer:
         # Obsidian 嵌入路径基准目录（默认使用输出 Markdown 所在目录）
         self._markdown_dir = None
         self._result_dir = None
+        self._runtime_task_id = ""
+        self._runtime_storage_key = ""
+        self._runtime_normalized_video_key = ""
         self._runtime_store: Optional[RuntimeRecoveryStore] = None
+        self._runtime_llm_restore_cache: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+        self._runtime_stage_dispatch_summary: Dict[str, Any] = {}
+        self._runtime_pending_scope_units: Set[str] = set()
+        self._runtime_known_scope_units: Set[str] = set()
+        self._runtime_section_wave_ids: Dict[str, str] = {}
         # 🚀 调用合并开关：默认开启，失败时自动回退到两次调用
         raw = (os.getenv("MODULE2_MARKDOWN_ENHANCER_COMBINE_CALLS", "1") or "").strip().lower()
         self._combine_llm_calls = raw in ("1", "true", "yes", "y", "on")
@@ -706,15 +729,211 @@ class MarkdownEnhancer:
         """初始化 Phase2B 运行态恢复存储。"""
         if not self._result_dir:
             self._runtime_store = None
+            self._runtime_llm_restore_cache = {}
+            self._runtime_stage_dispatch_summary = {}
+            self._runtime_pending_scope_units = set()
+            self._runtime_known_scope_units = set()
+            self._runtime_section_wave_ids = {}
             return
         try:
             self._runtime_store = RuntimeRecoveryStore(
                 output_dir=self._result_dir,
-                task_id=Path(self._result_dir).name,
+                task_id=self._runtime_task_id or Path(self._result_dir).name,
+                storage_key=self._runtime_storage_key or Path(self._result_dir).name,
+                normalized_video_key=self._runtime_normalized_video_key,
+            )
+            self._runtime_llm_restore_cache = {}
+            self._runtime_stage_dispatch_summary = {}
+            self._runtime_pending_scope_units = set()
+            self._runtime_known_scope_units = set()
+            self._runtime_section_wave_ids = {}
+            self._runtime_store.reset_running_scopes_to_planned(
+                stage="phase2b",
+                scope_type="substage",
+                reason="process_restarted",
+            )
+            self._runtime_store.reset_running_scopes_to_planned(
+                stage="phase2b",
+                scope_type="llm_call",
+                reason="process_restarted",
             )
         except Exception as exc:
             logger.warning(f"Failed to prepare runtime recovery store: {exc}")
             self._runtime_store = None
+            self._runtime_llm_restore_cache = {}
+            self._runtime_stage_dispatch_summary = {}
+            self._runtime_pending_scope_units = set()
+            self._runtime_known_scope_units = set()
+            self._runtime_section_wave_ids = {}
+
+    def _prime_phase2b_stage_dispatch(self, sections: List["EnhancedSection"]) -> None:
+        runtime_store = self._runtime_store
+        if runtime_store is None:
+            self._runtime_llm_restore_cache = {}
+            self._runtime_stage_dispatch_summary = {}
+            self._runtime_pending_scope_units = set()
+            self._runtime_known_scope_units = set()
+            self._runtime_section_wave_ids = {}
+            return
+        candidate_chunk_ids = [
+            self._build_runtime_chunk_id(str(section.unit_id or ""))
+            for section in list(sections or [])
+            if str(section.unit_id or "").strip()
+        ]
+        prefetch_result = runtime_store.prefetch_restorable_llm_scope_cache(
+            stage="phase2b",
+            candidate_chunk_ids=candidate_chunk_ids,
+            limit=max(512, len(candidate_chunk_ids) * 8),
+        )
+        self._runtime_llm_restore_cache = dict(prefetch_result.get("cache", {}) or {})
+        self._runtime_stage_dispatch_summary = dict(prefetch_result.get("summary", {}) or {})
+        self._runtime_pending_scope_units = {
+            str(item.get("unit_id", "") or "").strip()
+            for item in list(prefetch_result.get("pending_hints", []) or [])
+            if str(item.get("unit_id", "") or "").strip()
+        }
+        self._runtime_known_scope_units = {
+            str(item.get("unit_id", "") or "").strip()
+            for item in list(prefetch_result.get("scope_hints", []) or [])
+            if str(item.get("unit_id", "") or "").strip()
+        }
+        self._runtime_section_wave_ids = {}
+        for index, section in enumerate(list(sections or []), start=1):
+            unit_id = str(getattr(section, "unit_id", "") or "").strip()
+            if not unit_id:
+                continue
+            wave_id = f"wave_{index:04d}"
+            self._runtime_section_wave_ids[unit_id] = wave_id
+            section_fingerprint = build_runtime_payload_fingerprint(
+                {
+                    "unit_id": unit_id,
+                    "title": str(getattr(section, "title", "") or ""),
+                    "knowledge_type": str(getattr(section, "knowledge_type", "") or ""),
+                    "index": index,
+                    "stage": "phase2b.section_enhance",
+                }
+            )
+            runtime_store.plan_substage_scope(
+                stage="phase2b",
+                substage_name="section_enhance",
+                wave_id=wave_id,
+                input_fingerprint=section_fingerprint,
+                plan_context={
+                    "unit_id": unit_id,
+                    "title": str(getattr(section, "title", "") or ""),
+                    "knowledge_type": str(getattr(section, "knowledge_type", "") or ""),
+                    "work_units": [
+                        {
+                            "scope_type": "llm_call",
+                            "unit_id": unit_id,
+                            "chunk_id": self._build_runtime_chunk_id(unit_id),
+                        }
+                    ],
+                },
+            )
+        if self._runtime_stage_dispatch_summary:
+            logger.info(
+                "[Phase2B] stage scope dispatch prepared: hints=%s pending=%s prefetched=%s",
+                int(self._runtime_stage_dispatch_summary.get("hint_count", 0) or 0),
+                int(self._runtime_stage_dispatch_summary.get("pending_count", 0) or 0),
+                int(self._runtime_stage_dispatch_summary.get("prefetched_restore_count", 0) or 0),
+            )
+
+    def _update_phase2b_section_wave_state(
+        self,
+        *,
+        section: "EnhancedSection",
+        status: str,
+        result_summary: Optional[Dict[str, Any]] = None,
+        error: Optional[Exception] = None,
+    ) -> None:
+        runtime_store = self._runtime_store
+        if runtime_store is None or section is None:
+            return
+        unit_id = str(getattr(section, "unit_id", "") or "").strip()
+        if not unit_id:
+            return
+        wave_id = self._runtime_section_wave_ids.get(unit_id, "wave_0001")
+        section_fingerprint = build_runtime_payload_fingerprint(
+            {
+                "unit_id": unit_id,
+                "title": str(getattr(section, "title", "") or ""),
+                "knowledge_type": str(getattr(section, "knowledge_type", "") or ""),
+                "stage": "phase2b.section_enhance",
+            }
+        )
+        scope_ref = runtime_store.build_substage_scope_ref(
+            stage="phase2b",
+            substage_name="section_enhance",
+            wave_id=wave_id,
+        )
+        scope_id = runtime_store.build_substage_scope_id(
+            substage_name="section_enhance",
+            wave_id=wave_id,
+        )
+        plan_context = {
+            "unit_id": unit_id,
+            "title": str(getattr(section, "title", "") or ""),
+            "knowledge_type": str(getattr(section, "knowledge_type", "") or ""),
+            "work_units": [
+                {
+                    "scope_type": "llm_call",
+                    "unit_id": unit_id,
+                    "chunk_id": self._build_runtime_chunk_id(unit_id),
+                }
+            ],
+            "result_summary": dict(result_summary or {}),
+        }
+        normalized_status = str(status or "").strip().upper()
+        if normalized_status == STATUS_SUCCESS:
+            runtime_store.transition_scope_node(
+                scope_ref=scope_ref,
+                stage="phase2b",
+                scope_type="substage",
+                scope_id=scope_id,
+                status=STATUS_SUCCESS,
+                input_fingerprint=section_fingerprint,
+                stage_step="section_enhance",
+                plan_context=plan_context,
+                result_hash=build_runtime_payload_fingerprint(result_summary or {}),
+            )
+            return
+        if normalized_status == STATUS_RUNNING:
+            runtime_store.transition_scope_node(
+                scope_ref=scope_ref,
+                stage="phase2b",
+                scope_type="substage",
+                scope_id=scope_id,
+                status=STATUS_RUNNING,
+                input_fingerprint=section_fingerprint,
+                stage_step="section_enhance",
+                plan_context=plan_context,
+            )
+            return
+        runtime_error = error or RuntimeError("phase2b section enhance failed")
+        error_info = classify_runtime_error(runtime_error)
+        if error_info["error_class"] == "AUTO_RETRYABLE":
+            failure_status = STATUS_ERROR
+        elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+            failure_status = STATUS_FAILED
+        else:
+            failure_status = STATUS_MANUAL_NEEDED
+        runtime_store.transition_scope_node(
+            scope_ref=scope_ref,
+            stage="phase2b",
+            scope_type="substage",
+            scope_id=scope_id,
+            status=failure_status,
+            input_fingerprint=section_fingerprint,
+            stage_step="section_enhance",
+            plan_context=plan_context,
+            resource_snapshot={"error": str(runtime_error)},
+            retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+            required_action=str(error_info.get("action_hint", "") or ""),
+            error_class=error_info["error_class"],
+            error_code=error_info["error_code"],
+            error_message=error_info["error_message"],
+        )
 
     @staticmethod
     def _build_text_preview(text: str, max_chars: int = 500) -> str:
@@ -733,13 +952,176 @@ class MarkdownEnhancer:
     def _metadata_to_runtime_payload(metadata: Optional[Any]) -> Dict[str, Any]:
         if metadata is None:
             return {}
+        fallback_payload = getattr(metadata, "fallback", {}) or {}
+        if not isinstance(fallback_payload, dict):
+            fallback_payload = {}
         return {
             "model": str(getattr(metadata, "model", "") or ""),
             "prompt_tokens": getattr(metadata, "prompt_tokens", None),
             "completion_tokens": getattr(metadata, "completion_tokens", None),
             "total_tokens": getattr(metadata, "total_tokens", None),
             "cache_hit": bool(getattr(metadata, "cache_hit", False)),
+            "is_fallback": bool(getattr(metadata, "is_fallback", False)),
+            "fallback": dict(fallback_payload),
+            "previous_failures": list(getattr(metadata, "previous_failures", []) or []),
+            "propagated_scope_refs": list(getattr(metadata, "propagated_scope_refs", []) or []),
         }
+
+    @staticmethod
+    def _normalize_fallback_payload(payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        normalized = dict(payload)
+        if not bool(normalized.get("is_fallback", False)):
+            return {}
+        events = normalized.get("events")
+        if not isinstance(events, list):
+            normalized["events"] = []
+        return normalized
+
+    def _compose_llm_fallback_payload(
+        self,
+        *,
+        metadata: Optional[Any] = None,
+        fallback_context: Optional[Dict[str, Any]] = None,
+        scope_ref: str = "",
+    ) -> Dict[str, Any]:
+        metadata_fallback = self._normalize_fallback_payload(
+            getattr(metadata, "fallback", {}) if metadata is not None else {}
+        )
+        context_fallback = self._normalize_fallback_payload(fallback_context)
+        if not metadata_fallback and not context_fallback:
+            return {}
+
+        composed: Dict[str, Any] = {
+            "is_fallback": bool(metadata_fallback.get("is_fallback") or context_fallback.get("is_fallback") or metadata_fallback or context_fallback),
+            "fallback_kind": str(
+                metadata_fallback.get("fallback_kind")
+                or context_fallback.get("fallback_kind")
+                or "propagated_path"
+            ),
+            "fallback_label": str(
+                metadata_fallback.get("fallback_label")
+                or context_fallback.get("fallback_label")
+                or "phase2b_llm_fallback"
+            ),
+            "fallback_reason": str(
+                metadata_fallback.get("fallback_reason")
+                or context_fallback.get("summary")
+                or context_fallback.get("fallback_reason")
+                or ""
+            ),
+            "previous_failures": [],
+            "events": [],
+            "propagated_scope_refs": [],
+            "repair_stage": str(
+                metadata_fallback.get("repair_stage")
+                or context_fallback.get("repair_stage")
+                or "phase2b"
+            ),
+        }
+        for record in list(getattr(metadata, "previous_failures", []) or []):
+            if isinstance(record, dict):
+                composed["previous_failures"].append(dict(record))
+        for record in list(metadata_fallback.get("previous_failures", []) or []):
+            if isinstance(record, dict):
+                composed["previous_failures"].append(dict(record))
+        for record in list(context_fallback.get("events", []) or []):
+            if isinstance(record, dict):
+                composed["events"].append(dict(record))
+        for raw_scope_ref in list(getattr(metadata, "propagated_scope_refs", []) or []):
+            scope_item = str(raw_scope_ref or "").strip()
+            if scope_item and scope_item not in composed["propagated_scope_refs"]:
+                composed["propagated_scope_refs"].append(scope_item)
+        for raw_scope_ref in list(metadata_fallback.get("propagated_scope_refs", []) or []):
+            scope_item = str(raw_scope_ref or "").strip()
+            if scope_item and scope_item not in composed["propagated_scope_refs"]:
+                composed["propagated_scope_refs"].append(scope_item)
+        if scope_ref and scope_ref not in composed["propagated_scope_refs"]:
+            composed["propagated_scope_refs"].append(scope_ref)
+        if metadata_fallback.get("source_provider"):
+            composed["source_provider"] = str(metadata_fallback.get("source_provider") or "")
+        if metadata_fallback.get("target_provider"):
+            composed["target_provider"] = str(metadata_fallback.get("target_provider") or "")
+        if metadata_fallback.get("fast_fallback_mode") is not None:
+            composed["fast_fallback_mode"] = bool(metadata_fallback.get("fast_fallback_mode"))
+        return composed
+
+    @staticmethod
+    def _append_section_fallback_event(
+        section: EnhancedSection,
+        *,
+        fallback_kind: str,
+        fallback_reason: str,
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if section is None:
+            return
+        fallback_payload = dict(section.fallback_context or {})
+        events = fallback_payload.get("events")
+        if not isinstance(events, list):
+            events = []
+        event_payload: Dict[str, Any] = {
+            "kind": str(fallback_kind or "").strip() or "fallback",
+            "reason": str(fallback_reason or "").strip(),
+            "unit_id": str(getattr(section, "unit_id", "") or ""),
+        }
+        if isinstance(extra_context, dict):
+            event_payload["context"] = dict(extra_context)
+        events.append(event_payload)
+        fallback_payload["is_fallback"] = True
+        fallback_payload["events"] = events
+        fallback_payload["repair_stage"] = "phase2b"
+        fallback_payload["summary"] = str(fallback_reason or "").strip() or str(fallback_kind or "").strip()
+        section.fallback_context = fallback_payload
+
+    def _should_route_deepseek_via_gateway(self) -> bool:
+        return self._llm_client is not None and isinstance(self._llm_client, llm_gateway.LLMClient)
+
+    def _resolve_gateway_model_name(self, requested_model: str = "") -> str:
+        if requested_model:
+            return str(requested_model).strip()
+        return str(getattr(self._llm_client, "model", "") or self._structured_text_model or "deepseek-chat").strip()
+
+    async def _complete_text(
+        self,
+        *,
+        prompt: str,
+        system_message: Optional[str] = None,
+    ) -> Tuple[str, Any, Any]:
+        if self._llm_client is None:
+            raise RuntimeError("LLM client is not initialized")
+        if self._should_route_deepseek_via_gateway():
+            return await llm_gateway.deepseek_complete_text(
+                prompt=prompt,
+                system_message=system_message,
+                client=self._llm_client,
+                model=self._resolve_gateway_model_name(),
+            )
+        return await self._llm_client.complete_text(
+            prompt=prompt,
+            system_message=system_message,
+        )
+
+    async def _complete_json(
+        self,
+        *,
+        prompt: str,
+        system_message: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Any, Any]:
+        if self._llm_client is None:
+            raise RuntimeError("LLM client is not initialized")
+        if self._should_route_deepseek_via_gateway():
+            return await llm_gateway.deepseek_complete_json(
+                prompt=prompt,
+                system_message=system_message,
+                client=self._llm_client,
+                model=self._resolve_gateway_model_name(),
+            )
+        return await self._llm_client.complete_json(
+            prompt=prompt,
+            system_message=system_message,
+        )
 
     async def _execute_recoverable_llm_call(
         self,
@@ -751,6 +1133,7 @@ class MarkdownEnhancer:
         call_factory,
         model_name: str = "",
         trace_on_reuse: bool = True,
+        fallback_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Any, bool]:
         """执行支持本地提交恢复的单次 LLM 调用。"""
         runtime_store = self._runtime_store
@@ -764,25 +1147,46 @@ class MarkdownEnhancer:
         )
         chunk_id = self._build_runtime_chunk_id(unit_id)
         llm_call_id = ""
+        scope_ref = ""
         if runtime_store is not None:
             llm_call_id = runtime_store.build_llm_call_id(
                 step_name=step_name,
                 unit_id=unit_id,
                 input_fingerprint=input_fingerprint,
             )
-            restored = runtime_store.load_committed_llm_response(
+            scope_ref = runtime_store.build_scope_ref(
+                stage="phase2b",
+                scope_type="llm_call",
+                scope_id=llm_call_id,
+            )
+            cache_key = runtime_store.build_llm_restore_cache_key(
                 stage="phase2b",
                 chunk_id=chunk_id,
                 llm_call_id=llm_call_id,
                 input_fingerprint=input_fingerprint,
             )
+            restored = dict(self._runtime_llm_restore_cache.get(cache_key, {}) or {})
+            if not restored:
+                restored = runtime_store.load_committed_llm_response(
+                    stage="phase2b",
+                    chunk_id=chunk_id,
+                    llm_call_id=llm_call_id,
+                    input_fingerprint=input_fingerprint,
+                )
+                if restored is not None:
+                    self._runtime_llm_restore_cache[cache_key] = dict(restored)
             if restored is not None:
+                restored_metadata = dict(restored.get("response_metadata", {}) or {})
                 cache_meta = SimpleNamespace(
-                    model=normalized_model,
-                    prompt_tokens=None,
-                    completion_tokens=None,
-                    total_tokens=None,
+                    model=str(restored_metadata.get("model", normalized_model) or normalized_model),
+                    prompt_tokens=restored_metadata.get("prompt_tokens"),
+                    completion_tokens=restored_metadata.get("completion_tokens"),
+                    total_tokens=restored_metadata.get("total_tokens"),
                     cache_hit=True,
+                    is_fallback=bool(restored_metadata.get("is_fallback", False)),
+                    fallback=dict(restored_metadata.get("fallback", {}) or {}),
+                    previous_failures=list(restored_metadata.get("previous_failures", []) or []),
+                    propagated_scope_refs=list(restored_metadata.get("propagated_scope_refs", []) or []),
                 )
                 if trace_on_reuse:
                     await self._write_llm_trace_record(
@@ -794,6 +1198,8 @@ class MarkdownEnhancer:
                         duration_ms=0.0,
                         success=True,
                         metadata=cache_meta,
+                        fallback_context=fallback_context,
+                        scope_ref=scope_ref,
                     )
                 return str(restored.get("response_text", "") or ""), cache_meta, True
 
@@ -807,6 +1213,32 @@ class MarkdownEnhancer:
             "user_prompt": user_prompt,
             "input_fingerprint": input_fingerprint,
         }
+        runtime_metadata = {
+            "step_name": step_name,
+            "stage_step": step_name,
+            "request_name": step_name,
+            "unit_id": unit_id,
+            "model": normalized_model,
+            "scope_variant": step_name,
+            "storage_backend": "sqlite",
+        }
+        if runtime_store is not None and llm_call_id:
+            runtime_store.plan_llm_call_scope(
+                stage="phase2b",
+                chunk_id=chunk_id,
+                llm_call_id=llm_call_id,
+                input_fingerprint=input_fingerprint,
+                request_payload=request_payload,
+                metadata=runtime_metadata,
+                scope_variant=step_name,
+                extra_payload={
+                    "provider": "deepseek",
+                    "request_name": step_name,
+                    "stage_step": step_name,
+                    "unit_id": unit_id,
+                    "scope_variant": step_name,
+                },
+            )
         if runtime_store is not None and llm_call_id:
             handle = runtime_store.begin_llm_attempt(
                 stage="phase2b",
@@ -814,15 +1246,16 @@ class MarkdownEnhancer:
                 llm_call_id=llm_call_id,
                 input_fingerprint=input_fingerprint,
                 request_payload=request_payload,
-                metadata={
-                    "step_name": step_name,
-                    "unit_id": unit_id,
-                    "model": normalized_model,
-                },
+                metadata=runtime_metadata,
             )
 
         try:
             content, meta, _ = await call_factory()
+            composed_fallback = self._compose_llm_fallback_payload(
+                metadata=meta,
+                fallback_context=fallback_context,
+                scope_ref=scope_ref,
+            )
             if runtime_store is not None and handle is not None:
                 runtime_store.commit_llm_attempt(
                     handle=handle,
@@ -832,6 +1265,30 @@ class MarkdownEnhancer:
                         4096,
                         int(os.getenv("PHASE2B_RUNTIME_LLM_PART_MAX_BYTES", "262144") or "262144"),
                     ),
+                )
+                try:
+                    restored = runtime_store.load_committed_llm_response(
+                        stage="phase2b",
+                        chunk_id=chunk_id,
+                        llm_call_id=llm_call_id,
+                        input_fingerprint=input_fingerprint,
+                    )
+                    if restored is not None:
+                        self._runtime_llm_restore_cache[cache_key] = dict(restored)
+                except Exception:
+                    pass
+            if composed_fallback.get("is_fallback"):
+                append_llm_fallback_event(
+                    step_name=step_name,
+                    unit_id=unit_id,
+                    llm_call_id=llm_call_id,
+                    chunk_id=chunk_id,
+                    scope_ref=scope_ref,
+                    request_payload=request_payload,
+                    fallback_payload=composed_fallback,
+                    extra={
+                        "model": normalized_model,
+                    },
                 )
             return content, meta, False
         except Exception as exc:
@@ -855,6 +1312,8 @@ class MarkdownEnhancer:
         success: bool,
         error_msg: str = "",
         metadata: Optional[Any] = None,
+        fallback_context: Optional[Dict[str, Any]] = None,
+        scope_ref: str = "",
     ) -> None:
         """落盘单条 LLM 调用记录。"""
         if not self._llm_trace_enabled or not self._llm_trace_file_path:
@@ -871,6 +1330,11 @@ class MarkdownEnhancer:
             completion_tokens = getattr(metadata, "completion_tokens", None)
             total_tokens = getattr(metadata, "total_tokens", None)
             cache_hit = bool(getattr(metadata, "cache_hit", False))
+        fallback_payload = self._compose_llm_fallback_payload(
+            metadata=metadata,
+            fallback_context=fallback_context,
+            scope_ref=scope_ref,
+        )
 
         if not model_name and self._llm_client is not None:
             model_name = str(getattr(self._llm_client, "model", "") or "")
@@ -901,6 +1365,8 @@ class MarkdownEnhancer:
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "cache_hit": cache_hit,
+            "is_fallback": bool(fallback_payload.get("is_fallback", False)),
+            "fallback": fallback_payload if fallback_payload else {},
         }
 
         async with self._llm_trace_lock:
@@ -917,6 +1383,13 @@ class MarkdownEnhancer:
         """优先透传模型参数；若桩客户端不支持 `model` 关键字则自动回退。"""
         if self._llm_client is None:
             raise RuntimeError("LLM client is not initialized")
+        if self._should_route_deepseek_via_gateway():
+            return await llm_gateway.deepseek_complete_text(
+                prompt=prompt,
+                system_message=system_message,
+                client=self._llm_client,
+                model=self._resolve_gateway_model_name(model),
+            )
         try:
             return await self._llm_client.complete_text(
                 prompt=prompt,
@@ -970,8 +1443,8 @@ class MarkdownEnhancer:
 
         base_dir = Path(result_dir)
         candidate_paths: List[Path] = [
-            base_dir / "semantic_units_phase2a.json",
-            base_dir / "intermediates" / "semantic_units_phase2a.json",
+            Path(candidate_path)
+            for candidate_path in helper_phase2a_semantic_units_candidates(result_dir)
         ]
         intermediates_dir = base_dir / "intermediates"
         rpc_candidates = (
@@ -1052,6 +1525,38 @@ class MarkdownEnhancer:
                     f"Concrete canonical payload loaded: path={path}, units={len(canonical_by_unit)}"
                 )
                 return canonical_by_unit
+        if canonical_by_unit:
+            return canonical_by_unit
+        artifact_payload = self._load_runtime_artifact_payload(
+            stage="phase2a",
+            artifact_name="semantic_units",
+        )
+        if not isinstance(artifact_payload, (dict, list)):
+            return canonical_by_unit
+        for unit in self._flatten_semantic_units_payload(artifact_payload):
+            unit_id = str(unit.get("unit_id", "") or "").strip()
+            if not unit_id:
+                continue
+            knowledge_type = self._normalize_knowledge_type(unit.get("knowledge_type"))
+            if knowledge_type != "concrete":
+                continue
+            raw_segments = unit.get("_vl_concrete_segments", unit.get("vl_concrete_segments", []))
+            vl_segments = raw_segments if isinstance(raw_segments, list) else []
+            canonical_body = str(unit.get("main_content", "") or "").strip()
+            if not canonical_body:
+                canonical_body = str(
+                    unit.get("full_text")
+                    or unit.get("text")
+                    or unit.get("body_text")
+                    or ""
+                ).strip()
+            if not canonical_body:
+                continue
+            canonical_by_unit[unit_id] = {
+                "body_text": canonical_body,
+                "vl_concrete_segments": list(vl_segments),
+                "source_path": "sqlite:phase2a/semantic_units",
+            }
         return canonical_by_unit
 
     def _sync_concrete_canonical_into_result_payload(
@@ -1117,6 +1622,31 @@ class MarkdownEnhancer:
             encoding="utf-8",
         )
 
+    def _load_runtime_artifact_payload(self, *, stage: str, artifact_name: str) -> Optional[Any]:
+        if self._runtime_store is None:
+            return None
+        return self._runtime_store.load_projection_payload(
+            stage=stage,
+            projection_name=artifact_name,
+        )
+
+    def _persist_runtime_artifact_payload(
+        self,
+        *,
+        stage: str,
+        artifact_name: str,
+        schema_version: str,
+        payload: Any,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        if isinstance(payload, dict):
+            self._runtime_store.commit_projection_payload(
+                stage=stage,
+                projection_name=artifact_name,
+                payload=payload,
+            )
+
     def _sync_final_media_markdown_into_result_payload(
         self,
         payload: Any,
@@ -1179,6 +1709,29 @@ class MarkdownEnhancer:
                 updated_files += 1
             except Exception as exc:
                 logger.warning(f"Failed to write semantic unit payload for main_content sync: path={path}, err={exc}")
+        artifact_payload = self._load_runtime_artifact_payload(
+            stage="phase2a",
+            artifact_name="semantic_units",
+        )
+        if isinstance(artifact_payload, (dict, list)):
+            changed = False
+            for unit in self._flatten_semantic_units_payload(artifact_payload):
+                unit_id = str(unit.get("unit_id", "") or "").strip()
+                if not unit_id:
+                    continue
+                final_markdown = str(final_markdown_by_unit.get(unit_id, "") or "").strip()
+                if not final_markdown:
+                    continue
+                if str(unit.get("main_content", "") or "").strip() != final_markdown:
+                    unit["main_content"] = final_markdown
+                    changed = True
+            if changed:
+                self._persist_runtime_artifact_payload(
+                    stage="phase2a",
+                    artifact_name="semantic_units",
+                    schema_version="phase2a.semantic_units.v1",
+                    payload=artifact_payload,
+                )
         return updated_files
     
     @property
@@ -1199,7 +1752,10 @@ class MarkdownEnhancer:
         self,
         result_json_path: str,
         subject: str = "数据结构与算法",
-        markdown_dir: Optional[str] = None
+        markdown_dir: Optional[str] = None,
+        task_id: str = "",
+        storage_key: str = "",
+        normalized_video_key: str = "",
     ) -> str:
         """
         执行逻辑：
@@ -1215,21 +1771,35 @@ class MarkdownEnhancer:
         - subject: 函数入参（类型：str）。
         输出参数：
         - 字符串结果。"""
-        # 加载数据
-        with open(result_json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
         # 记录 Markdown 目录，便于计算 Obsidian 相对路径
         self._markdown_dir = os.path.abspath(markdown_dir) if markdown_dir else None
         self._result_dir = str(Path(result_json_path).resolve().parent)
+        self._runtime_task_id = str(task_id or "").strip()
+        self._runtime_storage_key = str(storage_key or "").strip()
+        self._runtime_normalized_video_key = str(normalized_video_key or "").strip()
         self._prepare_llm_trace_output()
         self._prepare_runtime_store()
+        # 加载数据：优先文件，缺失时回退任务内 SQLite 恢复产物。
+        if os.path.exists(result_json_path):
+            with open(result_json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            data = self._load_runtime_artifact_payload(
+                stage="phase2b",
+                artifact_name="result_document",
+            )
+            if not isinstance(data, dict):
+                raise FileNotFoundError(f"phase2b result payload unavailable: {result_json_path}")
         concrete_canonical_by_unit = self._load_concrete_canonical_by_unit(self._result_dir)
         if concrete_canonical_by_unit:
             try:
                 if self._sync_concrete_canonical_into_result_payload(data, concrete_canonical_by_unit):
-                    with open(result_json_path, "w", encoding="utf-8") as file_obj:
-                        json.dump(data, file_obj, ensure_ascii=False, indent=2)
+                    self._persist_runtime_artifact_payload(
+                        stage="phase2b",
+                        artifact_name="result_document",
+                        schema_version="phase2b.result_document.v1",
+                        payload=data,
+                    )
                     logger.info(
                         f"Synced concrete canonical fields into result.json: units={len(concrete_canonical_by_unit)}"
                     )
@@ -1334,6 +1904,9 @@ class MarkdownEnhancer:
                 materials = section.get("materials", {})
                 if not isinstance(materials, dict):
                     materials = {}
+                material_metadata = materials.get("metadata", {})
+                if not isinstance(material_metadata, dict):
+                    material_metadata = {}
 
                 raw_screenshot_items = materials.get("screenshot_items", [])
                 augment_screenshot_items = [
@@ -1383,6 +1956,7 @@ class MarkdownEnhancer:
                             )
                         )
                     ),
+                    fallback_context=self._normalize_fallback_payload(material_metadata.get("fallback")),
                 )
 
                 if enhanced.video_clip and enhanced.video_clip not in enhanced.video_clips:
@@ -1403,6 +1977,8 @@ class MarkdownEnhancer:
         if not all_sections:
             return "# 无内容"
 
+        self._prime_phase2b_stage_dispatch(all_sections)
+
         # Step 2: 正文增强 + 结构化（并行提交，按完成顺序流式处理）
         logger.info("Step 2: Parallel LLM enhance/structure by unit")
         section_max_inflight = max(1, int(getattr(self, "_section_max_inflight", 48)))
@@ -1420,46 +1996,96 @@ class MarkdownEnhancer:
             next_title = all_sections[idx + 1].title if idx < len(all_sections) - 1 else ""
 
             async with section_sem:
-                normalized_kt = self._normalize_knowledge_type(sec.knowledge_type)
+                self._update_phase2b_section_wave_state(
+                    section=sec,
+                    status=STATUS_RUNNING,
+                )
+                try:
+                    normalized_kt = self._normalize_knowledge_type(sec.knowledge_type)
 
-                if self._is_tutorial_process_section(sec):
-                    # 教程型 process 直接走步骤渲染，不走通用逻辑抽取。
-                    sec.enhanced_body = sec.original_body
-                    sec.structured_content = ""
-                    return idx
-
-                if normalized_kt == "abstract":
-                    # 仅 abstract 使用 structured LLM。
-                    sec.enhanced_body = sec.original_body
-                    sec.structured_content = await self._build_structured_text_for_concept(
-                        sec, prev_title=prev_title, next_title=next_title
-                    )
-                    return idx
-
-                if normalized_kt in {"concrete", "process"}:
-                    # 先做素材占位符回填，再用 preserve_img prompt 做最终 Markdown 整理。
-                    sec.enhanced_body = sec.original_body
-                    sec.structured_content = await self._build_structured_text_for_media_preserved_section(
-                        sec,
-                        prev_title=prev_title,
-                        next_title=next_title,
-                    )
-                    return idx
-
-                if self._combine_llm_calls:
-                    try:
-                        sec.enhanced_body, sec.structured_content = await self._enhance_and_extract(sec)
-                        return idx
-                    except Exception as e:
-                        logger.warning(
-                            f"[{sec.unit_id}] Combined LLM call failed: {e} -> fallback to 2-step pipeline"
+                    if self._is_tutorial_process_section(sec):
+                        # 教程型 process 直接走步骤渲染，不走通用逻辑抽取。
+                        sec.enhanced_body = sec.original_body
+                        sec.structured_content = ""
+                        self._update_phase2b_section_wave_state(
+                            section=sec,
+                            status=STATUS_SUCCESS,
+                            result_summary={"path": "tutorial_passthrough"},
                         )
+                        return idx
 
-                sec.enhanced_body = await self._enhance_text(sec)
-                sec.structured_content = await self._extract_logic(sec)
-                return idx
+                    if normalized_kt == "abstract":
+                        # 仅 abstract 使用 structured LLM。
+                        sec.enhanced_body = sec.original_body
+                        sec.structured_content = await self._build_structured_text_for_concept(
+                            sec, prev_title=prev_title, next_title=next_title
+                        )
+                        self._update_phase2b_section_wave_state(
+                            section=sec,
+                            status=STATUS_SUCCESS,
+                            result_summary={"path": "abstract_structured"},
+                        )
+                        return idx
 
-        tasks = [asyncio.create_task(_process_one(i, s)) for i, s in enumerate(all_sections)]
+                    if normalized_kt in {"concrete", "process"}:
+                        # 先做素材占位符回填，再用 preserve_img prompt 做最终 Markdown 整理。
+                        sec.enhanced_body = sec.original_body
+                        sec.structured_content = await self._build_structured_text_for_media_preserved_section(
+                            sec,
+                            prev_title=prev_title,
+                            next_title=next_title,
+                        )
+                        self._update_phase2b_section_wave_state(
+                            section=sec,
+                            status=STATUS_SUCCESS,
+                            result_summary={"path": "media_preserved"},
+                        )
+                        return idx
+
+                    if self._combine_llm_calls:
+                        try:
+                            sec.enhanced_body, sec.structured_content = await self._enhance_and_extract(sec)
+                            self._update_phase2b_section_wave_state(
+                                section=sec,
+                                status=STATUS_SUCCESS,
+                                result_summary={"path": "combined_llm"},
+                            )
+                            return idx
+                        except Exception as e:
+                            logger.warning(
+                                f"[{sec.unit_id}] Combined LLM call failed after provider attempts: {e} -> switch to 2-step pipeline"
+                            )
+
+                    sec.enhanced_body = await self._enhance_text(sec)
+                    sec.structured_content = await self._extract_logic(sec)
+                    self._update_phase2b_section_wave_state(
+                        section=sec,
+                        status=STATUS_SUCCESS,
+                        result_summary={"path": "two_step_llm"},
+                    )
+                    return idx
+                except Exception as error:
+                    self._update_phase2b_section_wave_state(
+                        section=sec,
+                        status=STATUS_FAILED,
+                        error=error,
+                    )
+                    raise
+
+        indexed_sections = list(enumerate(all_sections))
+        prioritized_sections = sorted(
+            indexed_sections,
+            key=lambda item: (
+                0
+                if (
+                    str(item[1].unit_id or "").strip() in self._runtime_pending_scope_units
+                    or str(item[1].unit_id or "").strip() not in self._runtime_known_scope_units
+                )
+                else 1,
+                item[0],
+            ),
+        )
+        tasks = [asyncio.create_task(_process_one(index, section)) for index, section in prioritized_sections]
         completed = 0
         for fut in asyncio.as_completed(tasks):
             try:
@@ -1491,7 +2117,12 @@ class MarkdownEnhancer:
         if final_media_markdown_by_unit:
             try:
                 if self._sync_final_media_markdown_into_result_payload(data, final_media_markdown_by_unit):
-                    self._write_json_payload(Path(result_json_path), data)
+                    self._persist_runtime_artifact_payload(
+                        stage="phase2b",
+                        artifact_name="result_document",
+                        schema_version="phase2b.result_document.v1",
+                        payload=data,
+                    )
                     logger.info(
                         "Synced final media-preserved markdown into result.json: units=%s",
                         len(final_media_markdown_by_unit),
@@ -1556,9 +2187,7 @@ class MarkdownEnhancer:
                 system_prompt="",
                 user_prompt=prompt,
                 model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
-                call_factory=lambda: self._llm_client.complete_text(
-                    prompt=prompt
-                ),
+                call_factory=lambda: self._complete_text(prompt=prompt),
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -2715,10 +3344,11 @@ class MarkdownEnhancer:
                 system_prompt=self._img_desc_augment_system_prompt,
                 user_prompt=prompt,
                 model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
-                call_factory=lambda: self._llm_client.complete_text(
+                call_factory=lambda: self._complete_text(
                     prompt=prompt,
                     system_message=self._img_desc_augment_system_prompt,
                 ),
+                fallback_context=section.fallback_context,
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -3628,6 +4258,7 @@ class MarkdownEnhancer:
                     system_message=structured_system_prompt,
                     model=self._structured_text_model,
                 ),
+                fallback_context=section.fallback_context,
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -3639,6 +4270,7 @@ class MarkdownEnhancer:
                 duration_ms=duration_ms,
                 success=True,
                 metadata=meta,
+                fallback_context=section.fallback_context,
             )
             structured = (content or "").strip() or base_text
         except Exception as exc:
@@ -3652,6 +4284,7 @@ class MarkdownEnhancer:
                 duration_ms=duration_ms,
                 success=False,
                 error_msg=str(exc),
+                fallback_context=section.fallback_context,
             )
             logger.warning(f"Structured media-preserve generation failed for {section.unit_id}: {exc}")
             structured = base_text
@@ -3757,6 +4390,7 @@ class MarkdownEnhancer:
                     system_message=structured_system_prompt,
                     model=self._structured_text_model,
                 ),
+                fallback_context=section.fallback_context,
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -3768,6 +4402,7 @@ class MarkdownEnhancer:
                 duration_ms=duration_ms,
                 success=True,
                 metadata=meta,
+                fallback_context=section.fallback_context,
             )
             structured = (content or "").strip() or base_text
         except Exception as exc:
@@ -3781,6 +4416,7 @@ class MarkdownEnhancer:
                 duration_ms=duration_ms,
                 success=False,
                 error_msg=str(exc),
+                fallback_context=section.fallback_context,
             )
             logger.warning(f"Structured text generation failed for {section.unit_id}: {exc}")
             structured = base_text
@@ -3996,7 +4632,7 @@ class MarkdownEnhancer:
             action_info=action_info,
         )
 
-        result, _, _ = await self._llm_client.complete_json(
+        result, _, _ = await self._complete_json(
             prompt=user_prompt,
             system_message=self._combined_system_prompt,
         )
@@ -4078,22 +4714,45 @@ class MarkdownEnhancer:
             ocr_text=ocr_text,
             action_info=action_info
         )
-        
+        start_ts = time.perf_counter()
         try:
-            content, _, _ = await self._execute_recoverable_llm_call(
+            content, meta, _ = await self._execute_recoverable_llm_call(
                 step_name="text_enhance",
                 unit_id=str(section.unit_id),
                 system_prompt="",
                 user_prompt=prompt,
                 model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
-                call_factory=lambda: self._llm_client.complete_text(
-                    prompt=prompt
-                ),
+                call_factory=lambda: self._complete_text(prompt=prompt),
                 trace_on_reuse=False,
+                fallback_context=section.fallback_context,
+            )
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="text_enhance",
+                unit_id=str(section.unit_id),
+                system_prompt="",
+                user_prompt=prompt,
+                response_text=content,
+                duration_ms=duration_ms,
+                success=True,
+                metadata=meta,
+                fallback_context=section.fallback_context,
             )
             return self._strip_header_title(content.strip(), section.title)
             
         except Exception as e:
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="text_enhance",
+                unit_id=str(section.unit_id),
+                system_prompt="",
+                user_prompt=prompt,
+                response_text="",
+                duration_ms=duration_ms,
+                success=False,
+                error_msg=str(e),
+                fallback_context=section.fallback_context,
+            )
             logger.error(f"Text enhancement failed: {e}")
             return section.original_body
     
@@ -4140,23 +4799,46 @@ class MarkdownEnhancer:
             level_info=level_info,
             action_info=action_info
         )
-        
+        start_ts = time.perf_counter()
         try:
-            content, _, _ = await self._execute_recoverable_llm_call(
+            content, meta, _ = await self._execute_recoverable_llm_call(
                 step_name="logic_extract",
                 unit_id=str(section.unit_id),
                 system_prompt="",
                 user_prompt=prompt,
                 model_name=str(getattr(self._llm_client, "model", "") or self._structured_text_model or ""),
-                call_factory=lambda: self._llm_client.complete_text(
-                    prompt=prompt
-                ),
+                call_factory=lambda: self._complete_text(prompt=prompt),
                 trace_on_reuse=False,
+                fallback_context=section.fallback_context,
+            )
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="logic_extract",
+                unit_id=str(section.unit_id),
+                system_prompt="",
+                user_prompt=prompt,
+                response_text=content,
+                duration_ms=duration_ms,
+                success=True,
+                metadata=meta,
+                fallback_context=section.fallback_context,
             )
             
             return content.strip()
             
         except Exception as e:
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="logic_extract",
+                unit_id=str(section.unit_id),
+                system_prompt="",
+                user_prompt=prompt,
+                response_text="",
+                duration_ms=duration_ms,
+                success=False,
+                error_msg=str(e),
+                fallback_context=section.fallback_context,
+            )
             logger.error(f"Logic extraction failed: {e}")
             return section.enhanced_body
     

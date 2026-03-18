@@ -10,6 +10,8 @@
 输出：
 - 各函数/类返回的结构化结果或副作用。"""
 
+import contextlib
+import importlib
 import os
 import importlib.util
 import random
@@ -230,7 +232,7 @@ class VideoProcessor(BaseProcessor):
         probe_opts = dict(base_opts)
         probe_opts.pop("format", None)
         try:
-            with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            with self._open_ytdlp(probe_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             if isinstance(info, dict):
                 return self._extract_duration_from_info(info)
@@ -404,6 +406,52 @@ class VideoProcessor(BaseProcessor):
         merged = self._with_youtube_player_client_chain(opts)
         return self._with_youtube_runtime_options(merged)
 
+    def _ensure_youtube_pot_providers_loaded(self) -> None:
+        """
+        做什么：在显式启用 POT provider 时，手动导入所需的 bgutil provider 模块。
+        为什么：当前部分环境里 yt-dlp 自动插件扫描会重复加载同一 provider，导致 already registered。
+        权衡：只加载我们明确配置需要的 provider，放弃“自动发现所有插件”，换取更稳定的初始化过程。
+        """
+        provider_modules: list[str] = []
+        if self.youtube_pot_http_base_url:
+            provider_modules.append("yt_dlp_plugins.extractor.getpot_bgutil_http")
+        if self.youtube_pot_script_home:
+            provider_modules.append("yt_dlp_plugins.extractor.getpot_bgutil_script")
+        for module_name in provider_modules:
+            try:
+                importlib.import_module(module_name)
+            except AssertionError as error:
+                if "already registered" in str(error):
+                    continue
+                raise
+            except Exception as error:
+                raise RuntimeError(f"YouTube POT provider load failed: {module_name}: {error}") from error
+
+    @contextlib.contextmanager
+    def _open_ytdlp(self, opts: Dict[str, Any]):
+        """
+        做什么：统一接管 yt-dlp 插件加载策略。
+        为什么：自动插件扫描在部分环境里会把 bgutil provider 重复导入，导致 already registered，
+        从而把 YouTube 探测/下载入口直接打断。
+        权衡：我们关闭自动插件扫描，并在显式启用 POT 时仅手动导入所需 provider。
+        """
+        previous_flag = os.environ.get("YTDLP_NO_PLUGINS")
+        pot_enabled = bool(
+            self.youtube_pot_script_home
+            or self.youtube_pot_http_base_url
+        )
+        try:
+            os.environ["YTDLP_NO_PLUGINS"] = "1"
+            if pot_enabled:
+                self._ensure_youtube_pot_providers_loaded()
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                yield ydl
+        finally:
+            if previous_flag is None:
+                os.environ.pop("YTDLP_NO_PLUGINS", None)
+            else:
+                os.environ["YTDLP_NO_PLUGINS"] = previous_flag
+
     def _load_youtube_simple_downloader_module(self):
         if self._youtube_simple_downloader_module is not None:
             return self._youtube_simple_downloader_module
@@ -514,7 +562,7 @@ class VideoProcessor(BaseProcessor):
         ydl_opts = self._with_youtube_runtime_options(ydl_opts)
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with self._open_ytdlp(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
             self._capture_title_from_info_dict(info)
         except Exception as exc:
@@ -1021,7 +1069,7 @@ class VideoProcessor(BaseProcessor):
         probe_opts.pop("format", None)
         errors = []
         try:
-            with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            with self._open_ytdlp(probe_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             self._last_explicit_probe_error = None
             format_ids = self._pick_ranked_muxed_format_ids(
@@ -1037,7 +1085,7 @@ class VideoProcessor(BaseProcessor):
         if self._is_youtube_url(url):
             try:
                 yt_probe_opts = self._with_youtube_overrides(probe_opts)
-                with yt_dlp.YoutubeDL(yt_probe_opts) as ydl:
+                with self._open_ytdlp(yt_probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 format_ids = self._pick_ranked_muxed_format_ids(
                     info if isinstance(info, dict) else {},
@@ -1092,7 +1140,7 @@ class VideoProcessor(BaseProcessor):
         probe_opts.pop("format", None)
         errors = []
         try:
-            with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            with self._open_ytdlp(probe_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             m3u8_info = self._pick_best_m3u8_url(info if isinstance(info, dict) else {})
             if m3u8_info:
@@ -1105,7 +1153,7 @@ class VideoProcessor(BaseProcessor):
         if self._is_youtube_url(url):
             try:
                 yt_probe_opts = self._with_youtube_overrides(probe_opts)
-                with yt_dlp.YoutubeDL(yt_probe_opts) as ydl:
+                with self._open_ytdlp(yt_probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 m3u8_info = self._pick_best_m3u8_url(info if isinstance(info, dict) else {})
                 if m3u8_info:
@@ -1304,7 +1352,7 @@ class VideoProcessor(BaseProcessor):
                 attempt_opts["format"] = format_selector
                 attempt_trace.append(format_selector)
                 try:
-                    with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                    with self._open_ytdlp(attempt_opts) as ydl:
                         self.emit_progress("download", 0.3, f"开始下载流（format={format_selector}）...")
                         ydl.download([url])
                     last_error = None
@@ -1351,7 +1399,7 @@ class VideoProcessor(BaseProcessor):
                         attempt_trace.append(explicit_format_id)
                         self.emit_progress("download", 0.28, f"回退到显式 format_id: {explicit_format_id}")
                         try:
-                            with yt_dlp.YoutubeDL(explicit_opts) as ydl:
+                            with self._open_ytdlp(explicit_opts) as ydl:
                                 ydl.download([url])
                             last_error = None
                             break
@@ -1587,7 +1635,7 @@ class VideoProcessor(BaseProcessor):
             if self._is_youtube_url(url):
                 probe_opts = self._with_youtube_overrides(probe_opts)
             try:
-                with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                with self._open_ytdlp(probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 if not isinstance(info, dict):
                     return {}
@@ -1639,7 +1687,7 @@ class VideoProcessor(BaseProcessor):
             if self._is_youtube_url(url):
                 ydl_opts = self._with_youtube_overrides(ydl_opts)
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with self._open_ytdlp(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 # 检查是否有 entries（播放列表标志）
                 return 'entries' in info and info['entries'] is not None
@@ -1674,7 +1722,7 @@ class VideoProcessor(BaseProcessor):
             if self._is_youtube_url(url):
                 ydl_opts = self._with_youtube_overrides(ydl_opts)
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with self._open_ytdlp(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
                 if 'entries' not in info:

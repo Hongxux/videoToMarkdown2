@@ -2,6 +2,8 @@ package com.mvp.module2.fusion.queue;
 
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
+import com.mvp.module2.fusion.service.TaskRuntimeRedisRetentionService;
+import com.mvp.module2.fusion.service.TaskCleanupIndexService;
 import com.mvp.module2.fusion.service.TaskStateRepository;
 import com.mvp.module2.fusion.service.TaskStateRepository.PersistedTaskRecord;
 import org.slf4j.Logger;
@@ -52,6 +54,12 @@ public class TaskQueueManager {
 
     @Autowired(required = false)
     private TaskRuntimeRecoveryService taskRuntimeRecoveryService;
+
+    @Autowired(required = false)
+    private TaskRuntimeRedisRetentionService taskRuntimeRedisRetentionService;
+
+    @Autowired(required = false)
+    private TaskCleanupIndexService taskCleanupIndexService;
 
     public enum Priority {
         LOW(0),
@@ -178,6 +186,7 @@ public class TaskQueueManager {
         public Instant completedAt;
         public double progress;
         public String statusMessage;
+        public String userMessage;
         public String resultPath;
         public String cleanupSourcePath;
         public String errorMessage;
@@ -397,6 +406,8 @@ public class TaskQueueManager {
         task.completedAt = Instant.now();
         task.progress = 1.0;
         task.statusMessage = "处理完成";
+        task.userMessage = null;
+        task.errorMessage = null;
         task.resultPath = resultPath;
         releaseTaskResources(task);
         persistTaskState(task);
@@ -445,7 +456,8 @@ public class TaskQueueManager {
         task.status = decision.nextStatus;
         task.completedAt = Instant.now();
         task.statusMessage = userMessage;
-        task.errorMessage = userMessage;
+        task.userMessage = userMessage;
+        task.errorMessage = normalizeOptionalText(errorMessage);
         releaseTaskResources(task);
         persistTaskState(task);
 
@@ -472,6 +484,7 @@ public class TaskQueueManager {
         task.statusMessage = previousStatus == TaskStatus.MANUAL_RETRY_REQUIRED || previousStatus == TaskStatus.FATAL
                 ? "人工修复后已重新入队，将从上次 checkpoint 继续"
                 : "任务已重新入队，等待重试";
+        task.userMessage = null;
         task.errorMessage = null;
         task.recoveryPayload = null;
         task.resourcesReleased = false;
@@ -514,6 +527,7 @@ public class TaskQueueManager {
         task.status = decision.nextStatus;
         task.completedAt = Instant.now();
         task.statusMessage = "任务已取消，后续处理已停止";
+        task.userMessage = null;
         task.errorMessage = null;
 
         if (previousStatus == TaskStatus.QUEUED) {
@@ -929,6 +943,8 @@ public class TaskQueueManager {
         entry.createdAt = Instant.now();
         entry.progress = 0.0;
         entry.statusMessage = "排队中";
+        entry.userMessage = null;
+        entry.errorMessage = null;
         entry.resourcesReleased = false;
         entry.processingSlotAcquired = false;
         entry.bookOptions = normalizeBookOptions(bookOptions);
@@ -1037,6 +1053,7 @@ public class TaskQueueManager {
         task.completedAt = record.completedAt;
         task.progress = record.progress;
         task.statusMessage = normalizeOptionalText(record.statusMessage);
+        task.userMessage = normalizeOptionalText(record.userMessage());
         task.resultPath = normalizeOptionalText(record.resultPath);
         task.cleanupSourcePath = normalizeOptionalText(record.cleanupSourcePath);
         task.errorMessage = normalizeOptionalText(record.errorMessage);
@@ -1080,10 +1097,15 @@ public class TaskQueueManager {
                 : TaskStatus.MANUAL_RETRY_REQUIRED;
         task.completedAt = Instant.now();
         task.statusMessage = normalizeOptionalText(directive.buildStatusMessage());
-        task.errorMessage = normalizeOptionalText(
+        task.userMessage = normalizeOptionalText(
                 TaskRuntimeRecoveryService.RecoveryDirective.firstNonBlank(
                         directive.actionHint(),
                         directive.requiredAction(),
+                        directive.buildStatusMessage()
+                )
+        );
+        task.errorMessage = normalizeOptionalText(
+                TaskRuntimeRecoveryService.RecoveryDirective.firstNonBlank(
                         directive.errorMessage()
                 )
         );
@@ -1095,11 +1117,16 @@ public class TaskQueueManager {
     }
 
     private void persistTaskState(TaskEntry task) {
-        if (task == null || taskStateRepository == null) {
+        if (task == null) {
             return;
         }
         try {
-            taskStateRepository.upsertTask(task);
+            if (taskCleanupIndexService != null) {
+                taskCleanupIndexService.persistTaskState(task);
+            } else if (taskStateRepository != null) {
+                taskStateRepository.upsertTask(task);
+            }
+            syncRuntimeRedisRetention(task);
         } catch (Exception error) {
             logger.error("Persist task state failed: taskId={} err={}", task.taskId, error.getMessage(), error);
         }
@@ -1109,11 +1136,16 @@ public class TaskQueueManager {
         if (task == null) {
             return;
         }
-        if (taskStateRepository == null) {
+        if (taskCleanupIndexService == null && taskStateRepository == null) {
             throw new IllegalStateException("task state repository unavailable");
         }
         try {
-            taskStateRepository.upsertTask(task);
+            if (taskCleanupIndexService != null) {
+                taskCleanupIndexService.persistTaskState(task);
+            } else {
+                taskStateRepository.upsertTask(task);
+            }
+            syncRuntimeRedisRetention(task);
         } catch (Exception error) {
             logger.error(
                 "Persist accepted task failed before enqueue: taskId={} userId={} videoUrl={} err={}",
@@ -1124,6 +1156,22 @@ public class TaskQueueManager {
                     error
             );
             throw new IllegalStateException("persist accepted task failed", error);
+        }
+    }
+
+    private void syncRuntimeRedisRetention(TaskEntry task) {
+        if (task == null || taskRuntimeRedisRetentionService == null || task.status == null) {
+            return;
+        }
+        try {
+            taskRuntimeRedisRetentionService.syncTaskRetention(task.taskId, task.status.name());
+        } catch (Exception error) {
+            logger.warn(
+                    "Sync runtime redis retention skipped: taskId={} status={} err={}",
+                    task.taskId,
+                    task.status,
+                    error.getMessage()
+            );
         }
     }
 }

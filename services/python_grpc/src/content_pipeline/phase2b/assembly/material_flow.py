@@ -13,13 +13,13 @@ import concurrent.futures
 import json
 import logging
 import os
-import hashlib
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
+from services.python_grpc.src.common.utils.hash_policy import fast_hasher
 
 from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
 from services.python_grpc.src.content_pipeline.phase2a.segmentation.semantic_unit_segmenter import SemanticUnit
@@ -656,6 +656,12 @@ def apply_external_materials(
     闂佸搫绉堕…鍫㈢紦閹灐瑙勬媴鐞涒剝鐓犻梺?    1. 闁荤姍鍐仾缂侇煈鍣ｅ畷锝夊箣閻樿尙鐤€闂佹寧绋掔喊宥夋偋閹绢喖绠?MaterialRequests 婵炴垶鎼╅崢鎯р枔?ID闂佹寧绋戦懟顖氾耿?screenshots_dir/clips_dir 婵炴垶鎼╅崣鍐焵椤掍礁绗掔紓宥咃躬瀵濡烽敃鈧ˉ婵嬫煛閸屾碍鐭楁繛鍡愬灲婵?    2. 濠碘槅鍨界槐鏇犳兜閿曞倸绀岀憸鐗堝笒鐢娊鏌ㄥ☉娆戭暡闁轰緡鍣ｉ獮鎰媴閸撳弶鈻肩紓浣割槸缁夌敻寮搁崘鈺冾浄閻犺櫣鍎ら崐鎶芥煛瀹ュ洤甯剁紒鎲嬬節瀹曟鎮℃惔顔兼櫍 (婵?flatten 闂佸憡绋栧Λ鍕箖閺囥垹违濞达絿顭堥惁鍫曟煕?婵炴垶鎸哥粔瀵糕偓鍨耿瀹?unit_id 缂?闂?    3. 闁荤姵鍔戦崝鎴﹀闯濞差亜绠崇憸宥夊春濡ゅ懏鏅?       - 闂佸憡宸婚弲婵嬪极?_concrete_validator 闁哄鏅滅粙鏍€侀幋锕€鐐婇柟顖嗗啫澹栭梺鍛婂姇閹冲酣顢欓幇顓ф鐎光偓閸愵亝顫?(闂佸憡锚椤兘宕?闂佸憡顭堥褍鈻?闂?       - 婵犮垼娉涚€氼噣骞冩繝鍕＜闁规儳顕埀顒夊灦瀹曠娀寮介妸銉у姷闂?(Structured Screenshots) 闂佹眹鍔岀€氼剟鎯堝鍜佸殨闁逞屽墴閺屽懘寮拌箛鏇炵闂?    4. 闂佺绻愰悿鍥ㄧ閸儱鍙婇柣妯垮皺濞堟悂鏌ㄥ☉娆掑闁汇劊鍨介獮宥夊箚瑜嶉悡鍌炴煟閵娿儱顏紒鈧畝鍕骇闁归偊浜為悷銏ゆ倵閻㈠灚鍤€缂併劍鐓￠幆?Step 闂?Action 闂佺绻愰悿鍥ㄧ閸儱违?    5. 闂佸搫鐗冮崑鎾剁磽娴ｅ摜澧ｆい銉ワ攻缁诲懘顢曢鍌滅崶闂佸搫娲ら悺銊╁蓟?unit.materials闂佹寧绋戦懟顖炴嚐閻旂厧鎹堕柕濞у啰绠掓繝銏″劶妞寸顪冮崒鐐茬鐟滄垿銆侀幋锕€绀傛繝濠傚暟娣囨椽鏌熷▓鍨簼鐎殿喖娼℃俊?
     闁哄鐗婇幐鎼佸矗閸℃稑鐭楅柛灞剧⊕濞堝爼鏌?    - self: 缂傚倷鐒﹂崹鐢告偩妤ｅ啯鍎?Pipeline 闁诲骸婀遍崑妯兼閵壯€鍋撻悽娈挎敯闁芥牕瀚版俊?    - unit: 闂佺儵鏅╅崰妤呮偉?SemanticUnit闂?    - screenshots_dir: 闂佽鎯屾禍婊兠瑰Ο鍏煎皫闁告洦鍓涢悥閬嶆煛瀹ュ懏璐℃繛鍙夊閵囨劙寮村Ο宄颁壕?    - clips_dir: 闁荤喐鐟ュΛ婵嬨€傞崼鏇熷亱闁搞儺鐓堥崬浠嬫偣瑜嶇€氼厾鑺遍鈧浠嬪捶椤撶喓鐛ラ悷婊呭濞插繘鍩€?    - material_requests: 闂佸憡顭囬崰搴綖閹扮増顥嗛柍褜鍓欐晥闁稿本绋撻鎼佹煕?(闂佸湱绮崝鎺旀?ID/Timestamp 缂備焦绋戦ˇ顖炲储閹捐鏋侀柣妤€鐗嗙粊锕€鈽夐幘绛规缂佹鎳樺?闂?    """
     materials = MaterialSet()
+    inherited_metadata = (
+        dict(getattr(material_requests, "metadata", {}) or {})
+        if isinstance(getattr(material_requests, "metadata", {}), dict)
+        else {}
+    )
+    materials.metadata = inherited_metadata
     screenshot_paths: List[str] = []
     screenshot_labels: List[str] = []
     screenshot_items: List[Dict[str, Any]] = []
@@ -679,7 +685,7 @@ def apply_external_materials(
     # 闂佸憡顨呭ú銊︻殽閸モ晝椹抽柡宥庡亝濞堬綁鏌?    # 1) abstract/concrete 婵犳鍠栭鍥╁垝閹捐埖灏庨柣妤€鐗嗛悞濠氭煕閵夆晝鐣洪柣娑欑懅閹风姵绗熸繝鍕€?    # 2) process 婵炴垶鎸哥粔鎾疮閳ь剟鏌涘▎妯圭盎婵犫偓椤忓牊鈷旂€广儱娲悰鎾绘煕閹烘垶顥為柡渚囧櫍閹粙鎮㈤崨濠冪彙闂佹寧绋戦張顒佹櫠瀹ュ瀚?process闂佹寧绋戦悧鍡欌偓鍨耿楠炲繘顢楅崒婊冨綃 process + 闂佸搫瀚崕宕囨閿熺姴绠ｆい蹇撳缁傚牓鎮归崶顒佹暠闁活亙鍗抽弫宥嗗緞閹邦剙骞嬮柣鐘欏倸宓嗛柣娑欑懅閹风姵鎷呯喊妯轰壕?    is_process_degraded_branch = normalized_kt == "process" and not request_has_screenshot
     should_validate_screenshot = normalized_kt in {"abstract", "concrete", "process"}
     allow_clip = normalized_kt == "process"
-    is_process_degraded_branch = (
+    is_process_material_reference_missing = (
         normalized_kt == "process"
         and not request_has_screenshot
         and not is_tutorial_stepwise_unit
@@ -689,6 +695,15 @@ def apply_external_materials(
         and not is_tutorial_stepwise_unit
         and (normalized_kt != "concrete" or concrete_ai_vision_enabled)
     )
+    if is_process_material_reference_missing:
+        _append_material_issue(
+            issue_kind="screenshot_request_not_propagated",
+            issue_reason="process unit is missing propagated screenshot request/path, downstream assembly must recover materials locally",
+            extra_context={
+                "request_has_screenshot": bool(request_has_screenshot),
+                "tutorial_stepwise": bool(is_tutorial_stepwise_unit),
+            },
+        )
     if normalized_kt == "concrete" and not concrete_ai_vision_enabled:
         logger.info(
             "%s: skip concrete screenshot AI vision/preprocess (disabled by config)",
@@ -714,6 +729,28 @@ def apply_external_materials(
             ordered.append(path_item)
         return ordered
 
+    def _append_material_issue(
+        *,
+        issue_kind: str,
+        issue_reason: str,
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        metadata = materials.metadata if isinstance(getattr(materials, "metadata", {}), dict) else {}
+        materials.metadata = metadata
+        issues = metadata.get("material_resolution_issues")
+        if not isinstance(issues, list):
+            issues = []
+            metadata["material_resolution_issues"] = issues
+        event_payload: Dict[str, Any] = {
+            "kind": str(issue_kind or "").strip() or "material_issue",
+            "reason": str(issue_reason or "").strip(),
+            "unit_id": str(unit.unit_id or ""),
+            "knowledge_type": str(normalized_kt or ""),
+        }
+        if isinstance(extra_context, dict):
+            event_payload["context"] = dict(extra_context)
+        issues.append(event_payload)
+
     def _dedupe_material_candidates_by_path(candidates: List[Tuple[Any, ...]]) -> List[Tuple[Any, ...]]:
         deduped: List[Tuple[Any, ...]] = []
         seen_paths: set[str] = set()
@@ -737,7 +774,7 @@ def apply_external_materials(
             image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 return None
-            hasher = hashlib.sha256()
+            hasher = fast_hasher()
             hasher.update(str(image.shape).encode("utf-8"))
             hasher.update(str(image.dtype).encode("utf-8"))
             hasher.update(image.tobytes())
@@ -1742,6 +1779,13 @@ def apply_external_materials(
                     unit.unit_id,
                     len(fallback_clips),
                 )
+                _append_material_issue(
+                    issue_kind="clip_path_not_propagated",
+                    issue_reason="clip request-id matching missed, assembly recovered clip path by unit directory scan",
+                    extra_context={
+                        "matched_clip_count": len(fallback_clips),
+                    },
+                )
                 for path_item in fallback_clips:
                     clip_stem = Path(path_item).stem
                     clip_id = f"{unit.unit_id}/{clip_stem}"
@@ -1934,6 +1978,13 @@ def apply_external_materials(
                         "sentence_text": "",
                     }
                 ]
+                _append_material_issue(
+                    issue_kind="screenshot_path_not_propagated",
+                    issue_reason="materials stayed empty after request-id matching, assembly recovered screenshot path by unit directory scan",
+                    extra_context={
+                        "fallback_path": fallback_path,
+                    },
+                )
                 logger.warning(
                     "%s: materials empty after matching, fallback to unit scan screenshot: %s",
                     unit.unit_id,

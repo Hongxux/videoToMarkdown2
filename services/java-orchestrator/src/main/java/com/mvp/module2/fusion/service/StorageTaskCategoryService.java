@@ -67,6 +67,9 @@ public class StorageTaskCategoryService {
     });
     private final AtomicBoolean backfillRunning = new AtomicBoolean(false);
 
+    @Autowired(required = false)
+    private TaskRuntimeStageStore taskRuntimeStageStore;
+
     @Value("${storage.category.classifier.enabled:true}")
     private boolean categoryClassifierEnabled = true;
 
@@ -264,7 +267,7 @@ public class StorageTaskCategoryService {
         Path metricsPath = taskDir.resolve("intermediates").resolve("task_metrics_latest.json");
         ObjectNode metricsRoot = readObjectNode(metricsPath);
         ObjectNode videoMetaRoot = videoMetaService.readOrCreateNode(taskDir);
-        ObjectNode resultRoot = readObjectNode(taskDir.resolve(RESULT_JSON_FILE_NAME));
+        ObjectNode resultRoot = readPhase2bResultNode(taskDir);
         ObjectNode bookSemanticRoot = readObjectNode(taskDir.resolve(BOOK_SEMANTIC_UNITS_FILE_NAME));
 
         ObjectNode flowFlags = metricsRoot.path("flow_flags") instanceof ObjectNode flow
@@ -909,6 +912,26 @@ public class StorageTaskCategoryService {
             return objectMapper.createObjectNode();
         }
         JsonNode root = objectMapper.readTree(path.toFile());
+        return root instanceof ObjectNode objectNode ? objectNode : objectMapper.createObjectNode();
+    }
+
+    private ObjectNode readPhase2bResultNode(Path taskDir) throws Exception {
+        Path resultPath = taskDir.resolve(RESULT_JSON_FILE_NAME).normalize();
+        if (Files.isRegularFile(resultPath) && Files.size(resultPath) > 0L) {
+            return readObjectNode(resultPath);
+        }
+        if (taskRuntimeStageStore == null) {
+            return objectMapper.createObjectNode();
+        }
+        Map<String, Object> artifactPayload = taskRuntimeStageStore.loadProjectionPayload(
+                taskDir.toAbsolutePath().normalize().toString(),
+                "phase2b",
+                "result_document"
+        );
+        if (artifactPayload.isEmpty()) {
+            return objectMapper.createObjectNode();
+        }
+        JsonNode root = objectMapper.valueToTree(artifactPayload);
         return root instanceof ObjectNode objectNode ? objectNode : objectMapper.createObjectNode();
     }
 

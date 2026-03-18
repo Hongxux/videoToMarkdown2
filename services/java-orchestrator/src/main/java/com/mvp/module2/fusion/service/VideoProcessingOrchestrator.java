@@ -92,6 +92,34 @@ public class VideoProcessingOrchestrator {
         }
     }
 
+    private static class AssetExtractRuntimeWave {
+        final String substageName;
+        final String waveId;
+        final String inputFingerprint;
+        final String substageScopeId;
+        final String chunkScopeId;
+        final String substageScopeRef;
+        final String chunkScopeRef;
+
+        private AssetExtractRuntimeWave(
+                String substageName,
+                String waveId,
+                String inputFingerprint,
+                String substageScopeId,
+                String chunkScopeId,
+                String substageScopeRef,
+                String chunkScopeRef
+        ) {
+            this.substageName = substageName;
+            this.waveId = waveId;
+            this.inputFingerprint = inputFingerprint;
+            this.substageScopeId = substageScopeId;
+            this.chunkScopeId = chunkScopeId;
+            this.substageScopeRef = substageScopeRef;
+            this.chunkScopeRef = chunkScopeRef;
+        }
+    }
+
     private static class ArticleBookSource {
         String requestedUrl;
         String finalUrl;
@@ -137,6 +165,12 @@ public class VideoProcessingOrchestrator {
     @Autowired(required = false)
     private StorageTaskCategoryService storageTaskCategoryService;
 
+    @Autowired(required = false)
+    private TaskRuntimeStageStore taskRuntimeStageStore;
+
+    private final AssetExtractRuntimeRepositoryAdapter assetExtractRuntimeRepositoryAdapter =
+            new AssetExtractRuntimeRepositoryAdapter();
+
     private VideoMetaService videoMetaService = new VideoMetaService();
     
     // 运行时任务上下文缓存。
@@ -151,7 +185,7 @@ public class VideoProcessingOrchestrator {
         }
     }
 
-    // LLM pricing (USD / 1M tokens)
+    // LLM pricing fallback (CNY / 1M tokens)
     private static final double QWEN3_VL_PLUS_INPUT_PER_M = 1.50d;
     private static final double QWEN3_VL_PLUS_OUTPUT_PER_M = 4.50d;
     private static final double ERNIE_45_TURBO_VL_INPUT_MIN_PER_M = 0.80d;
@@ -159,8 +193,10 @@ public class VideoProcessingOrchestrator {
     private static final double ERNIE_45_TURBO_VL_OUTPUT_MIN_PER_M = 3.20d;
     private static final double ERNIE_45_TURBO_VL_OUTPUT_MAX_PER_M = 4.50d;
     private static final double DEEPSEEK_CHAT_INPUT_UNCACHED_PER_M = 2.00d;
-    private static final double DEEPSEEK_CHAT_INPUT_CACHED_PER_M = 0.50d;
-    private static final double DEEPSEEK_CHAT_OUTPUT_PER_M = 8.00d;
+    private static final double DEEPSEEK_CHAT_INPUT_CACHED_PER_M = 0.20d;
+    private static final double DEEPSEEK_CHAT_OUTPUT_PER_M = 3.00d;
+    private static final double QWEN_PLUS_INPUT_PER_M = 0.80d;
+    private static final double QWEN_PLUS_OUTPUT_PER_M = 2.00d;
     private static final Pattern BILIBILI_BV_PATTERN =
         Pattern.compile("BV[0-9A-Za-z]{10}", Pattern.CASE_INSENSITIVE);
     private static final Pattern BILIBILI_AV_PATTERN =
@@ -248,6 +284,9 @@ public class VideoProcessingOrchestrator {
         public String metricsVideoTitle;
         public Map<String, Long> stageTimingsMs = new LinkedHashMap<>();
         public Map<String, Object> flowFlags = new LinkedHashMap<>();
+        public String recoveryStartStage;
+        public String phase2aSemanticUnitsPath;
+        public AnalyzeResult phase2aAnalyzeResult;
     }
     
     /**
@@ -293,6 +332,20 @@ public class VideoProcessingOrchestrator {
     }
 
     private ProcessingResult processVideoInternal(String taskId, String videoUrl, String outputDir) {
+        try {
+            IOPhaseResult ioResult = processVideoDownloadPhase(taskId, videoUrl, outputDir);
+            ioResult = processVideoTranscribePhase(taskId, ioResult);
+            ioResult = processVideoStage1Phase(taskId, ioResult);
+            return processVideoLLMPhase(taskId, ioResult);
+        } catch (Exception error) {
+            ProcessingResult failed = new ProcessingResult();
+            failed.taskId = taskId;
+            failed.success = false;
+            failed.errorMessage = normalizeThrowableMessage(error, "Video pipeline failed with unknown throwable");
+            logger.error("Pipeline Failed: {} - {}", taskId, failed.errorMessage, error);
+            return failed;
+        }
+        /*
         ProcessingResult result = new ProcessingResult();
         result.taskId = taskId;
         long startTime = System.currentTimeMillis();
@@ -392,6 +445,7 @@ public class VideoProcessingOrchestrator {
             TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
                 (progress, message) -> updateProgress(taskId, progress, message);
 
+
             updateProgress(taskId, 0.15, "正在进行语音转写...");
             long transcribeStart = System.currentTimeMillis();
             taskProgressWatchdogBridge.resetTask(taskId);
@@ -437,11 +491,13 @@ public class VideoProcessingOrchestrator {
             stageTimingsMs.put("stage1", System.currentTimeMillis() - stage1Start);
 
             updateProgress(taskId, 0.35, "正在进行语义单元分析...");
-            long phase2aStart = System.currentTimeMillis();
+            if (!skipPhase2a) {
+            AnalyzeResult ar = ioResult.phase2aAnalyzeResult;
+            updateProgress(taskId, 0.35, "正在进行语义单元分析...");
+                long phase2aStart = System.currentTimeMillis();
             taskProgressWatchdogBridge.resetTask(taskId);
             TaskProgressWatchdogBridge.MonitorHandle phase2aMonitor =
                 taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2a", taskSignalEmitter);
-            AnalyzeResult ar;
             try {
                 ar = grpcClient.analyzeSemanticUnits(
                     taskId,
@@ -459,6 +515,30 @@ public class VideoProcessingOrchestrator {
                 throw new RuntimeException("Phase2A failed: " + ar.errorMsg);
             }
             stageTimingsMs.put("phase2a_segmentation", System.currentTimeMillis() - phase2aStart);
+            ioResult.phase2aAnalyzeResult = ar;
+            ioResult.phase2aSemanticUnitsPath = firstNonBlank(
+                    ioResult.phase2aSemanticUnitsPath,
+                    resolvePhase2aSemanticUnitsPath(outputDir)
+            );
+            } else {
+                ar = restorePhase2aAnalyzeResult(taskId, ioResult);
+                ioResult.phase2aAnalyzeResult = ar;
+                ioResult.phase2aSemanticUnitsPath = firstNonBlank(
+                        ioResult.phase2aSemanticUnitsPath,
+                        resolvePhase2aSemanticUnitsPath(outputDir)
+                );
+            }
+            ioResult.phase2aAnalyzeResult = ar;
+            ioResult.phase2aSemanticUnitsPath = firstNonBlank(
+                    ioResult.phase2aSemanticUnitsPath,
+                    resolvePhase2aSemanticUnitsPath(outputDir)
+            );
+            AssetExtractStageResult assetExtractStageResult =
+                    executeAssetExtractStage(taskId, ioResult, ar, timeouts, flowFlags);
+            ar = assetExtractStageResult.analyzeResult;
+            usedVLFlow = assetExtractStageResult.usedVLFlow;
+            usedLegacyFlow = assetExtractStageResult.usedLegacyFlow;
+            if (false) {
 
             updateProgress(taskId, 0.40, "正在规划素材提取方案...");
 
@@ -590,7 +670,7 @@ public class VideoProcessingOrchestrator {
                 storageTaskCategoryService.classifyBookTaskIfNeeded(metricsOutputDir);
             }
         }
-        return result;
+        */
     }
 
     public IOPhaseResult processVideoIOPhase(String taskId, String videoUrl, String outputDir) throws Exception {
@@ -855,6 +935,21 @@ public class VideoProcessingOrchestrator {
     }
 
     public ProcessingResult processVideoLLMPhase(String taskId, IOPhaseResult ioResult) {
+        String startStage = ioResult != null ? firstNonBlank(ioResult.recoveryStartStage, "phase2a") : "phase2a";
+        return processVideoPhase2Resume(taskId, ioResult, startStage);
+    }
+
+    public ProcessingResult processVideoFromAssetExtractStage(String taskId, IOPhaseResult ioResult) {
+        return processVideoPhase2Resume(taskId, ioResult, "asset_extract_java");
+    }
+
+    public ProcessingResult processVideoFromPhase2BStage(String taskId, IOPhaseResult ioResult) {
+        return processVideoPhase2Resume(taskId, ioResult, "phase2b");
+    }
+
+    private ProcessingResult processVideoLLMPhaseLegacy(String taskId, IOPhaseResult ioResult) {
+        return processVideoPhase2Resume(taskId, ioResult, "phase2a");
+        /*
         ProcessingResult result = new ProcessingResult();
         result.taskId = taskId;
         if (ioResult == null) {
@@ -874,7 +969,10 @@ public class VideoProcessingOrchestrator {
         boolean usedVLFlow = false;
         boolean usedLegacyFlow = false;
         try {
-            if (ioResult.stage1Result == null || !ioResult.stage1Result.success) {
+            String recoveryStartStage = firstNonBlank(ioResult.recoveryStartStage, "phase2a").toLowerCase(Locale.ROOT);
+            boolean skipPhase2a = "asset_extract_java".equals(recoveryStartStage) || "phase2b".equals(recoveryStartStage);
+            boolean skipAssetExtract = "phase2b".equals(recoveryStartStage);
+            if (!skipAssetExtract && (ioResult.stage1Result == null || !ioResult.stage1Result.success)) {
                 throw new IllegalStateException("Stage1 result is invalid for LLM phase");
             }
 
@@ -892,11 +990,12 @@ public class VideoProcessingOrchestrator {
                 (progress, message) -> updateProgress(taskId, progress, message);
 
             updateProgress(taskId, 0.35, "正在进行语义单元分析...");
-            long phase2aStart = System.currentTimeMillis();
+            if (!skipPhase2a) {
+                long phase2aStart = System.currentTimeMillis();
             taskProgressWatchdogBridge.resetTask(taskId);
             TaskProgressWatchdogBridge.MonitorHandle phase2aMonitor =
                 taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2a", taskSignalEmitter);
-            AnalyzeResult ar;
+            AnalyzeResult ar = ioResult.phase2aAnalyzeResult;
             try {
                 ar = grpcClient.analyzeSemanticUnits(
                     taskId,
@@ -1041,6 +1140,1287 @@ public class VideoProcessingOrchestrator {
             );
         }
         return result;
+        */
+    }
+
+    private ProcessingResult processVideoPhase2Resume(String taskId, IOPhaseResult ioResult, String startStage) {
+        ProcessingResult result = new ProcessingResult();
+        result.taskId = taskId;
+        if (ioResult == null) {
+            result.success = false;
+            result.errorMessage = "IO phase result is required before resumed phase2 stage";
+            return result;
+        }
+
+        Map<String, Long> stageTimingsMs = ioResult.stageTimingsMs != null ? ioResult.stageTimingsMs : new LinkedHashMap<>();
+        Map<String, Object> flowFlags = ioResult.flowFlags != null ? ioResult.flowFlags : new LinkedHashMap<>();
+        long startTime = ioResult.pipelineStartTimeMs > 0 ? ioResult.pipelineStartTimeMs : System.currentTimeMillis();
+        String metricsOutputDir = firstNonBlank(ioResult.metricsOutputDir, ioResult.outputDir);
+        String metricsVideoPath = firstNonBlank(ioResult.metricsVideoPath, ioResult.videoPath);
+        String metricsInputVideoUrl = firstNonBlank(ioResult.metricsInputVideoUrl, ioResult.videoUrl);
+        String metricsVideoTitle = firstNonBlank(ioResult.metricsVideoTitle, "");
+
+        boolean usedVLFlow = false;
+        boolean usedLegacyFlow = false;
+        try {
+            String videoPath = ioResult.videoPath;
+            String outputDir = ioResult.outputDir;
+            double videoDuration = ioResult.videoDuration;
+            DownloadResult downloadResult = ioResult.downloadResult;
+            DynamicTimeoutCalculator.TimeoutConfig timeouts = ioResult.timeouts;
+            if (timeouts == null) {
+                timeouts = timeoutCalculator.calculateTimeouts(Math.max(videoDuration, 1.0d));
+            }
+
+            AnalyzeResult analyzeResult;
+            if ("phase2a".equalsIgnoreCase(startStage)) {
+                if (ioResult.stage1Result == null || !ioResult.stage1Result.success) {
+                    throw new IllegalStateException("Stage1 result is invalid for phase2a resume");
+                }
+                analyzeResult = executePhase2aStage(
+                        taskId,
+                        ioResult,
+                        timeouts,
+                        (progress, message) -> updateProgress(taskId, progress, message)
+                );
+                ioResult.phase2aAnalyzeResult = analyzeResult;
+                ioResult.phase2aSemanticUnitsPath = firstNonBlank(
+                        ioResult.phase2aSemanticUnitsPath,
+                        resolvePhase2aSemanticUnitsPath(outputDir)
+                );
+            } else {
+                analyzeResult = ensurePhase2aAnalyzeResult(taskId, ioResult);
+            }
+            if (!"phase2b".equalsIgnoreCase(startStage)) {
+                AssetExtractStageResult assetExtractStageResult =
+                        executeAssetExtractStage(taskId, ioResult, analyzeResult, timeouts, flowFlags);
+                analyzeResult = assetExtractStageResult.analyzeResult;
+                usedVLFlow = assetExtractStageResult.usedVLFlow;
+                usedLegacyFlow = assetExtractStageResult.usedLegacyFlow;
+            }
+            updateProgress(taskId, 0.90, "正在组装富文本与 Markdown...");
+            long assembleStart = System.currentTimeMillis();
+            String title = resolveDocumentTitle(downloadResult, outputDir, videoPath);
+            metricsVideoTitle = title;
+            TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
+                    (progress, message) -> updateProgress(taskId, progress, message);
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle phase2bMonitor =
+                    taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2b", taskSignalEmitter);
+            AssembleResult assembleRes;
+            try {
+                assembleRes = grpcClient.assembleRichText(
+                        taskId,
+                        videoPath,
+                        analyzeResult,
+                        outputDir + "/assets",
+                        outputDir + "/assets",
+                        outputDir,
+                        title,
+                        timeouts.getPhase2bTimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, phase2bMonitor, taskSignalEmitter);
+            }
+
+            if (!assembleRes.success) {
+                throw new RuntimeException("Assemble failed: " + assembleRes.errorMsg);
+            }
+            stageTimingsMs.put("phase2b_assemble", System.currentTimeMillis() - assembleStart);
+
+            result.success = true;
+            result.markdownPath = assembleRes.markdownPath;
+            result.jsonPath = assembleRes.jsonPath;
+            result.cleanupSourcePath = ioResult.cleanupSourcePath;
+            persistTaskTocMetadata(outputDir, "video", List.of());
+
+            flowFlags.put("downloaded_from_url", ioResult.downloadedFromUrl);
+            if (downloadResult != null) {
+                flowFlags.put("download_content_type", firstNonBlank(downloadResult.contentType, "unknown"));
+                flowFlags.put("download_source_platform", firstNonBlank(downloadResult.sourcePlatform, "unknown"));
+            }
+            flowFlags.put("used_vl_flow", usedVLFlow);
+            flowFlags.put("used_legacy_flow", usedLegacyFlow);
+        } catch (Throwable e) {
+            String normalizedError = normalizeThrowableMessage(e, "Resumed video phase2 failed with unknown throwable");
+            logger.error("Pipeline resumed phase2 failed: {} - {}", taskId, normalizedError, e);
+            result.success = false;
+            result.errorMessage = normalizedError;
+            flowFlags.putIfAbsent("downloaded_from_url", ioResult.downloadedFromUrl);
+            flowFlags.putIfAbsent("used_vl_flow", false);
+            flowFlags.putIfAbsent("used_legacy_flow", false);
+        } finally {
+            result.processingTimeMs = System.currentTimeMillis() - startTime;
+            stageTimingsMs.put("total_pipeline", result.processingTimeMs);
+            writeTaskMetricsReport(
+                    taskId,
+                    metricsOutputDir,
+                    metricsVideoPath,
+                    metricsInputVideoUrl,
+                    metricsVideoTitle,
+                    result,
+                    stageTimingsMs,
+                    flowFlags
+            );
+        }
+        return result;
+    }
+
+    private AnalyzeResult executePhase2aStage(
+            String taskId,
+            IOPhaseResult ioResult,
+            DynamicTimeoutCalculator.TimeoutConfig timeouts,
+            TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter
+    ) throws Exception {
+        String outputDir = ioResult.outputDir;
+        Stage1Result stage1Result = ioResult.stage1Result;
+        updateProgress(taskId, 0.35, "正在进行语义单元分析...");
+        long phase2aStart = System.currentTimeMillis();
+        taskProgressWatchdogBridge.resetTask(taskId);
+        TaskProgressWatchdogBridge.MonitorHandle phase2aMonitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2a", taskSignalEmitter);
+        AnalyzeResult analyzeResult;
+        try {
+            analyzeResult = grpcClient.analyzeSemanticUnits(
+                    taskId,
+                    ioResult.videoPath,
+                    stage1Result.step2JsonPath,
+                    stage1Result.step6JsonPath,
+                    stage1Result.sentenceTimestampsPath,
+                    outputDir,
+                    timeouts.getPhase2aTimeoutSec()
+            );
+        } finally {
+            taskProgressWatchdogBridge.stopMonitor(taskId, phase2aMonitor, taskSignalEmitter);
+        }
+        if (!analyzeResult.success) {
+            throw new RuntimeException("Phase2A failed: " + analyzeResult.errorMsg);
+        }
+        ioResult.stageTimingsMs.put("phase2a_segmentation", System.currentTimeMillis() - phase2aStart);
+        return analyzeResult;
+    }
+
+    private AnalyzeResult ensurePhase2aAnalyzeResult(String taskId, IOPhaseResult ioResult) throws Exception {
+        if (ioResult != null && ioResult.phase2aAnalyzeResult != null) {
+            return ioResult.phase2aAnalyzeResult;
+        }
+        String outputDir = ioResult != null ? firstNonBlank(ioResult.outputDir, "") : "";
+        String semanticUnitsPath = "";
+        if (ioResult != null) {
+            semanticUnitsPath = firstNonBlank(
+                    ioResult.phase2aSemanticUnitsPath,
+                    resolvePhase2aSemanticUnitsPath(outputDir)
+            );
+        }
+        if (semanticUnitsPath.isBlank()) {
+            throw new IllegalStateException("phase2a semantic units path is required before asset extract / phase2b resume");
+        }
+        JsonNode rootNode = loadPhase2aSemanticUnitsRootNode(outputDir, semanticUnitsPath);
+        AnalyzeResult analyzeResult = new AnalyzeResult();
+        analyzeResult.success = true;
+        analyzeResult.errorMsg = "";
+        analyzeResult.semanticUnitsInline = buildSemanticUnitsInlineDTO(rootNode, extractSemanticUnitNodes(rootNode).size());
+        if (analyzeResult.semanticUnitsInline == null) {
+            throw new IllegalStateException("failed to rebuild semantic_units_inline from " + semanticUnitsPath);
+        }
+        if (ioResult != null) {
+            ioResult.phase2aAnalyzeResult = analyzeResult;
+            ioResult.phase2aSemanticUnitsPath = semanticUnitsPath;
+        }
+        logger.info("[{}] Restored Phase2A semantic units for resume: {}", taskId, semanticUnitsPath);
+        return analyzeResult;
+    }
+
+    private JsonNode loadPhase2aSemanticUnitsRootNode(String outputDir, String semanticUnitsPath) throws Exception {
+        if (StringUtils.hasText(semanticUnitsPath)) {
+            try {
+                Path normalizedPath = Paths.get(semanticUnitsPath).toAbsolutePath().normalize();
+                if (Files.isRegularFile(normalizedPath)) {
+                    return objectMapper.readTree(Files.readAllBytes(normalizedPath));
+                }
+            } catch (InvalidPathException ignored) {
+                // 路径可能是虚拟恢复路径，此时继续回退到任务内 SQLite。
+            }
+        }
+        if (taskRuntimeStageStore == null || !StringUtils.hasText(outputDir)) {
+            throw new IllegalStateException("phase2a semantic units artifact unavailable: " + semanticUnitsPath);
+        }
+        Map<String, Object> artifactPayload = taskRuntimeStageStore.loadProjectionPayload(outputDir, "phase2a", "semantic_units");
+        if (artifactPayload.isEmpty()) {
+            throw new IllegalStateException("phase2a semantic units artifact unavailable: " + semanticUnitsPath);
+        }
+        return objectMapper.valueToTree(artifactPayload);
+    }
+
+    private String resolvePhase2aSemanticUnitsPath(String outputDir) {
+        if (outputDir == null || outputDir.isBlank()) {
+            return "";
+        }
+        List<Path> candidates = List.of(
+                Paths.get(outputDir, "intermediates", "stages", "phase2a", "outputs", "semantic_units.json"),
+                Paths.get(outputDir, "semantic_units_phase2a.json"),
+                Paths.get(outputDir, "intermediates", "semantic_units_phase2a.json")
+        );
+        for (Path candidate : candidates) {
+            try {
+                Path normalized = candidate.toAbsolutePath().normalize();
+                if (Files.isRegularFile(normalized)) {
+                    return normalized.toString();
+                }
+            } catch (Exception ignored) {
+                // noop
+            }
+        }
+        if (taskRuntimeStageStore != null && taskRuntimeStageStore.hasProjectionPayload(outputDir, "phase2a", "semantic_units")) {
+            return Paths.get(outputDir, "intermediates", "stages", "phase2a", "outputs", "semantic_units.json")
+                    .toAbsolutePath()
+                    .normalize()
+                    .toString();
+        }
+        return "";
+    }
+
+    private AssetExtractStageResult executeAssetExtractStage(
+            String taskId,
+            IOPhaseResult ioResult,
+            AnalyzeResult analyzeResult,
+            DynamicTimeoutCalculator.TimeoutConfig timeouts,
+            Map<String, Object> flowFlags
+    ) throws Exception {
+        String videoPath = ioResult.videoPath;
+        String outputDir = ioResult.outputDir;
+        double videoDuration = ioResult.videoDuration;
+        Stage1Result stage1Result = ioResult.stage1Result;
+        if (stage1Result == null || !stage1Result.success) {
+            throw new IllegalStateException("Stage1 result is invalid for asset_extract_java stage");
+        }
+        if (taskRuntimeStageStore != null) {
+            taskRuntimeStageStore.resetRunningScopesToPlanned(outputDir, "asset_extract_java", "substage", "runtime_context_lost");
+            taskRuntimeStageStore.resetRunningScopesToPlanned(outputDir, "asset_extract_java", "chunk", "runtime_context_lost");
+        }
+
+        Map<String, Object> basePayload = new LinkedHashMap<>();
+        basePayload.put("video_path", videoPath);
+        basePayload.put("output_dir", outputDir);
+        basePayload.put("phase2a_semantic_units_path", firstNonBlank(ioResult.phase2aSemanticUnitsPath, ""));
+        writeAssetExtractStageCheckpoint(outputDir, taskId, "RUNNING", "asset_extract_prepare", 0, 3, basePayload);
+
+        updateProgress(taskId, 0.40, "正在规划素材提取方案...");
+        ExtractionRequests materialRequests = null;
+        long analysisTotalStart = System.currentTimeMillis();
+        boolean usedVLFlow = false;
+        boolean usedLegacyFlow = false;
+        int stageCompleted = 0;
+        int stagePending = 3;
+        Integer currentTimeoutSec = null;
+        AssetExtractRuntimeWave materialPlanWave = null;
+        AssetExtractRuntimeWave extractionWave = null;
+        AssetExtractRuntimeWave outputsFinalizeWave = null;
+        Map<String, Object> materialPlanContext = new LinkedHashMap<>();
+        int materialPlanAttempt = 0;
+        int extractionAttempt = 0;
+        int outputsFinalizeAttempt = 0;
+        Map<String, Object> restoredMaterialPlanPayload = new LinkedHashMap<>();
+        Map<String, Object> restoredExtractionPayload = new LinkedHashMap<>();
+        Map<String, Object> restoredOutputsPayload = new LinkedHashMap<>();
+
+        assetExtractRuntimeRepositoryAdapter.rebuildFromStore(
+                outputDir,
+                taskId,
+                videoPath,
+                firstNonBlank(ioResult.phase2aSemanticUnitsPath, ""),
+                taskRuntimeStageStore
+        );
+
+        boolean vlEnabled = configService.isVLEnabled();
+        flowFlags.put("vl_enabled", vlEnabled);
+        materialPlanContext.put("video_path", videoPath);
+        materialPlanContext.put("phase2a_semantic_units_path", firstNonBlank(ioResult.phase2aSemanticUnitsPath, ""));
+        materialPlanContext.put("vl_enabled", vlEnabled);
+        materialPlanWave = planAssetExtractRuntimeWave(
+                outputDir,
+                "material_request_plan",
+                "wave_0001",
+                buildStablePayloadHash(materialPlanContext),
+                List.of(),
+                materialPlanContext
+        );
+        if (taskRuntimeStageStore != null) {
+            restoredMaterialPlanPayload = taskRuntimeStageStore.loadCommittedChunkPayload(
+                    outputDir,
+                    "asset_extract_java",
+                    materialPlanWave.chunkScopeId,
+                    materialPlanWave.inputFingerprint
+            );
+        }
+        if (!restoredMaterialPlanPayload.isEmpty()) {
+            materialRequests = restoreExtractionRequests(restoredMaterialPlanPayload);
+            if (materialRequests == null) {
+                restoredMaterialPlanPayload = new LinkedHashMap<>();
+            }
+        }
+        if (!restoredMaterialPlanPayload.isEmpty()) {
+            String restoredMaterialSource = String.valueOf(restoredMaterialPlanPayload.getOrDefault("material_source", ""));
+            usedVLFlow = "vl".equalsIgnoreCase(restoredMaterialSource);
+            usedLegacyFlow = "legacy".equalsIgnoreCase(restoredMaterialSource);
+            ioResult.stageTimingsMs.put("analysis_vl", 0L);
+            ioResult.stageTimingsMs.put("analysis_legacy", 0L);
+            ioResult.stageTimingsMs.put("analysis_total", 0L);
+            assetExtractRuntimeRepositoryAdapter.markMaterialRequestsReady(
+                    outputDir,
+                    restoredMaterialSource,
+                    safeInt(restoredMaterialPlanPayload.get("screenshot_count"), materialRequests != null ? materialRequests.screenshotRequests.size() : 0),
+                    safeInt(restoredMaterialPlanPayload.get("clip_count"), materialRequests != null ? materialRequests.clipRequests.size() : 0),
+                    false
+            );
+        } else if (taskRuntimeStageStore != null) {
+            materialPlanAttempt = taskRuntimeStageStore.loadLatestChunkAttempt(
+                    outputDir,
+                    "asset_extract_java",
+                    materialPlanWave.chunkScopeId
+            ) + 1;
+            taskRuntimeStageStore.recordChunkState(
+                    outputDir,
+                    "asset_extract_java",
+                    materialPlanWave.chunkScopeId,
+                    materialPlanWave.inputFingerprint,
+                    materialPlanAttempt,
+                    Map.of(
+                            "status", "RUNNING",
+                            "stage_step", materialPlanWave.substageName,
+                            "updated_at_ms", System.currentTimeMillis()
+                    )
+            );
+        }
+        if (restoredMaterialPlanPayload.isEmpty()) {
+        transitionAssetExtractRuntimeWave(
+                outputDir,
+                materialPlanWave,
+                "RUNNING",
+                materialPlanContext,
+                null,
+                Map.of("attempt_count", materialPlanAttempt)
+        );
+        try {
+            long vlAnalysisStart = System.currentTimeMillis();
+        if (vlEnabled) {
+            materialRequests = tryVLAnalysis(taskId, videoPath, analyzeResult, outputDir, timeouts);
+            if (materialRequests != null) {
+                usedVLFlow = true;
+            } else {
+                logger.warn("[{}] Proceeding to Legacy Flow (Fallback or VL failed).", taskId);
+            }
+        } else {
+            logger.info("[{}] VL disabled in config.", taskId);
+        }
+        ioResult.stageTimingsMs.put("analysis_vl", System.currentTimeMillis() - vlAnalysisStart);
+
+        long legacyAnalysisStart = System.currentTimeMillis();
+        if (materialRequests == null) {
+            updateProgress(taskId, 0.45, "正在执行回退分析流程...");
+            materialRequests = runLegacyAnalysis(taskId, videoPath, analyzeResult, stage1Result, outputDir, timeouts);
+            usedLegacyFlow = true;
+        }
+        ioResult.stageTimingsMs.put("analysis_legacy", System.currentTimeMillis() - legacyAnalysisStart);
+            ioResult.stageTimingsMs.put("analysis_total", System.currentTimeMillis() - analysisTotalStart);
+        } catch (Exception error) {
+            String scopeFailureStatus = classifyAssetExtractScopeFailureStatus(error);
+            Map<String, Object> failureResourceSnapshot = buildAssetExtractResourceSnapshot(
+                    flowFlags,
+                    materialPlanWave != null ? materialPlanWave.substageName : "material_request_plan",
+                    null,
+                    Map.of("video_duration_sec", videoDuration)
+            );
+            Map<String, Object> failureScopePayload = buildAssetExtractFailureScopePayload(
+                    error,
+                    materialPlanContext,
+                    failureResourceSnapshot,
+                    scopeFailureStatus
+            );
+            transitionAssetExtractRuntimeWave(
+                    outputDir,
+                    materialPlanWave,
+                    scopeFailureStatus,
+                    materialPlanContext,
+                    failureResourceSnapshot,
+                    mergeAttemptPayload(failureScopePayload, materialPlanAttempt)
+            );
+            if (taskRuntimeStageStore != null && materialPlanWave != null && materialPlanAttempt > 0) {
+                taskRuntimeStageStore.failChunkPayload(
+                        outputDir,
+                        "asset_extract_java",
+                        materialPlanWave.chunkScopeId,
+                        materialPlanWave.inputFingerprint,
+                        materialPlanAttempt,
+                        mergeAttemptPayload(
+                                failureScopePayload,
+                                materialPlanAttempt,
+                                Map.of(
+                                        "status", scopeFailureStatus,
+                                        "stage_step", materialPlanWave.substageName,
+                                        "updated_at_ms", System.currentTimeMillis()
+                                )
+                        )
+                );
+            }
+            assetExtractRuntimeRepositoryAdapter.markFailed(
+                    outputDir,
+                    materialPlanWave != null ? materialPlanWave.substageName : "material_request_plan",
+                    scopeFailureStatus,
+                    String.valueOf(failureScopePayload.getOrDefault("error_message", "asset extract failed"))
+            );
+            Map<String, Object> failedPayload = new LinkedHashMap<>(basePayload);
+            failedPayload.put("failed_substage", materialPlanWave != null ? materialPlanWave.substageName : "material_request_plan");
+            failedPayload.put("error_class", failureScopePayload.getOrDefault("error_class", ""));
+            failedPayload.put("error_code", failureScopePayload.getOrDefault("error_code", ""));
+            failedPayload.put("error_message", failureScopePayload.getOrDefault("error_message", normalizeThrowableMessage(error, "asset extract failed")));
+            failedPayload.put("required_action", failureScopePayload.getOrDefault("required_action", ""));
+            failedPayload.put("retry_mode", failureScopePayload.getOrDefault("retry_mode", ""));
+            failedPayload.put("retry_entry_point", failureScopePayload.getOrDefault("retry_entry_point", ""));
+            writeAssetExtractStageCheckpoint(outputDir, taskId, "MANUAL_NEEDED", "asset_extract_failed", stageCompleted, stagePending, failedPayload);
+            throw error;
+        }
+        } else {
+            materialRequests = restoreExtractionRequests(restoredMaterialPlanPayload);
+        }
+
+        Map<String, Object> materialResultPayload = new LinkedHashMap<>();
+        materialResultPayload.put("screenshot_count", materialRequests.screenshotRequests.size());
+        materialResultPayload.put("clip_count", materialRequests.clipRequests.size());
+        materialResultPayload.put("material_source", usedVLFlow ? "vl" : "legacy");
+        materialResultPayload.put("has_inflight_extraction", materialRequests.extractionFuture != null);
+        materialResultPayload.put("screenshot_requests", buildScreenshotRequestPayload(materialRequests.screenshotRequests));
+        materialResultPayload.put("clip_requests", buildClipRequestPayload(materialRequests.clipRequests));
+        transitionAssetExtractRuntimeWave(
+                outputDir,
+                materialPlanWave,
+                "SUCCESS",
+                materialPlanContext,
+                null,
+                Map.of(
+                        "result_hash", buildStablePayloadHash(materialResultPayload),
+                        "attempt_count", materialPlanAttempt
+                )
+        );
+        if (taskRuntimeStageStore != null && materialPlanWave != null && materialPlanAttempt > 0) {
+            taskRuntimeStageStore.commitChunkPayload(
+                    outputDir,
+                    "asset_extract_java",
+                    materialPlanWave.chunkScopeId,
+                    materialPlanWave.inputFingerprint,
+                    materialPlanAttempt,
+                    Map.of(
+                            "status", "SUCCESS",
+                            "stage_step", materialPlanWave.substageName,
+                            "result_hash", buildStablePayloadHash(materialResultPayload),
+                            "updated_at_ms", System.currentTimeMillis(),
+                            "committed_at_ms", System.currentTimeMillis()
+                    ),
+                    materialResultPayload
+            );
+        }
+        assetExtractRuntimeRepositoryAdapter.markMaterialRequestsReady(
+                outputDir,
+                usedVLFlow ? "vl" : "legacy",
+                materialRequests.screenshotRequests.size(),
+                materialRequests.clipRequests.size(),
+                materialRequests.extractionFuture != null
+        );
+        Map<String, Object> readyPayload = new LinkedHashMap<>(basePayload);
+        readyPayload.putAll(materialResultPayload);
+        stageCompleted = 1;
+        stagePending = 2;
+        writeAssetExtractStageCheckpoint(outputDir, taskId, "RUNNING", "material_requests_ready", stageCompleted, stagePending, readyPayload);
+
+        updateProgress(taskId, 0.80, "正在提取截图与片段素材...");
+        long extractionStart = System.currentTimeMillis();
+        int ffmpegTimeoutSec = calculateFfmpegTimeoutSec(taskId, videoDuration, materialRequests, timeouts);
+        currentTimeoutSec = ffmpegTimeoutSec;
+        Map<String, Object> extractionPlanContext = new LinkedHashMap<>(materialResultPayload);
+        extractionPlanContext.put("video_path", videoPath);
+        extractionPlanContext.put("ffmpeg_timeout_sec", ffmpegTimeoutSec);
+        extractionPlanContext.put("has_inflight_extraction", materialRequests.extractionFuture != null);
+        extractionWave = planAssetExtractRuntimeWave(
+                outputDir,
+                "asset_extraction",
+                "wave_0001",
+                buildStablePayloadHash(extractionPlanContext),
+                List.of(materialPlanWave.substageScopeRef),
+                extractionPlanContext
+        );
+        if (taskRuntimeStageStore != null) {
+            restoredExtractionPayload = taskRuntimeStageStore.loadCommittedChunkPayload(
+                    outputDir,
+                    "asset_extract_java",
+                    extractionWave.chunkScopeId,
+                    extractionWave.inputFingerprint
+            );
+        }
+        if (!restoredExtractionPayload.isEmpty()) {
+            JavaCVFFmpegService.ExtractionResult restoredExtractionResult =
+                    restoreExtractionResult(restoredExtractionPayload, outputDir);
+            if (restoredExtractionResult == null) {
+                restoredExtractionPayload = new LinkedHashMap<>();
+            } else {
+                assetExtractRuntimeRepositoryAdapter.markExtractionResult(
+                        outputDir,
+                        restoredExtractionResult
+                );
+            }
+        } else if (taskRuntimeStageStore != null) {
+            extractionAttempt = taskRuntimeStageStore.loadLatestChunkAttempt(
+                    outputDir,
+                    "asset_extract_java",
+                    extractionWave.chunkScopeId
+            ) + 1;
+            taskRuntimeStageStore.recordChunkState(
+                    outputDir,
+                    "asset_extract_java",
+                    extractionWave.chunkScopeId,
+                    extractionWave.inputFingerprint,
+                    extractionAttempt,
+                    Map.of(
+                            "status", "RUNNING",
+                            "stage_step", extractionWave.substageName,
+                            "updated_at_ms", System.currentTimeMillis()
+                    )
+            );
+        }
+        JavaCVFFmpegService.ExtractionResult extractRes;
+        if (restoredExtractionPayload.isEmpty()) {
+            transitionAssetExtractRuntimeWave(
+                    outputDir,
+                    extractionWave,
+                    "RUNNING",
+                    extractionPlanContext,
+                    null,
+                    Map.of("attempt_count", extractionAttempt)
+            );
+            assetExtractRuntimeRepositoryAdapter.markExtractionRunning(
+                    outputDir,
+                    extractionAttempt,
+                    ffmpegTimeoutSec
+            );
+            Map<String, Object> extractionCheckpointPayload = new LinkedHashMap<>(readyPayload);
+            extractionCheckpointPayload.put("ffmpeg_timeout_sec", ffmpegTimeoutSec);
+            writeAssetExtractStageCheckpoint(
+                    outputDir,
+                    taskId,
+                    "RUNNING",
+                    "asset_extraction_running",
+                    stageCompleted,
+                    stagePending,
+                    extractionCheckpointPayload
+            );
+            try {
+                if (materialRequests.extractionFuture == null) {
+                    materialRequests = startExtractionPipeline(
+                            taskId,
+                            videoPath,
+                            outputDir,
+                            materialRequests.screenshotRequests,
+                            materialRequests.clipRequests,
+                            ffmpegTimeoutSec
+                    );
+                }
+                if (materialRequests.extractionFuture != null) {
+                    logger.info("[{}] Reusing in-flight extraction future (producer-consumer path)", taskId);
+                    extractRes = materialRequests.extractionFuture
+                            .orTimeout(ffmpegTimeoutSec, TimeUnit.SECONDS)
+                            .join();
+                } else {
+                    extractRes = ffmpegService.extractAllSync(
+                            videoPath,
+                            outputDir,
+                            materialRequests.screenshotRequests,
+                            materialRequests.clipRequests,
+                            ffmpegTimeoutSec
+                    );
+                }
+            } catch (Exception error) {
+                String scopeFailureStatus = classifyAssetExtractScopeFailureStatus(error);
+                Map<String, Object> failureResourceSnapshot = buildAssetExtractResourceSnapshot(
+                        flowFlags,
+                        extractionWave != null ? extractionWave.substageName : "asset_extraction",
+                        currentTimeoutSec,
+                        Map.of("video_duration_sec", videoDuration)
+                );
+                Map<String, Object> failureScopePayload = buildAssetExtractFailureScopePayload(
+                        error,
+                        extractionPlanContext,
+                        failureResourceSnapshot,
+                        scopeFailureStatus
+                );
+                transitionAssetExtractRuntimeWave(
+                        outputDir,
+                        extractionWave,
+                        scopeFailureStatus,
+                        extractionPlanContext,
+                        failureResourceSnapshot,
+                        mergeAttemptPayload(failureScopePayload, extractionAttempt)
+                );
+                if (taskRuntimeStageStore != null && extractionWave != null && extractionAttempt > 0) {
+                    taskRuntimeStageStore.failChunkPayload(
+                            outputDir,
+                            "asset_extract_java",
+                            extractionWave.chunkScopeId,
+                            extractionWave.inputFingerprint,
+                            extractionAttempt,
+                            mergeAttemptPayload(
+                                    failureScopePayload,
+                                    extractionAttempt,
+                                    Map.of(
+                                            "status", scopeFailureStatus,
+                                            "stage_step", extractionWave.substageName,
+                                            "updated_at_ms", System.currentTimeMillis()
+                                    )
+                            )
+                    );
+                }
+                assetExtractRuntimeRepositoryAdapter.markFailed(
+                        outputDir,
+                        extractionWave != null ? extractionWave.substageName : "asset_extraction",
+                        scopeFailureStatus,
+                        String.valueOf(failureScopePayload.getOrDefault("error_message", "asset extract failed"))
+                );
+                Map<String, Object> failedPayload = new LinkedHashMap<>(readyPayload);
+                failedPayload.put("failed_substage", extractionWave != null ? extractionWave.substageName : "asset_extraction");
+                failedPayload.put("error_class", failureScopePayload.getOrDefault("error_class", ""));
+                failedPayload.put("error_code", failureScopePayload.getOrDefault("error_code", ""));
+                failedPayload.put("error_message", failureScopePayload.getOrDefault("error_message", normalizeThrowableMessage(error, "asset extract failed")));
+                failedPayload.put("required_action", failureScopePayload.getOrDefault("required_action", ""));
+                failedPayload.put("retry_mode", failureScopePayload.getOrDefault("retry_mode", ""));
+                failedPayload.put("retry_entry_point", failureScopePayload.getOrDefault("retry_entry_point", ""));
+                if (currentTimeoutSec != null) {
+                    failedPayload.put("ffmpeg_timeout_sec", currentTimeoutSec);
+                }
+                writeAssetExtractStageCheckpoint(outputDir, taskId, "MANUAL_NEEDED", "asset_extract_failed", stageCompleted, stagePending, failedPayload);
+                throw error;
+            }
+            ioResult.stageTimingsMs.put("extract_assets", System.currentTimeMillis() - extractionStart);
+        } else {
+            extractRes = restoreExtractionResult(restoredExtractionPayload, outputDir);
+            ioResult.stageTimingsMs.put("extract_assets", 0L);
+        }
+        Map<String, Object> extractionResultPayload = new LinkedHashMap<>();
+        extractionResultPayload.put("assets_dir", firstNonBlank(extractRes.screenshotsDir, outputDir + "/assets"));
+        extractionResultPayload.put("screenshots_dir", firstNonBlank(extractRes.screenshotsDir, outputDir + "/assets"));
+        extractionResultPayload.put("clips_dir", firstNonBlank(extractRes.clipsDir, outputDir + "/assets"));
+        extractionResultPayload.put("successful_screenshots", extractRes.successfulScreenshots);
+        extractionResultPayload.put("successful_clips", extractRes.successfulClips);
+        extractionResultPayload.put("error_count", extractRes.errors != null ? extractRes.errors.size() : 0);
+        extractionResultPayload.put("errors", extractRes.errors != null ? extractRes.errors : List.of());
+        extractionResultPayload.put("elapsed_ms", extractRes.elapsedMs);
+        transitionAssetExtractRuntimeWave(
+                outputDir,
+                extractionWave,
+                "SUCCESS",
+                extractionPlanContext,
+                null,
+                Map.of(
+                        "result_hash", buildStablePayloadHash(extractionResultPayload),
+                        "attempt_count", extractionAttempt
+                )
+        );
+        if (taskRuntimeStageStore != null && extractionWave != null && extractionAttempt > 0) {
+            taskRuntimeStageStore.commitChunkPayload(
+                    outputDir,
+                    "asset_extract_java",
+                    extractionWave.chunkScopeId,
+                    extractionWave.inputFingerprint,
+                    extractionAttempt,
+                    Map.of(
+                            "status", "SUCCESS",
+                            "stage_step", extractionWave.substageName,
+                            "result_hash", buildStablePayloadHash(extractionResultPayload),
+                            "updated_at_ms", System.currentTimeMillis(),
+                            "committed_at_ms", System.currentTimeMillis()
+                    ),
+                    extractionResultPayload
+            );
+        }
+        assetExtractRuntimeRepositoryAdapter.markExtractionResult(outputDir, extractRes);
+        stageCompleted = 2;
+        stagePending = 1;
+
+        try {
+            Map<String, Object> outputsManifestPayload = new LinkedHashMap<>(readyPayload);
+            outputsManifestPayload.putAll(extractionResultPayload);
+            outputsManifestPayload.put("errors", extractRes.errors != null ? extractRes.errors : List.of());
+            Map<String, Object> outputsFinalizePlanContext = new LinkedHashMap<>(extractionResultPayload);
+            outputsFinalizePlanContext.put("material_source", usedVLFlow ? "vl" : "legacy");
+            outputsFinalizeWave = planAssetExtractRuntimeWave(
+                    outputDir,
+                    "outputs_finalize",
+                    "wave_0001",
+                    buildStablePayloadHash(outputsFinalizePlanContext),
+                    List.of(extractionWave.substageScopeRef),
+                    outputsFinalizePlanContext
+            );
+            if (taskRuntimeStageStore != null) {
+                restoredOutputsPayload = taskRuntimeStageStore.loadCommittedChunkPayload(
+                        outputDir,
+                        "asset_extract_java",
+                        outputsFinalizeWave.chunkScopeId,
+                        outputsFinalizeWave.inputFingerprint
+                );
+            }
+            if (!restoredOutputsPayload.isEmpty()) {
+                assetExtractRuntimeRepositoryAdapter.markOutputsReady(
+                        outputDir,
+                        restoreExtractionResult(restoredOutputsPayload, outputDir)
+                );
+                writeAssetExtractStageCheckpoint(outputDir, taskId, "SUCCESS", "outputs_ready", 3, 0, restoredOutputsPayload);
+            } else if (taskRuntimeStageStore != null) {
+                outputsFinalizeAttempt = taskRuntimeStageStore.loadLatestChunkAttempt(
+                        outputDir,
+                        "asset_extract_java",
+                        outputsFinalizeWave.chunkScopeId
+                ) + 1;
+                taskRuntimeStageStore.recordChunkState(
+                        outputDir,
+                        "asset_extract_java",
+                        outputsFinalizeWave.chunkScopeId,
+                        outputsFinalizeWave.inputFingerprint,
+                        outputsFinalizeAttempt,
+                        Map.of(
+                                "status", "RUNNING",
+                                "stage_step", outputsFinalizeWave.substageName,
+                                "updated_at_ms", System.currentTimeMillis()
+                        )
+                );
+            }
+            if (restoredOutputsPayload.isEmpty()) {
+                transitionAssetExtractRuntimeWave(
+                        outputDir,
+                        outputsFinalizeWave,
+                        "RUNNING",
+                        outputsFinalizePlanContext,
+                        null,
+                        Map.of("attempt_count", outputsFinalizeAttempt)
+                );
+                writeAssetExtractStageCheckpoint(outputDir, taskId, "RUNNING", "outputs_finalizing", stageCompleted, stagePending, outputsManifestPayload);
+                Map<String, Object> completedPayload = new LinkedHashMap<>(outputsManifestPayload);
+                transitionAssetExtractRuntimeWave(
+                        outputDir,
+                        outputsFinalizeWave,
+                        "SUCCESS",
+                        outputsFinalizePlanContext,
+                        null,
+                        Map.of(
+                                "result_hash", buildStablePayloadHash(completedPayload),
+                                "attempt_count", outputsFinalizeAttempt
+                        )
+                );
+                if (taskRuntimeStageStore != null && outputsFinalizeWave != null && outputsFinalizeAttempt > 0) {
+                    taskRuntimeStageStore.commitChunkPayload(
+                            outputDir,
+                            "asset_extract_java",
+                            outputsFinalizeWave.chunkScopeId,
+                            outputsFinalizeWave.inputFingerprint,
+                            outputsFinalizeAttempt,
+                            Map.of(
+                                    "status", "SUCCESS",
+                                    "stage_step", outputsFinalizeWave.substageName,
+                                    "result_hash", buildStablePayloadHash(completedPayload),
+                                    "updated_at_ms", System.currentTimeMillis(),
+                                    "committed_at_ms", System.currentTimeMillis()
+                            ),
+                            completedPayload
+                    );
+                }
+                assetExtractRuntimeRepositoryAdapter.markOutputsReady(outputDir, extractRes);
+                writeAssetExtractStageCheckpoint(outputDir, taskId, "SUCCESS", "outputs_ready", 3, 0, completedPayload);
+            }
+        } catch (Exception error) {
+            String scopeFailureStatus = classifyAssetExtractScopeFailureStatus(error);
+            Map<String, Object> failureResourceSnapshot = buildAssetExtractResourceSnapshot(
+                    flowFlags,
+                    outputsFinalizeWave != null ? outputsFinalizeWave.substageName : "outputs_finalize",
+                    currentTimeoutSec,
+                    Map.of("video_duration_sec", videoDuration)
+            );
+            Map<String, Object> failureScopePayload = buildAssetExtractFailureScopePayload(
+                    error,
+                    extractionResultPayload,
+                    failureResourceSnapshot,
+                    scopeFailureStatus
+            );
+            transitionAssetExtractRuntimeWave(
+                    outputDir,
+                    outputsFinalizeWave,
+                    scopeFailureStatus,
+                    extractionResultPayload,
+                    failureResourceSnapshot,
+                    mergeAttemptPayload(failureScopePayload, outputsFinalizeAttempt)
+            );
+            if (taskRuntimeStageStore != null && outputsFinalizeWave != null && outputsFinalizeAttempt > 0) {
+                taskRuntimeStageStore.failChunkPayload(
+                        outputDir,
+                        "asset_extract_java",
+                        outputsFinalizeWave.chunkScopeId,
+                        outputsFinalizeWave.inputFingerprint,
+                        outputsFinalizeAttempt,
+                        mergeAttemptPayload(
+                                failureScopePayload,
+                                outputsFinalizeAttempt,
+                                Map.of(
+                                        "status", scopeFailureStatus,
+                                        "stage_step", outputsFinalizeWave.substageName,
+                                        "updated_at_ms", System.currentTimeMillis()
+                                )
+                        )
+                );
+            }
+            assetExtractRuntimeRepositoryAdapter.markFailed(
+                    outputDir,
+                    outputsFinalizeWave != null ? outputsFinalizeWave.substageName : "outputs_finalize",
+                    scopeFailureStatus,
+                    String.valueOf(failureScopePayload.getOrDefault("error_message", "asset extract failed"))
+            );
+            Map<String, Object> failedPayload = new LinkedHashMap<>(basePayload);
+            failedPayload.put("failed_substage", outputsFinalizeWave != null ? outputsFinalizeWave.substageName : "outputs_finalize");
+            failedPayload.put("error_class", failureScopePayload.getOrDefault("error_class", ""));
+            failedPayload.put("error_code", failureScopePayload.getOrDefault("error_code", ""));
+            failedPayload.put("error_message", failureScopePayload.getOrDefault("error_message", normalizeThrowableMessage(error, "asset extract failed")));
+            failedPayload.put("required_action", failureScopePayload.getOrDefault("required_action", ""));
+            failedPayload.put("retry_mode", failureScopePayload.getOrDefault("retry_mode", ""));
+            failedPayload.put("retry_entry_point", failureScopePayload.getOrDefault("retry_entry_point", ""));
+            if (currentTimeoutSec != null) {
+                failedPayload.put("ffmpeg_timeout_sec", currentTimeoutSec);
+            }
+            writeAssetExtractStageCheckpoint(outputDir, taskId, "MANUAL_NEEDED", "asset_extract_failed", stageCompleted, stagePending, failedPayload);
+            throw error;
+        }
+
+        return new AssetExtractStageResult(analyzeResult, usedVLFlow, usedLegacyFlow);
+    }
+
+    private AssetExtractRuntimeWave planAssetExtractRuntimeWave(
+            String outputDir,
+            String substageName,
+            String waveId,
+            String inputFingerprint,
+            List<String> dependsOnScopeRefs,
+            Map<String, Object> planContext
+    ) {
+        String normalizedWaveId = firstNonBlank(waveId, "wave_0001");
+        if (taskRuntimeStageStore == null) {
+            String scopeId = substageName + "." + normalizedWaveId;
+            String scopeRef = "asset_extract_java/substage/" + scopeId;
+            String chunkRef = "asset_extract_java/chunk/" + scopeId;
+            return new AssetExtractRuntimeWave(substageName, normalizedWaveId, inputFingerprint, scopeId, scopeId, scopeRef, chunkRef);
+        }
+        String substageScopeId = taskRuntimeStageStore.buildSubstageScopeId(substageName, normalizedWaveId);
+        String chunkScopeId = substageScopeId;
+        String substageScopeRef = taskRuntimeStageStore.buildSubstageScopeRef("asset_extract_java", substageName, normalizedWaveId);
+        String chunkScopeRef = taskRuntimeStageStore.buildScopeRef("asset_extract_java", "chunk", chunkScopeId);
+        Map<String, Object> substagePayload = new LinkedHashMap<>();
+        substagePayload.put("stage_step", substageName);
+        substagePayload.put("plan_context", new LinkedHashMap<>(planContext != null ? planContext : Map.of()));
+        substagePayload.put("attempt_count", 0);
+        taskRuntimeStageStore.planSubstageScope(
+                outputDir,
+                "asset_extract_java",
+                substageName,
+                normalizedWaveId,
+                inputFingerprint,
+                dependsOnScopeRefs,
+                substagePayload
+        );
+        Map<String, Object> chunkPayload = new LinkedHashMap<>();
+        chunkPayload.put("stage_step", substageName);
+        chunkPayload.put("chunk_id", chunkScopeId);
+        chunkPayload.put("plan_context", new LinkedHashMap<>(planContext != null ? planContext : Map.of()));
+        chunkPayload.put("attempt_count", 0);
+        taskRuntimeStageStore.planScopeNode(
+                outputDir,
+                "asset_extract_java",
+                "chunk",
+                chunkScopeId,
+                "",
+                inputFingerprint,
+                dependsOnScopeRefs,
+                chunkPayload
+        );
+        return new AssetExtractRuntimeWave(
+                substageName,
+                normalizedWaveId,
+                inputFingerprint,
+                substageScopeId,
+                chunkScopeId,
+                substageScopeRef,
+                chunkScopeRef
+        );
+    }
+
+    private void transitionAssetExtractRuntimeWave(
+            String outputDir,
+            AssetExtractRuntimeWave wave,
+            String status,
+            Map<String, Object> planContext,
+            Map<String, Object> resourceSnapshot,
+            Map<String, Object> extraPayload
+    ) {
+        if (taskRuntimeStageStore == null || wave == null) {
+            return;
+        }
+        int attemptCount = 0;
+        if (extraPayload != null && extraPayload.get("attempt_count") != null) {
+            try {
+                attemptCount = Math.max(0, Integer.parseInt(String.valueOf(extraPayload.get("attempt_count"))));
+            } catch (Exception ignored) {
+                attemptCount = 0;
+            }
+        } else if ("RUNNING".equalsIgnoreCase(status)) {
+            attemptCount = 1;
+        }
+        Map<String, Object> substagePayload = new LinkedHashMap<>(extraPayload != null ? extraPayload : Map.of());
+        substagePayload.put("stage_step", wave.substageName);
+        substagePayload.put("attempt_count", attemptCount);
+        substagePayload.put("plan_context", new LinkedHashMap<>(planContext != null ? planContext : Map.of()));
+        if (resourceSnapshot != null && !resourceSnapshot.isEmpty()) {
+            substagePayload.put("resource_snapshot", new LinkedHashMap<>(resourceSnapshot));
+        }
+        taskRuntimeStageStore.transitionScopeNode(
+                outputDir,
+                "asset_extract_java",
+                "substage",
+                wave.substageScopeId,
+                "",
+                status,
+                wave.inputFingerprint,
+                substagePayload
+        );
+
+        Map<String, Object> chunkPayload = new LinkedHashMap<>(extraPayload != null ? extraPayload : Map.of());
+        chunkPayload.put("stage_step", wave.substageName);
+        chunkPayload.put("chunk_id", wave.chunkScopeId);
+        chunkPayload.put("attempt_count", attemptCount);
+        chunkPayload.put("plan_context", new LinkedHashMap<>(planContext != null ? planContext : Map.of()));
+        if (resourceSnapshot != null && !resourceSnapshot.isEmpty()) {
+            chunkPayload.put("resource_snapshot", new LinkedHashMap<>(resourceSnapshot));
+        }
+        taskRuntimeStageStore.transitionScopeNode(
+                outputDir,
+                "asset_extract_java",
+                "chunk",
+                wave.chunkScopeId,
+                "",
+                status,
+                wave.inputFingerprint,
+                chunkPayload
+        );
+    }
+
+    private Map<String, Object> buildAssetExtractFailureScopePayload(
+            Throwable error,
+            Map<String, Object> planContext,
+            Map<String, Object> resourceSnapshot,
+            String status
+    ) {
+        Throwable root = rootCause(error);
+        String normalizedStatus = firstNonBlank(status, "MANUAL_NEEDED").toUpperCase(Locale.ROOT);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("plan_context", new LinkedHashMap<>(planContext != null ? planContext : Map.of()));
+        payload.put("resource_snapshot", new LinkedHashMap<>(resourceSnapshot != null ? resourceSnapshot : Map.of()));
+        payload.put("error_class", root.getClass().getSimpleName());
+        payload.put("error_code", root.getClass().getSimpleName());
+        payload.put("error_message", normalizeThrowableMessage(error, "asset extract failed"));
+        payload.put("retry_mode", "manual");
+        payload.put("retry_entry_point", "from_last_checkpoint");
+        if ("ERROR".equals(normalizedStatus)) {
+            payload.put("required_action", "需要先检查底层依赖、资源状态或超时配置，再从当前子阶段/当前计算单元重试。");
+        } else {
+            payload.put("required_action", "需要人工检查错误上下文后，从当前子阶段/当前计算单元重试。");
+        }
+        return payload;
+    }
+
+    private Map<String, Object> mergeAttemptPayload(
+            Map<String, Object> basePayload,
+            int attemptCount
+    ) {
+        return mergeAttemptPayload(basePayload, attemptCount, Map.of());
+    }
+
+    private Map<String, Object> mergeAttemptPayload(
+            Map<String, Object> basePayload,
+            int attemptCount,
+            Map<String, Object> extraPayload
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>(basePayload != null ? basePayload : Map.of());
+        payload.put("attempt_count", Math.max(0, attemptCount));
+        if (extraPayload != null && !extraPayload.isEmpty()) {
+            payload.putAll(extraPayload);
+        }
+        return payload;
+    }
+
+    private Map<String, Object> buildAssetExtractResourceSnapshot(
+            Map<String, Object> flowFlags,
+            String substageName,
+            Integer ffmpegTimeoutSec,
+            Map<String, Object> extraSnapshot
+    ) {
+        Runtime runtime = Runtime.getRuntime();
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("substage_name", firstNonBlank(substageName, "unknown"));
+        snapshot.put("available_processors", runtime.availableProcessors());
+        snapshot.put("max_memory_bytes", runtime.maxMemory());
+        snapshot.put("total_memory_bytes", runtime.totalMemory());
+        snapshot.put("free_memory_bytes", runtime.freeMemory());
+        if (ffmpegTimeoutSec != null) {
+            snapshot.put("ffmpeg_timeout_sec", ffmpegTimeoutSec);
+        }
+        if (flowFlags != null && !flowFlags.isEmpty()) {
+            snapshot.put("flow_flags", new LinkedHashMap<>(flowFlags));
+        }
+        if (extraSnapshot != null && !extraSnapshot.isEmpty()) {
+            snapshot.putAll(extraSnapshot);
+        }
+        return snapshot;
+    }
+
+    private String classifyAssetExtractScopeFailureStatus(Throwable error) {
+        Throwable root = rootCause(error);
+        String message = normalizeThrowableMessage(root, "").toLowerCase(Locale.ROOT);
+        if (root instanceof OutOfMemoryError
+                || root instanceof TimeoutException
+                || root instanceof RejectedExecutionException
+                || root instanceof IOException
+                || message.contains("outofmemory")
+                || message.contains("oom")) {
+            return "ERROR";
+        }
+        if (root instanceof IllegalArgumentException || root instanceof IllegalStateException) {
+            return "FAILED";
+        }
+        return "MANUAL_NEEDED";
+    }
+
+    private Throwable rootCause(Throwable error) {
+        Throwable cursor = error;
+        int depth = 0;
+        while (cursor != null && cursor.getCause() != null && depth < 16) {
+            cursor = cursor.getCause();
+            depth++;
+        }
+        return cursor != null ? cursor : error;
+    }
+
+    private String buildStablePayloadHash(Object payload) {
+        if (payload == null) {
+            return "";
+        }
+        try {
+            return sha256Hex(objectMapper.writeValueAsBytes(payload));
+        } catch (Exception error) {
+            logger.warn("Failed to hash asset extract payload", error);
+            return "";
+        }
+    }
+
+    private void writeAssetExtractStageCheckpoint(
+            String outputDir,
+            String taskId,
+            String status,
+            String checkpoint,
+            int completed,
+            int pending,
+            Map<String, Object> payload
+    ) {
+        if (taskRuntimeStageStore == null) {
+            return;
+        }
+        taskRuntimeStageStore.writeStageCheckpoint(
+                outputDir,
+                taskId,
+                "asset_extract_java",
+                status,
+                checkpoint,
+                completed,
+                pending,
+                payload
+        );
+    }
+
+    private void appendAssetExtractJournal(String outputDir, Map<String, Object> payload) {
+    }
+
+    private List<Map<String, Object>> buildScreenshotRequestPayload(List<JavaCVFFmpegService.ScreenshotRequest> requests) {
+        List<Map<String, Object>> payload = new ArrayList<>();
+        for (JavaCVFFmpegService.ScreenshotRequest request : requests != null ? requests : List.<JavaCVFFmpegService.ScreenshotRequest>of()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("screenshot_id", request.screenshotId);
+            item.put("timestamp_sec", request.timestampSec);
+            item.put("label", request.label);
+            item.put("semantic_unit_id", request.semanticUnitId);
+            item.put("frame_reason", request.frameReason);
+            payload.add(item);
+        }
+        return payload;
+    }
+
+    private List<Map<String, Object>> buildClipRequestPayload(List<JavaCVFFmpegService.ClipRequest> requests) {
+        List<Map<String, Object>> payload = new ArrayList<>();
+        for (JavaCVFFmpegService.ClipRequest request : requests != null ? requests : List.<JavaCVFFmpegService.ClipRequest>of()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("clip_id", request.clipId);
+            item.put("start_sec", request.startSec);
+            item.put("end_sec", request.endSec);
+            item.put("knowledge_type", request.knowledgeType);
+            item.put("semantic_unit_id", request.semanticUnitId);
+            List<Map<String, Object>> segments = new ArrayList<>();
+            for (JavaCVFFmpegService.ClipSegment segment : request.segments != null ? request.segments : List.<JavaCVFFmpegService.ClipSegment>of()) {
+                Map<String, Object> segmentPayload = new LinkedHashMap<>();
+                segmentPayload.put("start_sec", segment.startSec);
+                segmentPayload.put("end_sec", segment.endSec);
+                segments.add(segmentPayload);
+            }
+            item.put("segments", segments);
+            payload.add(item);
+        }
+        return payload;
+    }
+
+    private ExtractionRequests restoreExtractionRequests(Map<String, Object> payload) {
+        if (payload == null || payload.isEmpty()) {
+            return null;
+        }
+        List<JavaCVFFmpegService.ScreenshotRequest> screenshotRequests =
+                restoreScreenshotRequests(payload.get("screenshot_requests"));
+        List<JavaCVFFmpegService.ClipRequest> clipRequests =
+                restoreClipRequests(payload.get("clip_requests"));
+        if (screenshotRequests.isEmpty() && clipRequests.isEmpty()) {
+            return null;
+        }
+        return new ExtractionRequests(screenshotRequests, clipRequests);
+    }
+
+    private List<JavaCVFFmpegService.ScreenshotRequest> restoreScreenshotRequests(Object payload) {
+        List<JavaCVFFmpegService.ScreenshotRequest> requests = new ArrayList<>();
+        if (!(payload instanceof List<?> rawList)) {
+            return requests;
+        }
+        for (Object item : rawList) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            String screenshotId = String.valueOf(mapValue(rawMap, "screenshot_id", "")).trim();
+            if (screenshotId.isBlank()) {
+                continue;
+            }
+            requests.add(new JavaCVFFmpegService.ScreenshotRequest(
+                    screenshotId,
+                    safeDouble(rawMap.get("timestamp_sec"), 0.0),
+                    String.valueOf(mapValue(rawMap, "label", "")),
+                    String.valueOf(mapValue(rawMap, "semantic_unit_id", "")),
+                    String.valueOf(mapValue(rawMap, "frame_reason", ""))
+            ));
+        }
+        return requests;
+    }
+
+    private List<JavaCVFFmpegService.ClipRequest> restoreClipRequests(Object payload) {
+        List<JavaCVFFmpegService.ClipRequest> requests = new ArrayList<>();
+        if (!(payload instanceof List<?> rawList)) {
+            return requests;
+        }
+        for (Object item : rawList) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            String clipId = String.valueOf(mapValue(rawMap, "clip_id", "")).trim();
+            if (clipId.isBlank()) {
+                continue;
+            }
+            requests.add(new JavaCVFFmpegService.ClipRequest(
+                    clipId,
+                    safeDouble(rawMap.get("start_sec"), 0.0),
+                    safeDouble(rawMap.get("end_sec"), 0.0),
+                    String.valueOf(mapValue(rawMap, "knowledge_type", "")),
+                    String.valueOf(mapValue(rawMap, "semantic_unit_id", "")),
+                    restoreClipSegments(rawMap.get("segments"))
+            ));
+        }
+        return requests;
+    }
+
+    private List<JavaCVFFmpegService.ClipSegment> restoreClipSegments(Object payload) {
+        List<JavaCVFFmpegService.ClipSegment> segments = new ArrayList<>();
+        if (!(payload instanceof List<?> rawList)) {
+            return segments;
+        }
+        for (Object item : rawList) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            segments.add(new JavaCVFFmpegService.ClipSegment(
+                    safeDouble(rawMap.get("start_sec"), 0.0),
+                    safeDouble(rawMap.get("end_sec"), 0.0)
+            ));
+        }
+        return segments;
+    }
+
+    private Object mapValue(Map<?, ?> rawMap, String key, Object defaultValue) {
+        return rawMap.containsKey(key) ? rawMap.get(key) : defaultValue;
+    }
+
+    private JavaCVFFmpegService.ExtractionResult restoreExtractionResult(Map<String, Object> payload, String outputDir) {
+        if (payload == null || payload.isEmpty()) {
+            return null;
+        }
+        JavaCVFFmpegService.ExtractionResult result = new JavaCVFFmpegService.ExtractionResult();
+        result.screenshotsDir = firstNonBlank(String.valueOf(payload.getOrDefault("screenshots_dir", "")), outputDir + "/assets");
+        result.clipsDir = firstNonBlank(String.valueOf(payload.getOrDefault("clips_dir", "")), outputDir + "/assets");
+        result.successfulScreenshots = safeInt(payload.get("successful_screenshots"), 0);
+        result.successfulClips = safeInt(payload.get("successful_clips"), 0);
+        result.elapsedMs = safeLong(payload.get("elapsed_ms"), 0L);
+        Object errors = payload.get("errors");
+        if (errors instanceof List<?> rawErrors) {
+            for (Object item : rawErrors) {
+                result.errors.add(String.valueOf(item));
+            }
+        }
+        return result;
+    }
+
+    private double safeDouble(Object value, double fallback) {
+        try {
+            return Double.parseDouble(String.valueOf(value));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private int safeInt(Object value, int fallback) {
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private long safeLong(Object value, long fallback) {
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private static class AssetExtractStageResult {
+        private final AnalyzeResult analyzeResult;
+        private final boolean usedVLFlow;
+        private final boolean usedLegacyFlow;
+
+        private AssetExtractStageResult(AnalyzeResult analyzeResult, boolean usedVLFlow, boolean usedLegacyFlow) {
+            this.analyzeResult = analyzeResult;
+            this.usedVLFlow = usedVLFlow;
+            this.usedLegacyFlow = usedLegacyFlow;
+        }
     }
 
     private ProcessingResult processBook(
@@ -1671,17 +3051,59 @@ public class VideoProcessingOrchestrator {
         long outputTokens;
         long totalTokens;
         String sourcePath = "";
+        String currency = "";
+        String pricingStatus = "";
+        String costSource = "";
+        Double totalCost = null;
     }
 
-    private static class DeepSeekUsage {
-        long inputTokensUncached;
-        long inputTokensCached;
+    private static class AuditUsage {
+        long promptTokens;
+        long completionTokens;
+        long totalTokens;
+        long inputTokens;
         long outputTokens;
+        long cachedPromptTokens;
+        long uncachedPromptTokens;
+        long textInputTokens;
+        long imageInputTokens;
+        long audioInputTokens;
+        long videoInputTokens;
+        long mediaInputTokens;
         long totalCalls;
-        long cachedCalls;
         String sourcePath = "";
+        String currency = "";
+        String pricingStatus = "";
+        String costSource = "";
+        Double totalCost = null;
+        List<Map<String, Object>> byModel = new ArrayList<>();
         boolean hasData() {
-            return inputTokensUncached > 0 || inputTokensCached > 0 || outputTokens > 0 || totalCalls > 0;
+            return promptTokens > 0
+                || completionTokens > 0
+                || totalTokens > 0
+                || inputTokens > 0
+                || outputTokens > 0
+                || cachedPromptTokens > 0
+                || uncachedPromptTokens > 0
+                || textInputTokens > 0
+                || imageInputTokens > 0
+                || audioInputTokens > 0
+                || videoInputTokens > 0
+                || mediaInputTokens > 0
+                || !byModel.isEmpty()
+                || outputTokens > 0
+                || totalCalls > 0
+                || totalCost != null;
+        }
+    }
+
+    private static class ResolvedCost {
+        final String currency;
+        final Double totalCost;
+
+        private ResolvedCost(String currency, Double totalCost) {
+            this.currency = currency != null ? currency : "";
+            this.totalCost = totalCost;
         }
     }
 
@@ -1705,7 +3127,8 @@ public class VideoProcessingOrchestrator {
 
             String vlModel = configService != null ? configService.getVLModelName() : "";
             VLTokenUsage vlUsage = loadVLTokenUsage(outputDir);
-            DeepSeekUsage deepSeekUsage = loadDeepSeekUsage(outputDir);
+            AuditUsage visionAiUsage = loadVisionAiUsage(outputDir);
+            AuditUsage textLlmUsage = loadTextLlmUsage(outputDir);
 
             boolean success = result != null && result.success;
             String normalizedErrorMessage = "";
@@ -1731,7 +3154,7 @@ public class VideoProcessingOrchestrator {
             payload.put("result_json_path", result != null ? (result.jsonPath != null ? result.jsonPath : "") : "");
             payload.put("stage_timings_ms", new LinkedHashMap<>(stageTimingsMs));
             payload.put("flow_flags", new LinkedHashMap<>(flowFlags));
-            payload.put("llm_cost", buildLLMCostPayload(vlModel, vlUsage, deepSeekUsage));
+            payload.put("llm_cost", buildLLMCostPayload(vlModel, vlUsage, visionAiUsage, textLlmUsage));
 
             String reportFileName = (taskId != null && !taskId.isBlank())
                     ? ("task_metrics_" + taskId + ".json")
@@ -1747,25 +3170,18 @@ public class VideoProcessingOrchestrator {
         }
     }
 
-    private Map<String, Object> buildLLMCostPayload(String vlModel, VLTokenUsage vlUsage, DeepSeekUsage deepSeekUsage) {
+    private Map<String, Object> buildLLMCostPayload(
+            String vlModel,
+            VLTokenUsage vlUsage,
+            AuditUsage visionAiUsage,
+            AuditUsage textLlmUsage
+    ) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("currency", "USD");
-        payload.put("pricing_basis", "per_1m_tokens");
+        payload.put("pricing_basis", "provider_usage_and_audit");
 
         long vlInput = Math.max(0L, vlUsage.inputTokens);
         long vlOutput = Math.max(0L, vlUsage.outputTokens);
         long vlTotal = Math.max(0L, vlUsage.totalTokens > 0 ? vlUsage.totalTokens : (vlInput + vlOutput));
-
-        double qwenInputCost = tokenCostUsd(vlInput, QWEN3_VL_PLUS_INPUT_PER_M);
-        double qwenOutputCost = tokenCostUsd(vlOutput, QWEN3_VL_PLUS_OUTPUT_PER_M);
-        double qwenTotalCost = qwenInputCost + qwenOutputCost;
-
-        double ernieMinInputCost = tokenCostUsd(vlInput, ERNIE_45_TURBO_VL_INPUT_MIN_PER_M);
-        double ernieMaxInputCost = tokenCostUsd(vlInput, ERNIE_45_TURBO_VL_INPUT_MAX_PER_M);
-        double ernieMinOutputCost = tokenCostUsd(vlOutput, ERNIE_45_TURBO_VL_OUTPUT_MIN_PER_M);
-        double ernieMaxOutputCost = tokenCostUsd(vlOutput, ERNIE_45_TURBO_VL_OUTPUT_MAX_PER_M);
-        double ernieMinTotalCost = ernieMinInputCost + ernieMinOutputCost;
-        double ernieMaxTotalCost = ernieMaxInputCost + ernieMaxOutputCost;
 
         Map<String, Object> vlSection = new LinkedHashMap<>();
         vlSection.put("model", vlModel != null ? vlModel : "");
@@ -1773,76 +3189,185 @@ public class VideoProcessingOrchestrator {
         vlSection.put("output_tokens", vlOutput);
         vlSection.put("total_tokens", vlTotal);
         vlSection.put("token_source", vlUsage.sourcePath);
-
-        Map<String, Object> qwenCost = new LinkedHashMap<>();
-        qwenCost.put("input_cost_usd", roundCost(qwenInputCost));
-        qwenCost.put("output_cost_usd", roundCost(qwenOutputCost));
-        qwenCost.put("total_cost_usd", roundCost(qwenTotalCost));
-        vlSection.put("qwen3_vl_plus_cost", qwenCost);
-
-        Map<String, Object> ernieCostRange = new LinkedHashMap<>();
-        ernieCostRange.put("input_cost_usd_min", roundCost(ernieMinInputCost));
-        ernieCostRange.put("input_cost_usd_max", roundCost(ernieMaxInputCost));
-        ernieCostRange.put("output_cost_usd_min", roundCost(ernieMinOutputCost));
-        ernieCostRange.put("output_cost_usd_max", roundCost(ernieMaxOutputCost));
-        ernieCostRange.put("total_cost_usd_min", roundCost(ernieMinTotalCost));
-        ernieCostRange.put("total_cost_usd_max", roundCost(ernieMaxTotalCost));
-        vlSection.put("ernie_4_5_turbo_vl_cost_range", ernieCostRange);
-
-        double vlSelectedMin;
-        double vlSelectedMax;
-        String normalizedVLModel = (vlModel != null ? vlModel : "").toLowerCase(Locale.ROOT);
-        if (normalizedVLModel.contains("qwen3-vl-plus")) {
-            vlSelectedMin = qwenTotalCost;
-            vlSelectedMax = qwenTotalCost;
-            vlSection.put("selected_pricing_model", "qwen3-vl-plus");
-        } else if (normalizedVLModel.contains("ernie-4.5-turbo-vl") || normalizedVLModel.contains("ernie")) {
-            vlSelectedMin = ernieMinTotalCost;
-            vlSelectedMax = ernieMaxTotalCost;
-            vlSection.put("selected_pricing_model", "ernie-4.5-turbo-vl");
-        } else {
-            vlSelectedMin = Math.min(qwenTotalCost, ernieMinTotalCost);
-            vlSelectedMax = Math.max(qwenTotalCost, ernieMaxTotalCost);
-            vlSection.put("selected_pricing_model", "unknown");
+        if (vlUsage.currency != null && !vlUsage.currency.isBlank()) {
+            vlSection.put("currency", vlUsage.currency);
         }
-        vlSection.put("selected_cost_usd_min", roundCost(vlSelectedMin));
-        vlSection.put("selected_cost_usd_max", roundCost(vlSelectedMax));
+        if (vlUsage.pricingStatus != null && !vlUsage.pricingStatus.isBlank()) {
+            vlSection.put("pricing_status", vlUsage.pricingStatus);
+        }
+        if (vlUsage.costSource != null && !vlUsage.costSource.isBlank()) {
+            vlSection.put("cost_source", vlUsage.costSource);
+        }
+        if (vlUsage.totalCost != null) {
+            vlSection.put("total_cost", roundCost(vlUsage.totalCost.doubleValue()));
+        }
         payload.put("vl", vlSection);
 
-        long deepInputUncached = Math.max(0L, deepSeekUsage.inputTokensUncached);
-        long deepInputCached = Math.max(0L, deepSeekUsage.inputTokensCached);
-        long deepOutput = Math.max(0L, deepSeekUsage.outputTokens);
-        double deepInputUncachedCost = tokenCostUsd(deepInputUncached, DEEPSEEK_CHAT_INPUT_UNCACHED_PER_M);
-        double deepInputCachedCost = tokenCostUsd(deepInputCached, DEEPSEEK_CHAT_INPUT_CACHED_PER_M);
-        double deepOutputCost = tokenCostUsd(deepOutput, DEEPSEEK_CHAT_OUTPUT_PER_M);
-        double deepTotalCost = deepInputUncachedCost + deepInputCachedCost + deepOutputCost;
+        Map<String, Object> visionSection = buildAuditUsageSection(visionAiUsage);
+        if (!visionSection.isEmpty()) {
+            payload.put("vision_ai", visionSection);
+        }
 
-        Map<String, Object> deepSection = new LinkedHashMap<>();
-        deepSection.put("model", "deepseek-chat");
-        deepSection.put("input_tokens_uncached", deepInputUncached);
-        deepSection.put("input_tokens_cached", deepInputCached);
-        deepSection.put("output_tokens", deepOutput);
-        deepSection.put("total_calls", deepSeekUsage.totalCalls);
-        deepSection.put("cached_calls", deepSeekUsage.cachedCalls);
-        deepSection.put("token_source", deepSeekUsage.sourcePath);
-        deepSection.put("input_uncached_cost_usd", roundCost(deepInputUncachedCost));
-        deepSection.put("input_cached_cost_usd", roundCost(deepInputCachedCost));
-        deepSection.put("output_cost_usd", roundCost(deepOutputCost));
-        deepSection.put("total_cost_usd", roundCost(deepTotalCost));
-        payload.put("deepseek_chat", deepSection);
+        Map<String, Object> textSection = buildAuditUsageSection(textLlmUsage);
+        if (!textSection.isEmpty()) {
+            payload.put("text_llm", textSection);
+        }
 
-        double totalMin = vlSelectedMin + deepTotalCost;
-        double totalMax = vlSelectedMax + deepTotalCost;
-        payload.put("total_cost_usd_min", roundCost(totalMin));
-        payload.put("total_cost_usd_max", roundCost(totalMax));
-        if (Math.abs(totalMax - totalMin) < 1e-12) {
-            payload.put("total_cost_usd", roundCost(totalMin));
+        AuditUsage deepSeekOnly = filterAuditUsageByModel(textLlmUsage, "deepseek");
+        Map<String, Object> deepSeekSection = buildAuditUsageSection(deepSeekOnly);
+        if (!deepSeekSection.isEmpty()) {
+            payload.put("deepseek_chat", deepSeekSection);
+        }
+
+        AuditUsage qwenOnly = filterAuditUsageByModel(textLlmUsage, "qwen");
+        Map<String, Object> qwenSection = buildAuditUsageSection(qwenOnly);
+        if (!qwenSection.isEmpty()) {
+            payload.put("qwen_fallback", qwenSection);
+        }
+
+        ResolvedCost totalCost = resolveAggregateCost(vlUsage, visionAiUsage, textLlmUsage);
+        if (totalCost.totalCost != null) {
+            if (totalCost.currency != null && !totalCost.currency.isBlank()) {
+                payload.put("currency", totalCost.currency);
+            }
+            payload.put("total_cost", roundCost(totalCost.totalCost.doubleValue()));
+        } else {
+            String fallbackCurrency = firstNonBlank(
+                    vlUsage.currency,
+                    firstNonBlank(visionAiUsage.currency, textLlmUsage.currency)
+            );
+            if (fallbackCurrency != null && !fallbackCurrency.isBlank()) {
+                payload.put("currency", fallbackCurrency);
+            }
         }
         payload.put(
                 "coverage_note",
-                "DeepSeek cost is computed from persisted traces (phase2b_llm_trace/deepseek_audit) only."
+                "VL uses persisted vl_token_report pricing; Vision AI and text LLM use task audit summaries, including DeepSeek-to-Qwen fallback when it happens."
         );
         return payload;
+    }
+
+    private Map<String, Object> buildAuditUsageSection(AuditUsage usage) {
+        if (usage == null || !usage.hasData()) {
+            return new LinkedHashMap<>();
+        }
+        Map<String, Object> section = new LinkedHashMap<>();
+        section.put("model", resolvePrimaryModel(usage));
+        section.put("prompt_tokens", Math.max(0L, usage.promptTokens));
+        section.put("completion_tokens", Math.max(0L, usage.completionTokens));
+        section.put("total_tokens", Math.max(0L, usage.totalTokens > 0L ? usage.totalTokens : (usage.promptTokens + usage.completionTokens)));
+        section.put("input_tokens", Math.max(0L, usage.inputTokens > 0L ? usage.inputTokens : usage.promptTokens));
+        section.put("output_tokens", Math.max(0L, usage.outputTokens > 0L ? usage.outputTokens : usage.completionTokens));
+        section.put("cached_prompt_tokens", Math.max(0L, usage.cachedPromptTokens));
+        section.put("uncached_prompt_tokens", Math.max(0L, usage.uncachedPromptTokens));
+        section.put("text_input_tokens", Math.max(0L, usage.textInputTokens));
+        section.put("image_input_tokens", Math.max(0L, usage.imageInputTokens));
+        section.put("audio_input_tokens", Math.max(0L, usage.audioInputTokens));
+        section.put("video_input_tokens", Math.max(0L, usage.videoInputTokens));
+        section.put("media_input_tokens", Math.max(0L, usage.mediaInputTokens));
+        section.put("total_calls", Math.max(0L, usage.totalCalls));
+        section.put("token_source", usage.sourcePath);
+        if (usage.currency != null && !usage.currency.isBlank()) {
+            section.put("currency", usage.currency);
+        }
+        if (usage.pricingStatus != null && !usage.pricingStatus.isBlank()) {
+            section.put("pricing_status", usage.pricingStatus);
+        }
+        if (usage.costSource != null && !usage.costSource.isBlank()) {
+            section.put("cost_source", usage.costSource);
+        }
+        if (usage.totalCost != null) {
+            section.put("total_cost", roundCost(usage.totalCost.doubleValue()));
+        }
+        if (!usage.byModel.isEmpty()) {
+            section.put("by_model", usage.byModel);
+        }
+        return section;
+    }
+
+    private String resolvePrimaryModel(AuditUsage usage) {
+        if (usage == null || usage.byModel == null || usage.byModel.isEmpty()) {
+            return "";
+        }
+        Object model = usage.byModel.get(0).get("model");
+        return model != null ? String.valueOf(model) : "";
+    }
+
+    private AuditUsage filterAuditUsageByModel(AuditUsage source, String keyword) {
+        AuditUsage filtered = new AuditUsage();
+        if (source == null || source.byModel == null || keyword == null || keyword.isBlank()) {
+            return filtered;
+        }
+        String loweredKeyword = keyword.toLowerCase(Locale.ROOT);
+        for (Map<String, Object> entry : source.byModel) {
+            String model = String.valueOf(entry.getOrDefault("model", "")).toLowerCase(Locale.ROOT);
+            if (!model.contains(loweredKeyword)) {
+                continue;
+            }
+            filtered.byModel.add(new LinkedHashMap<>(entry));
+            filtered.promptTokens += readLongValue(entry.get("prompt_tokens"));
+            filtered.completionTokens += readLongValue(entry.get("completion_tokens"));
+            filtered.totalTokens += readLongValue(entry.get("total_tokens"));
+            filtered.inputTokens += readLongValue(entry.get("input_tokens"));
+            filtered.outputTokens += readLongValue(entry.get("output_tokens"));
+            filtered.cachedPromptTokens += readLongValue(entry.get("cached_prompt_tokens"));
+            filtered.uncachedPromptTokens += readLongValue(entry.get("uncached_prompt_tokens"));
+            filtered.textInputTokens += readLongValue(entry.get("text_input_tokens"));
+            filtered.imageInputTokens += readLongValue(entry.get("image_input_tokens"));
+            filtered.audioInputTokens += readLongValue(entry.get("audio_input_tokens"));
+            filtered.videoInputTokens += readLongValue(entry.get("video_input_tokens"));
+            filtered.mediaInputTokens += readLongValue(entry.get("media_input_tokens"));
+            filtered.totalCalls += readLongValue(entry.get("records"));
+            if (filtered.totalCost == null) {
+                filtered.totalCost = 0d;
+            }
+            filtered.totalCost += readDoubleValue(entry.get("estimated_total_cost"));
+            if (filtered.currency == null || filtered.currency.isBlank()) {
+                filtered.currency = String.valueOf(entry.getOrDefault("currency", source.currency));
+            }
+            if (filtered.pricingStatus == null || filtered.pricingStatus.isBlank()) {
+                filtered.pricingStatus = source.pricingStatus;
+            }
+            if (filtered.costSource == null || filtered.costSource.isBlank()) {
+                filtered.costSource = source.costSource;
+            }
+            if (filtered.sourcePath == null || filtered.sourcePath.isBlank()) {
+                filtered.sourcePath = source.sourcePath;
+            }
+        }
+        if (filtered.totalCost != null) {
+            filtered.totalCost = roundCost(filtered.totalCost.doubleValue());
+        }
+        return filtered;
+    }
+
+    private ResolvedCost resolveAggregateCost(VLTokenUsage vlUsage, AuditUsage... usages) {
+        Map<String, Double> totalsByCurrency = new LinkedHashMap<>();
+        appendCostByCurrency(totalsByCurrency, vlUsage != null ? vlUsage.currency : "", vlUsage != null ? vlUsage.totalCost : null);
+        if (usages != null) {
+            for (AuditUsage usage : usages) {
+                appendCostByCurrency(totalsByCurrency, usage != null ? usage.currency : "", usage != null ? usage.totalCost : null);
+            }
+        }
+        if (totalsByCurrency.size() == 1) {
+            Map.Entry<String, Double> entry = totalsByCurrency.entrySet().iterator().next();
+            return new ResolvedCost(entry.getKey(), roundCost(entry.getValue()));
+        }
+        return new ResolvedCost("", null);
+    }
+
+    private void appendCostByCurrency(Map<String, Double> totalsByCurrency, String currency, Double totalCost) {
+        if (totalsByCurrency == null || totalCost == null) {
+            return;
+        }
+        String normalizedCurrency = currency == null ? "" : currency.trim().toUpperCase(Locale.ROOT);
+        if (normalizedCurrency.isBlank()) {
+            return;
+        }
+        totalsByCurrency.put(
+                normalizedCurrency,
+                roundCost(totalsByCurrency.getOrDefault(normalizedCurrency, 0d) + Math.max(0d, totalCost.doubleValue()))
+        );
     }
 
     private VLTokenUsage loadVLTokenUsage(String outputDir) {
@@ -1854,12 +3379,33 @@ public class VideoProcessingOrchestrator {
         try {
             JsonNode root = objectMapper.readTree(reportPath.toFile());
             JsonNode tokenStats = root.path("token_stats");
-            usage.inputTokens = firstLong(tokenStats, "prompt_tokens_actual", "prompt_tokens");
-            usage.outputTokens = firstLong(tokenStats, "completion_tokens_actual", "completion_tokens");
+            JsonNode tokenUsage = root.path("token_usage");
+            usage.inputTokens = firstLong(tokenStats, "input_tokens_actual", "prompt_tokens_actual", "input_tokens", "prompt_tokens");
+            if (usage.inputTokens <= 0L) {
+                usage.inputTokens = firstLong(tokenUsage, "input_tokens", "prompt_tokens");
+            }
+            usage.outputTokens = firstLong(
+                tokenStats,
+                "output_tokens_actual",
+                "completion_tokens_actual",
+                "output_tokens",
+                "completion_tokens"
+            );
+            if (usage.outputTokens <= 0L) {
+                usage.outputTokens = firstLong(tokenUsage, "output_tokens", "completion_tokens");
+            }
             usage.totalTokens = firstLong(tokenStats, "total_tokens_actual", "total_tokens");
+            if (usage.totalTokens <= 0L) {
+                usage.totalTokens = firstLong(tokenUsage, "total_tokens");
+            }
             if (usage.totalTokens <= 0L) {
                 usage.totalTokens = usage.inputTokens + usage.outputTokens;
             }
+            JsonNode pricing = root.path("pricing");
+            usage.currency = pricing.path("currency").asText("");
+            usage.pricingStatus = pricing.path("status").asText("");
+            usage.totalCost = firstDouble(pricing, "total_cost");
+            usage.costSource = reportPath.toAbsolutePath().toString();
             usage.sourcePath = reportPath.toAbsolutePath().toString();
         } catch (Exception e) {
             logger.warn("Failed to parse VL token report: {}", e.getMessage());
@@ -1867,28 +3413,110 @@ public class VideoProcessingOrchestrator {
         return usage;
     }
 
-    private DeepSeekUsage loadDeepSeekUsage(String outputDir) {
-        Path tracePath = Paths.get(outputDir, "intermediates", "phase2b_llm_trace.jsonl");
-        DeepSeekUsage traceUsage = loadDeepSeekUsageFromTrace(tracePath);
-        if (traceUsage.hasData()) {
-            return traceUsage;
-        }
-        Path auditPath = Paths.get(outputDir, "intermediates", "phase2b_deepseek_call_audit.json");
-        return loadDeepSeekUsageFromAudit(auditPath);
+    private AuditUsage loadVisionAiUsage(String outputDir) {
+        Path auditPath = Paths.get(outputDir, "intermediates", "vision_ai_call_audit.json");
+        return loadAuditUsage(auditPath);
     }
 
-    private DeepSeekUsage loadDeepSeekUsageFromTrace(Path tracePath) {
-        DeepSeekUsage usage = new DeepSeekUsage();
+    private AuditUsage loadTextLlmUsage(String outputDir) {
+        Path auditPath = Paths.get(outputDir, "intermediates", "phase2b_deepseek_call_audit.json");
+        AuditUsage auditUsage = loadAuditUsage(auditPath);
+        if (auditUsage.hasData()) {
+            return auditUsage;
+        }
+        Path tracePath = Paths.get(outputDir, "intermediates", "phase2b_llm_trace.jsonl");
+        return loadTextLlmUsageFromTrace(tracePath);
+    }
+
+    private AuditUsage loadAuditUsage(Path auditPath) {
+        AuditUsage usage = new AuditUsage();
+        if (auditPath == null || !Files.exists(auditPath)) {
+            return usage;
+        }
+        usage.sourcePath = auditPath.toAbsolutePath().toString();
+        usage.costSource = usage.sourcePath;
+        try {
+            JsonNode root = objectMapper.readTree(auditPath.toFile());
+            JsonNode summary = root.path("summary");
+            usage.promptTokens = firstLong(summary, "total_prompt_tokens");
+            usage.completionTokens = firstLong(summary, "total_completion_tokens");
+            usage.totalTokens = firstLong(summary, "total_tokens");
+            usage.inputTokens = firstLong(summary, "total_input_tokens");
+            usage.outputTokens = firstLong(summary, "total_output_tokens");
+            usage.cachedPromptTokens = firstLong(summary, "total_cached_prompt_tokens");
+            usage.uncachedPromptTokens = firstLong(summary, "total_uncached_prompt_tokens");
+            usage.textInputTokens = firstLong(summary, "total_text_input_tokens");
+            usage.imageInputTokens = firstLong(summary, "total_image_input_tokens");
+            usage.audioInputTokens = firstLong(summary, "total_audio_input_tokens");
+            usage.videoInputTokens = firstLong(summary, "total_video_input_tokens");
+            usage.mediaInputTokens = firstLong(summary, "total_media_input_tokens");
+            usage.totalCalls = firstLong(summary, "total_records");
+
+            JsonNode estimatedByCurrency = summary.path("estimated_cost_by_currency");
+            if (estimatedByCurrency.isObject()) {
+                if (estimatedByCurrency.has("CNY")) {
+                    usage.currency = "CNY";
+                    usage.totalCost = Math.max(0d, estimatedByCurrency.path("CNY").asDouble(0d));
+                } else {
+                    Iterator<String> names = estimatedByCurrency.fieldNames();
+                    if (names.hasNext()) {
+                        String currency = names.next();
+                        usage.currency = currency != null ? currency : "";
+                        usage.totalCost = Math.max(0d, estimatedByCurrency.path(currency).asDouble(0d));
+                    }
+                }
+            }
+            usage.pricingStatus = usage.totalCost != null ? "ok" : "";
+
+            JsonNode byModel = summary.path("by_model");
+            if (byModel.isArray()) {
+                for (JsonNode item : byModel) {
+                    if (!item.isObject()) {
+                        continue;
+                    }
+                    Map<String, Object> modelUsage = new LinkedHashMap<>();
+                    modelUsage.put("model", item.path("model").asText(""));
+                    modelUsage.put("provider", item.path("provider").asText(""));
+                    modelUsage.put("currency", item.path("currency").asText(""));
+                    modelUsage.put("records", item.path("records").asLong(0L));
+                    modelUsage.put("prompt_tokens", item.path("prompt_tokens").asLong(0L));
+                    modelUsage.put("completion_tokens", item.path("completion_tokens").asLong(0L));
+                    modelUsage.put("total_tokens", item.path("total_tokens").asLong(0L));
+                    modelUsage.put("input_tokens", item.path("input_tokens").asLong(0L));
+                    modelUsage.put("output_tokens", item.path("output_tokens").asLong(0L));
+                    modelUsage.put("cached_prompt_tokens", item.path("cached_prompt_tokens").asLong(0L));
+                    modelUsage.put("uncached_prompt_tokens", item.path("uncached_prompt_tokens").asLong(0L));
+                    modelUsage.put("text_input_tokens", item.path("text_input_tokens").asLong(0L));
+                    modelUsage.put("image_input_tokens", item.path("image_input_tokens").asLong(0L));
+                    modelUsage.put("audio_input_tokens", item.path("audio_input_tokens").asLong(0L));
+                    modelUsage.put("video_input_tokens", item.path("video_input_tokens").asLong(0L));
+                    modelUsage.put("media_input_tokens", item.path("media_input_tokens").asLong(0L));
+                    modelUsage.put("estimated_total_cost", roundCost(item.path("estimated_total_cost").asDouble(0d)));
+                    usage.byModel.add(modelUsage);
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to parse task audit report {}: {}", auditPath, e.getMessage());
+        }
+        return usage;
+    }
+
+    private AuditUsage loadTextLlmUsageFromTrace(Path tracePath) {
+        AuditUsage usage = new AuditUsage();
         if (tracePath == null || !Files.exists(tracePath)) {
             return usage;
         }
         usage.sourcePath = tracePath.toAbsolutePath().toString();
+        usage.costSource = usage.sourcePath;
+        Map<String, Map<String, Object>> byModel = new LinkedHashMap<>();
+        Map<String, Double> costByCurrency = new LinkedHashMap<>();
         try (BufferedReader reader = Files.newBufferedReader(tracePath, StandardCharsets.UTF_8)) {
             String line;
             while ((line = reader.readLine()) != null) {
-                if (line == null) continue;
-                String trimmed = line.trim();
-                if (trimmed.isEmpty()) continue;
+                String trimmed = line == null ? "" : line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
                 JsonNode node;
                 try {
                     node = objectMapper.readTree(trimmed);
@@ -1899,65 +3527,108 @@ public class VideoProcessingOrchestrator {
                     continue;
                 }
                 String model = node.path("model").asText("");
-                if (!model.toLowerCase(Locale.ROOT).contains("deepseek")) {
-                    continue;
-                }
                 long promptTokens = Math.max(0L, node.path("prompt_tokens").asLong(0L));
                 long completionTokens = Math.max(0L, node.path("completion_tokens").asLong(0L));
+                long totalTokens = Math.max(0L, node.path("total_tokens").asLong(promptTokens + completionTokens));
                 boolean cacheHit = node.path("cache_hit").asBoolean(false);
-                if (cacheHit) {
-                    usage.inputTokensCached += promptTokens;
-                    usage.cachedCalls += 1L;
-                } else {
-                    usage.inputTokensUncached += promptTokens;
-                }
+
+                usage.promptTokens += promptTokens;
+                usage.completionTokens += completionTokens;
+                usage.totalTokens += totalTokens;
+                usage.inputTokens += promptTokens;
                 usage.outputTokens += completionTokens;
+                if (cacheHit) {
+                    usage.cachedPromptTokens += promptTokens;
+                } else {
+                    usage.uncachedPromptTokens += promptTokens;
+                }
                 usage.totalCalls += 1L;
+
+                String currency = resolveTextModelCurrency(model);
+                double estimatedCost = estimateTextModelCost(model, promptTokens, completionTokens, cacheHit);
+                if (!currency.isBlank() && estimatedCost > 0d) {
+                    costByCurrency.put(currency, roundCost(costByCurrency.getOrDefault(currency, 0d) + estimatedCost));
+                }
+
+                Map<String, Object> bucket = byModel.computeIfAbsent(model, key -> {
+                    Map<String, Object> created = new LinkedHashMap<>();
+                    created.put("model", key);
+                    created.put("provider", resolveTextModelProvider(key));
+                    created.put("currency", currency);
+                    created.put("records", 0L);
+                    created.put("prompt_tokens", 0L);
+                    created.put("completion_tokens", 0L);
+                    created.put("total_tokens", 0L);
+                    created.put("input_tokens", 0L);
+                    created.put("output_tokens", 0L);
+                    created.put("cached_prompt_tokens", 0L);
+                    created.put("uncached_prompt_tokens", 0L);
+                    created.put("text_input_tokens", 0L);
+                    created.put("image_input_tokens", 0L);
+                    created.put("audio_input_tokens", 0L);
+                    created.put("video_input_tokens", 0L);
+                    created.put("media_input_tokens", 0L);
+                    created.put("estimated_total_cost", 0d);
+                    return created;
+                });
+                bucket.put("records", readLongValue(bucket.get("records")) + 1L);
+                bucket.put("prompt_tokens", readLongValue(bucket.get("prompt_tokens")) + promptTokens);
+                bucket.put("completion_tokens", readLongValue(bucket.get("completion_tokens")) + completionTokens);
+                bucket.put("total_tokens", readLongValue(bucket.get("total_tokens")) + totalTokens);
+                bucket.put("input_tokens", readLongValue(bucket.get("input_tokens")) + promptTokens);
+                bucket.put("output_tokens", readLongValue(bucket.get("output_tokens")) + completionTokens);
+                if (cacheHit) {
+                    bucket.put("cached_prompt_tokens", readLongValue(bucket.get("cached_prompt_tokens")) + promptTokens);
+                } else {
+                    bucket.put("uncached_prompt_tokens", readLongValue(bucket.get("uncached_prompt_tokens")) + promptTokens);
+                }
+                bucket.put(
+                        "estimated_total_cost",
+                        roundCost(readDoubleValue(bucket.get("estimated_total_cost")) + estimatedCost)
+                );
             }
         } catch (Exception e) {
             logger.warn("Failed to read phase2b_llm_trace: {}", e.getMessage());
         }
+        usage.byModel.addAll(byModel.values());
+        if (costByCurrency.size() == 1) {
+            Map.Entry<String, Double> entry = costByCurrency.entrySet().iterator().next();
+            usage.currency = entry.getKey();
+            usage.totalCost = roundCost(entry.getValue());
+            usage.pricingStatus = usage.totalCost != null ? "estimated_from_trace" : "";
+        }
         return usage;
     }
 
-    private DeepSeekUsage loadDeepSeekUsageFromAudit(Path auditPath) {
-        DeepSeekUsage usage = new DeepSeekUsage();
-        if (auditPath == null || !Files.exists(auditPath)) {
-            return usage;
+    private String resolveTextModelProvider(String model) {
+        String normalized = model == null ? "" : model.trim().toLowerCase(Locale.ROOT);
+        if (normalized.contains("deepseek")) {
+            return "deepseek";
         }
-        usage.sourcePath = auditPath.toAbsolutePath().toString();
-        try {
-            JsonNode root = objectMapper.readTree(auditPath.toFile());
-            JsonNode records = root.path("records");
-            if (!records.isArray()) {
-                return usage;
-            }
-            for (JsonNode record : records) {
-                JsonNode outputNode = record.path("output");
-                if (!outputNode.path("success").asBoolean(true)) {
-                    continue;
-                }
-                JsonNode meta = outputNode.path("metadata");
-                String model = meta.path("model").asText(record.path("input").path("model").asText(""));
-                if (!model.toLowerCase(Locale.ROOT).contains("deepseek")) {
-                    continue;
-                }
-                long promptTokens = Math.max(0L, meta.path("prompt_tokens").asLong(0L));
-                long completionTokens = Math.max(0L, meta.path("completion_tokens").asLong(0L));
-                boolean cacheHit = meta.path("cache_hit").asBoolean(false);
-                if (cacheHit) {
-                    usage.inputTokensCached += promptTokens;
-                    usage.cachedCalls += 1L;
-                } else {
-                    usage.inputTokensUncached += promptTokens;
-                }
-                usage.outputTokens += completionTokens;
-                usage.totalCalls += 1L;
-            }
-        } catch (Exception e) {
-            logger.warn("Failed to parse deepseek audit report: {}", e.getMessage());
+        if (normalized.contains("qwen")) {
+            return "dashscope";
         }
-        return usage;
+        return "";
+    }
+
+    private String resolveTextModelCurrency(String model) {
+        String provider = resolveTextModelProvider(model);
+        if ("deepseek".equals(provider) || "dashscope".equals(provider)) {
+            return "CNY";
+        }
+        return "";
+    }
+
+    private double estimateTextModelCost(String model, long promptTokens, long completionTokens, boolean cacheHit) {
+        String normalized = model == null ? "" : model.trim().toLowerCase(Locale.ROOT);
+        if (normalized.contains("deepseek")) {
+            double inputRate = cacheHit ? DEEPSEEK_CHAT_INPUT_CACHED_PER_M : DEEPSEEK_CHAT_INPUT_UNCACHED_PER_M;
+            return tokenCostAmount(promptTokens, inputRate) + tokenCostAmount(completionTokens, DEEPSEEK_CHAT_OUTPUT_PER_M);
+        }
+        if (normalized.contains("qwen-plus")) {
+            return tokenCostAmount(promptTokens, QWEN_PLUS_INPUT_PER_M) + tokenCostAmount(completionTokens, QWEN_PLUS_OUTPUT_PER_M);
+        }
+        return 0d;
     }
 
     private long firstLong(JsonNode node, String... fieldNames) {
@@ -1988,7 +3659,63 @@ public class VideoProcessingOrchestrator {
         return 0L;
     }
 
-    private double tokenCostUsd(long tokens, double ratePerMillion) {
+    private Double firstDouble(JsonNode node, String... fieldNames) {
+        if (node == null || fieldNames == null) {
+            return null;
+        }
+        for (String fieldName : fieldNames) {
+            if (fieldName == null || fieldName.isBlank()) {
+                continue;
+            }
+            JsonNode valueNode = node.get(fieldName);
+            if (valueNode == null || valueNode.isMissingNode() || valueNode.isNull()) {
+                continue;
+            }
+            if (valueNode.isIntegralNumber() || valueNode.isFloatingPointNumber()) {
+                return Math.max(0d, valueNode.asDouble(0d));
+            }
+            String text = valueNode.asText("").trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            try {
+                return Math.max(0d, Double.parseDouble(text));
+            } catch (Exception ignored) {
+                // Ignore parse errors and try next field
+            }
+        }
+        return null;
+    }
+
+    private long readLongValue(Object value) {
+        if (value == null) {
+            return 0L;
+        }
+        if (value instanceof Number number) {
+            return Math.max(0L, number.longValue());
+        }
+        try {
+            return Math.max(0L, Long.parseLong(String.valueOf(value).trim()));
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private double readDoubleValue(Object value) {
+        if (value == null) {
+            return 0d;
+        }
+        if (value instanceof Number number) {
+            return Math.max(0d, number.doubleValue());
+        }
+        try {
+            return Math.max(0d, Double.parseDouble(String.valueOf(value).trim()));
+        } catch (Exception ignored) {
+            return 0d;
+        }
+    }
+
+    private double tokenCostAmount(long tokens, double ratePerMillion) {
         if (tokens <= 0L || ratePerMillion <= 0d) {
             return 0d;
         }

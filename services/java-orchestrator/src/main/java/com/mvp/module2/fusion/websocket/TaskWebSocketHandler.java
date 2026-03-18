@@ -1,8 +1,10 @@
 package com.mvp.module2.fusion.websocket;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.service.CollectionRepository;
+import com.mvp.module2.fusion.service.TaskCostSummaryService;
 import com.mvp.module2.fusion.service.TaskTerminalEventService;
 import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import org.slf4j.Logger;
@@ -15,12 +17,15 @@ import org.springframework.web.socket.PingMessage;
 import org.springframework.web.socket.PongMessage;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,6 +39,8 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
     private static final long CLIENT_HEARTBEAT_TIMEOUT_MS = 35_000L;
     private static final long BROWSER_TRANSPORT_HEARTBEAT_INTERVAL_MS = 15_000L;
     private static final long BROWSER_TRANSPORT_HEARTBEAT_TIMEOUT_MS = 45_000L;
+    private static final int SEND_TIME_LIMIT_MS = 10_000;
+    private static final int SEND_BUFFER_SIZE_LIMIT_BYTES = 512 * 1024;
     private static final String WEB_TASK_UPDATES_STREAM_KEY = "web-task-updates";
 
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> userSessions =
@@ -56,6 +63,9 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
     @Autowired(required = false)
     private TaskStatusPresentationService taskStatusPresentationService = new TaskStatusPresentationService();
 
+    @Autowired(required = false)
+    private TaskCostSummaryService taskCostSummaryService = new TaskCostSummaryService();
+
     @Autowired
     private TaskTerminalEventService taskTerminalEventService;
 
@@ -63,14 +73,15 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
+        WebSocketSession managedSession = wrapSessionForConcurrentSend(session);
         String userId = getUserIdFromSession(session);
         String streamKey = getTextQueryParam(session, "streamKey");
         String clientType = getTextQueryParam(session, "clientType");
         long lastAckedTerminalEventId = parsePositiveLong(getTextQueryParam(session, "lastAckedTerminalEventId"));
-        userSessions.computeIfAbsent(userId, key -> new ConcurrentHashMap<>()).put(session.getId(), session);
-        sessionStates.put(session.getId(), new SessionRuntimeState(session, userId, streamKey, clientType));
+        userSessions.computeIfAbsent(userId, key -> new ConcurrentHashMap<>()).put(session.getId(), managedSession);
+        sessionStates.put(session.getId(), new SessionRuntimeState(managedSession, userId, streamKey, clientType));
         if (!streamKey.isBlank() && WEB_TASK_UPDATES_STREAM_KEY.equals(streamKey)) {
-            replayPendingTerminalEvents(session, userId, lastAckedTerminalEventId);
+            replayPendingTerminalEvents(managedSession, userId, lastAckedTerminalEventId);
         }
         logger.info("WebSocket connected: user={}, session={}", userId, session.getId());
     }
@@ -150,10 +161,11 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         if (taskId.isEmpty()) {
             return;
         }
-        taskSubscribers.computeIfAbsent(taskId, k -> new ConcurrentHashMap<>()).put(session.getId(), session);
+        WebSocketSession managedSession = resolveManagedSession(session);
+        taskSubscribers.computeIfAbsent(taskId, k -> new ConcurrentHashMap<>()).put(session.getId(), managedSession);
         TaskQueueManager.TaskEntry task = taskQueueManager.getTask(taskId);
         if (task != null) {
-            sendTaskUpdate(session, task, resolveCollectionId(taskId));
+            sendTaskUpdate(managedSession, task, resolveCollectionId(taskId));
         }
         logger.debug("Session {} subscribed to task {}", session.getId(), taskId);
     }
@@ -178,8 +190,9 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         if (collectionId.isEmpty()) {
             return;
         }
+        WebSocketSession managedSession = resolveManagedSession(session);
         collectionSubscribers.computeIfAbsent(collectionId, k -> new ConcurrentHashMap<>())
-                .put(session.getId(), session);
+                .put(session.getId(), managedSession);
         logger.debug("Session {} subscribed to collection {}", session.getId(), collectionId);
     }
 
@@ -204,7 +217,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         boolean cancelled = taskQueueManager.cancelTask(taskId);
-        sendPayloadToSessions(List.of(session), Map.of(
+        sendPayloadToSessions(List.of(resolveManagedSession(session)), Map.of(
                 "type", "cancelResult",
                 "taskId", taskId,
                 "success", cancelled
@@ -216,7 +229,8 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         if (channel.isEmpty()) {
             return;
         }
-        phase2bSubscribers.computeIfAbsent(channel, key -> new ConcurrentHashMap<>()).put(session.getId(), session);
+        WebSocketSession managedSession = resolveManagedSession(session);
+        phase2bSubscribers.computeIfAbsent(channel, key -> new ConcurrentHashMap<>()).put(session.getId(), managedSession);
         logger.debug("Session {} subscribed to phase2b channel {}", session.getId(), channel);
     }
 
@@ -479,13 +493,26 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         payload.put("status", status != null ? status : "");
         payload.put("progress", progress);
         payload.put("message", message != null ? message : "");
+        payload.put(
+                "userMessage",
+                task != null && task.userMessage != null
+                        ? task.userMessage
+                        : (message != null ? message : "")
+        );
         payload.put("resultPath", resultPath != null ? resultPath : "");
-        payload.put("errorMessage", errorMessage != null ? errorMessage : "");
+        payload.put(
+                "errorMessage",
+                task != null && task.errorMessage != null && (errorMessage == null || errorMessage.isBlank())
+                        ? task.errorMessage
+                        : (errorMessage != null ? errorMessage : "")
+        );
         taskStatusPresentationService.appendRecoveryFields(
                 payload,
                 status,
                 task != null ? task.recoveryPayload : null
         );
+        appendFinalCategoryFields(payload, task, status);
+        appendTaskCostFields(payload, task);
         if (task != null) {
             String title = normalizeText(task.title);
             String videoUrl = normalizeText(task.videoUrl);
@@ -502,6 +529,9 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             if (task.createdAt != null) {
                 payload.put("createdAt", task.createdAt.toString());
             }
+            if (task.completedAt != null) {
+                payload.put("completedAt", task.completedAt.toString());
+            }
             payload.put("source", "runtime");
             payload.put("markdownAvailable", task.resultPath != null && !task.resultPath.isBlank());
         }
@@ -511,15 +541,152 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         return payload;
     }
 
-    private synchronized void sendRawMessage(WebSocketSession session, Map<String, Object> payload) {
+    private void appendFinalCategoryFields(
+            Map<String, Object> payload,
+            TaskQueueManager.TaskEntry task,
+            String status
+    ) {
+        if (payload == null || task == null || !isCompletedStatus(status)) {
+            return;
+        }
+        PersistedCategorySnapshot snapshot = loadPersistedCategorySnapshot(task);
+        if (snapshot == null || snapshot.categoryPath.isBlank()) {
+            return;
+        }
+        payload.put("categoryPath", snapshot.categoryPath);
+        if (!snapshot.taskPath.isBlank()) {
+            payload.put("taskPath", snapshot.taskPath);
+        }
+    }
+
+    private void appendTaskCostFields(Map<String, Object> payload, TaskQueueManager.TaskEntry task) {
+        if (payload == null || task == null || taskCostSummaryService == null) {
+            return;
+        }
+        Path taskDir = resolveTaskDirectory(task);
+        if (taskDir == null) {
+            return;
+        }
+        taskCostSummaryService.readSummary(taskDir).ifPresent(summary -> {
+            payload.put("taskCost", summary.toPayload());
+            payload.put("taskCostSummary", summary.displayText());
+        });
+    }
+
+    private PersistedCategorySnapshot loadPersistedCategorySnapshot(TaskQueueManager.TaskEntry task) {
+        Path taskDir = resolveTaskDirectory(task);
+        if (taskDir == null) {
+            return null;
+        }
+        PersistedCategorySnapshot fromMeta = readPersistedCategorySnapshot(
+                taskDir.resolve("video_meta.json"),
+                "category_path"
+        );
+        if (fromMeta != null) {
+            return withTaskPath(fromMeta, resolveTaskPath(task, taskDir));
+        }
+        PersistedCategorySnapshot fromArtifact = readPersistedCategorySnapshot(
+                taskDir.resolve("category_classification.json"),
+                "category_path"
+        );
+        if (fromArtifact != null) {
+            return withTaskPath(fromArtifact, resolveTaskPath(task, taskDir));
+        }
+        return null;
+    }
+
+    private PersistedCategorySnapshot withTaskPath(PersistedCategorySnapshot snapshot, String taskPath) {
+        if (snapshot == null) {
+            return null;
+        }
+        return new PersistedCategorySnapshot(snapshot.categoryPath, normalizeText(taskPath));
+    }
+
+    private PersistedCategorySnapshot readPersistedCategorySnapshot(Path jsonPath, String categoryFieldName) {
+        if (jsonPath == null || !Files.isRegularFile(jsonPath)) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(jsonPath.toFile());
+            if (root == null || !root.isObject()) {
+                return null;
+            }
+            String categoryPath = normalizeText(root.path(categoryFieldName).asText(""));
+            if (categoryPath.isBlank()) {
+                return null;
+            }
+            return new PersistedCategorySnapshot(categoryPath, "");
+        } catch (Exception error) {
+            logger.debug("Ignore persisted category snapshot read failure: path={}", jsonPath, error);
+            return null;
+        }
+    }
+
+    private Path resolveTaskDirectory(TaskQueueManager.TaskEntry task) {
+        if (task == null) {
+            return null;
+        }
+        Path fromOutputDir = toDirectoryPath(task.outputDir);
+        if (fromOutputDir != null) {
+            return fromOutputDir;
+        }
+        return toDirectoryPath(task.resultPath);
+    }
+
+    private Path toDirectoryPath(String rawPath) {
+        String normalized = normalizeText(rawPath);
+        if (normalized.isBlank()) {
+            return null;
+        }
+        try {
+            Path path = Path.of(normalized).toAbsolutePath().normalize();
+            if (Files.isDirectory(path)) {
+                return path;
+            }
+            if (Files.isRegularFile(path)) {
+                return path.getParent();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private String resolveTaskPath(TaskQueueManager.TaskEntry task, Path taskDir) {
+        if (taskDir != null && taskDir.getFileName() != null) {
+            String storageKey = normalizeText(taskDir.getFileName().toString());
+            if (!storageKey.isBlank()) {
+                return "storage/" + storageKey;
+            }
+        }
+        if (task != null && task.bookOptions != null) {
+            String storageKey = normalizeText(task.bookOptions.storageKey);
+            if (!storageKey.isBlank()) {
+                return "storage/" + storageKey;
+            }
+        }
+        return "";
+    }
+
+    private boolean isCompletedStatus(String status) {
+        return "COMPLETED".equalsIgnoreCase(normalizeText(status));
+    }
+
+    private void sendRawMessage(WebSocketSession session, Map<String, Object> payload) {
         if (!session.isOpen()) {
             return;
         }
         try {
             String json = objectMapper.writeValueAsString(payload);
             session.sendMessage(new TextMessage(json));
-        } catch (IOException error) {
-            logger.warn("Error sending message, closing session {}", session.getId(), error);
+        } catch (Exception error) {
+            SessionRuntimeState runtimeState = sessionStates.get(session.getId());
+            logger.warn(
+                    "Error sending websocket message, closing session: user={}, stream={}, session={}",
+                    runtimeState != null ? runtimeState.userId : "",
+                    runtimeState != null ? runtimeState.streamKey : "",
+                    session.getId(),
+                    error
+            );
             closeSessionSilently(session, new CloseStatus(4001, "send failure"));
         }
     }
@@ -588,7 +755,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         pong.put("type", "pong");
         pong.put("serverTime", now);
         pong.put("clientTime", readLong(payload.get("clientTime")));
-        sendRawMessage(session, pong);
+        sendRawMessage(resolveManagedSession(session), pong);
     }
 
     private void handleAck(WebSocketSession session, Map<String, Object> payload) {
@@ -598,19 +765,26 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         taskTerminalEventService.acknowledge(userId, messageId);
+        sendPayloadToSessions(List.of(resolveManagedSession(session)), Map.of(
+                "type", "ackConfirmed",
+                "messageId", messageId,
+                "ackedThrough", messageId,
+                "serverTime", System.currentTimeMillis()
+        ));
     }
 
     private void replayPendingTerminalEvents(WebSocketSession session, String userId, long lastAckedTerminalEventId) {
-        if (session == null || !session.isOpen()) {
+        WebSocketSession managedSession = resolveManagedSession(session);
+        if (managedSession == null || !managedSession.isOpen()) {
             return;
         }
         List<Map<String, Object>> payloads = taskTerminalEventService.replayPendingEvents(userId, lastAckedTerminalEventId);
         if (payloads.isEmpty()) {
             return;
         }
-        sendPayloadToSessions(List.of(session), payloads.get(0));
+        sendPayloadToSessions(List.of(managedSession), payloads.get(0));
         for (int i = 1; i < payloads.size(); i++) {
-            sendPayloadToSessions(List.of(session), payloads.get(i));
+            sendPayloadToSessions(List.of(managedSession), payloads.get(i));
         }
     }
 
@@ -700,6 +874,28 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    private WebSocketSession wrapSessionForConcurrentSend(WebSocketSession session) {
+        if (session == null || session instanceof ConcurrentWebSocketSessionDecorator) {
+            return session;
+        }
+        return new ConcurrentWebSocketSessionDecorator(
+                session,
+                SEND_TIME_LIMIT_MS,
+                SEND_BUFFER_SIZE_LIMIT_BYTES
+        );
+    }
+
+    private WebSocketSession resolveManagedSession(WebSocketSession session) {
+        if (session == null) {
+            return null;
+        }
+        SessionRuntimeState runtimeState = sessionStates.get(session.getId());
+        if (runtimeState == null || runtimeState.session == null) {
+            return session;
+        }
+        return runtimeState.session;
+    }
+
     @Scheduled(fixedDelay = BROWSER_TRANSPORT_HEARTBEAT_INTERVAL_MS)
     public void sendBrowserTransportPings() {
         long now = System.currentTimeMillis();
@@ -787,6 +983,12 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             total += sessions.size();
         }
         return total;
+    }
+
+    private record PersistedCategorySnapshot(
+            String categoryPath,
+            String taskPath
+    ) {
     }
 
     private static final class SessionRuntimeState {

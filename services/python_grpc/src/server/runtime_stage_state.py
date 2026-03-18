@@ -14,11 +14,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from services.python_grpc.src.common.utils.runtime_recovery_store import (
     RuntimeRecoveryStore,
-    STATUS_AUTO_RETRY_WAIT,
-    STATUS_COMPLETED,
-    STATUS_EXECUTING,
-    STATUS_FATAL,
-    STATUS_MANUAL_RETRY_REQUIRED,
+    STATUS_ERROR,
+    STATUS_FAILED,
+    STATUS_MANUAL_NEEDED,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
     classify_runtime_error,
 )
 
@@ -26,6 +26,60 @@ logger = logging.getLogger(__name__)
 
 HeartbeatEmitter = Callable[..., None]
 HeartbeatEventEmitter = Callable[[Dict[str, Any]], None]
+
+
+def _project_stage_artifact_refs(
+    state_payload: Optional[Dict[str, Any]] = None,
+    *,
+    include_progress: bool = False,
+) -> Dict[str, Any]:
+    artifacts: Dict[str, Any] = {}
+    payload = dict(state_payload or {})
+    for field_name, field_value in list(payload.items()):
+        if field_value in (None, "", []):
+            continue
+        if field_name.endswith("_path") or field_name.endswith("_dir") or field_name.endswith("_signature"):
+            artifacts[field_name] = field_value
+            continue
+        if field_name in {"stats", "unit_count", "screenshot_count", "clip_count"}:
+            artifacts[field_name] = field_value
+            continue
+        if include_progress and field_name in {"completed", "pending"}:
+            artifacts[field_name] = field_value
+    return artifacts
+
+
+def _build_stage_outputs_manifest_payload(
+    *,
+    stage: str,
+    checkpoint: str,
+    state_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "stage": str(stage or ""),
+        "checkpoint": str(checkpoint or ""),
+        "artifacts": _project_stage_artifact_refs(state_payload, include_progress=True),
+    }
+
+
+def _build_stage_journal_checkpoint_payload(
+    *,
+    stage_state_path: str,
+    message: str,
+    completed: int,
+    pending: int,
+    state_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    journal_payload: Dict[str, Any] = {
+        "completed": int(completed or 0),
+        "pending": int(pending or 0),
+        "stage_state_path": str(stage_state_path or ""),
+        "message": str(message or ""),
+    }
+    artifacts = _project_stage_artifact_refs(state_payload)
+    if artifacts:
+        journal_payload["artifacts"] = artifacts
+    return journal_payload
 
 
 def resolve_runtime_stage_failure_status(
@@ -39,10 +93,10 @@ def resolve_runtime_stage_failure_status(
     error_info = classify_runtime_error(runtime_error)
     error_class = str(error_info.get("error_class", "") or "")
     if error_class == "AUTO_RETRYABLE":
-        return STATUS_AUTO_RETRY_WAIT, error_info
+        return STATUS_ERROR, error_info
     if error_class == "FATAL_NON_RETRYABLE":
-        return STATUS_FATAL, error_info
-    return STATUS_MANUAL_RETRY_REQUIRED, error_info
+        return STATUS_FAILED, error_info
+    return STATUS_MANUAL_NEEDED, error_info
 
 
 def build_runtime_retry_guidance(error_info: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -114,7 +168,7 @@ def record_runtime_stage_checkpoint(
         safe_pending = 0
 
     if normalized_status == "completed":
-        runtime_status = STATUS_COMPLETED
+        runtime_status = STATUS_SUCCESS
         error_info: Dict[str, str] = {}
     elif normalized_status in {"failed", "error"}:
         runtime_status, error_info = resolve_runtime_stage_failure_status(
@@ -122,7 +176,7 @@ def record_runtime_stage_checkpoint(
             error_message=error_message,
         )
     else:
-        runtime_status = STATUS_EXECUTING
+        runtime_status = STATUS_RUNNING
         error_info = {}
 
     state_payload: Dict[str, Any] = {
@@ -148,6 +202,19 @@ def record_runtime_stage_checkpoint(
             payload=state_payload,
         )
         stage_state_path = store.stage_dir(normalized_stage) / "stage_state.json"
+        store.append_stage_journal_event(
+            stage=normalized_stage,
+            event="checkpoint",
+            checkpoint=normalized_checkpoint,
+            status=runtime_status,
+            payload=_build_stage_journal_checkpoint_payload(
+                stage_state_path=str(stage_state_path),
+                message=str(message or normalized_checkpoint),
+                completed=safe_completed,
+                pending=safe_pending,
+                state_payload=state_payload,
+            ),
+        )
         store.append_event(
             scope_type="stage",
             scope_id=normalized_stage,
@@ -158,6 +225,15 @@ def record_runtime_stage_checkpoint(
             local_path=str(stage_state_path),
             message=str(message or normalized_checkpoint),
         )
+        if runtime_status == STATUS_SUCCESS:
+            store.write_stage_outputs_manifest(
+                stage=normalized_stage,
+                payload=_build_stage_outputs_manifest_payload(
+                    stage=normalized_stage,
+                    checkpoint=normalized_checkpoint,
+                    state_payload=state_payload,
+                ),
+            )
     except Exception as runtime_error:
         logger.warning(
             "Runtime stage checkpoint write failed: stage=%s checkpoint=%s error=%s",

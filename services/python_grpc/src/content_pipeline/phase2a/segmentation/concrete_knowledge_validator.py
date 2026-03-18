@@ -7,7 +7,6 @@ import base64
 import logging
 import httpx
 import numpy as np
-import hashlib
 import time
 import re
 import uuid
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Any
 from dataclasses import dataclass
 
+from services.python_grpc.src.common.utils.hash_policy import fast_digest_text, fast_hasher
 from services.python_grpc.src.config_paths import load_yaml_dict, resolve_video_config_path
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
@@ -1285,7 +1285,7 @@ class ConcreteKnowledgeValidator:
             image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 return None
-            hasher = hashlib.sha256()
+            hasher = fast_hasher()
             hasher.update(str(image.shape).encode("utf-8"))
             hasher.update(str(image.dtype).encode("utf-8"))
             hasher.update(image.tobytes())
@@ -1395,7 +1395,7 @@ class ConcreteKnowledgeValidator:
                 "person_model_selection": getattr(vision_config, "person_model_selection", 1),
             }
             raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            return fast_digest_text(raw)
         except Exception as e:
             logger.warning(f"Failed to build cache signature: {e}")
             return ""

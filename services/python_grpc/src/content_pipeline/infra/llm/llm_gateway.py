@@ -11,20 +11,28 @@ from __future__ import annotations
 
 import asyncio
 import glob
-import hashlib
 import json
 import logging
 import math
 import os
 import random
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Deque, Dict, Optional, Tuple, TypeVar
 import threading
+from typing import Any, Awaitable, Callable, Deque, Dict, Optional, Tuple, TypeVar
+
 import httpx
 
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
+from services.python_grpc.src.common.utils.hash_policy import fast_digest_text
+from services.python_grpc.src.common.utils.runtime_llm_context import (
+    build_restored_llm_response,
+    build_runtime_llm_request_payload,
+    current_runtime_llm_context,
+    dump_runtime_json_text,
+)
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 from services.python_grpc.src.content_pipeline.infra.llm.llm_client import (
     LLMClient,
@@ -33,17 +41,112 @@ from services.python_grpc.src.content_pipeline.infra.llm.llm_client import (
     _AsyncInFlightDeduper,
 )
 from services.python_grpc.src.content_pipeline.infra.llm.deepseek_audit import append_deepseek_call_record
+from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_audit import append_vision_ai_call_record
 from services.python_grpc.src.content_pipeline.infra.llm.token_costing import normalize_usage_payload
 from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import (
     VisionAIClient,
     VisionAIConfig,
     _VISION_BG_LOOP,
+    ensure_sync_bridge_not_in_running_loop,
     get_vision_ai_client,
 )
 from services.python_grpc.src.content_pipeline.rate_limiter import VLRateLimiter
 
 logger = logging.getLogger(__name__)
 _HedgeResultT = TypeVar("_HedgeResultT")
+_VISION_INTERNAL_RESPONSE_METADATA_KEY = "__llm_response_metadata"
+
+
+def _truncate_text(value: str, max_chars: int = 8000) -> str:
+    text = str(value or "")
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars] + "\n...[TRUNCATED]"
+    return text
+
+
+def _build_retry_failure_record(
+    *,
+    request_name: str,
+    provider_label: str,
+    attempt_no: int,
+    retry_kind: str,
+    wait_seconds: float,
+    retryable: bool,
+    error: Exception,
+) -> Dict[str, Any]:
+    return {
+        "request_name": str(request_name or ""),
+        "provider": str(provider_label or ""),
+        "attempt": max(1, int(attempt_no or 1)),
+        "retry_kind": str(retry_kind or ""),
+        "retryable": bool(retryable),
+        "wait_seconds": float(wait_seconds or 0.0),
+        "error_type": error.__class__.__name__,
+        "error_message": str(error or ""),
+        "stack_trace": _truncate_text(
+            "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+        ),
+        "recorded_at_ms": int(time.time() * 1000),
+    }
+
+
+def _normalize_previous_failures(records: Any) -> list[Dict[str, Any]]:
+    normalized: list[Dict[str, Any]] = []
+    for record in list(records or []):
+        if not isinstance(record, dict):
+            continue
+        normalized.append(dict(record))
+    return normalized
+
+
+def _attach_fallback_metadata(
+    metadata: Any,
+    *,
+    fallback_payload: Optional[Dict[str, Any]] = None,
+) -> Any:
+    normalized_fallback = dict(fallback_payload or {})
+    is_fallback = bool(normalized_fallback.get("is_fallback"))
+    previous_failures = _normalize_previous_failures(normalized_fallback.get("previous_failures"))
+    if metadata is None:
+        return metadata
+    try:
+        setattr(metadata, "is_fallback", is_fallback)
+        setattr(metadata, "fallback", normalized_fallback if is_fallback else {})
+        setattr(metadata, "previous_failures", previous_failures)
+        propagated_scope_refs = normalized_fallback.get("propagated_scope_refs", [])
+        if isinstance(propagated_scope_refs, list):
+            setattr(metadata, "propagated_scope_refs", list(propagated_scope_refs))
+    except Exception:
+        pass
+    return metadata
+
+
+def _build_runtime_response_metadata(
+    *,
+    metadata: Any,
+    requested_model: str,
+    fallback_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized_fallback = dict(fallback_payload or {})
+    is_fallback = bool(normalized_fallback.get("is_fallback"))
+    return {
+        "prompt_tokens": int(getattr(metadata, "prompt_tokens", 0) or 0),
+        "completion_tokens": int(getattr(metadata, "completion_tokens", 0) or 0),
+        "total_tokens": int(getattr(metadata, "total_tokens", 0) or 0),
+        "model": str(getattr(metadata, "model", requested_model) or requested_model),
+        "latency_ms": float(getattr(metadata, "latency_ms", 0.0) or 0.0),
+        "raw_response": getattr(metadata, "raw_response", None),
+        "cache_hit": bool(getattr(metadata, "cache_hit", False)),
+        "usage_details": normalize_usage_payload(getattr(metadata, "usage_details", None)),
+        "is_fallback": is_fallback,
+        "fallback": normalized_fallback if is_fallback else {},
+        "previous_failures": _normalize_previous_failures(normalized_fallback.get("previous_failures")),
+        "propagated_scope_refs": (
+            list(normalized_fallback.get("propagated_scope_refs", []) or [])
+            if is_fallback
+            else []
+        ),
+    }
 
 
 # =============================================================================
@@ -633,12 +736,15 @@ async def _run_provider_with_retry(
     provider_label: str,
     max_retries: int,
     attempt_factory: Callable[[], Awaitable[_HedgeResultT]],
+    attempt_history: Optional[list[Dict[str, Any]]] = None,
 ) -> _HedgeResultT:
     total_attempts = max(1, int(max_retries) + 1)
     last_exc: Optional[Exception] = None
     provider_retry_index = 0
     pool_retry_index = 0
+    call_attempt = 0
     while True:
+        call_attempt += 1
         try:
             return await attempt_factory()
         except Exception as exc:
@@ -646,6 +752,18 @@ async def _run_provider_with_retry(
             if _is_connection_pool_exhausted_error(exc) and pool_retry_index < int(_POOL_RETRY_ATTEMPTS):
                 wait_seconds = _compute_pool_backoff_seconds(pool_retry_index)
                 pool_retry_index += 1
+                if attempt_history is not None:
+                    attempt_history.append(
+                        _build_retry_failure_record(
+                            request_name=request_name,
+                            provider_label=provider_label,
+                            attempt_no=call_attempt,
+                            retry_kind="pool_retry",
+                            wait_seconds=wait_seconds,
+                            retryable=True,
+                            error=exc,
+                        )
+                    )
                 logger.warning(
                     "[LLM-pool] %s pool exhausted, retry %s/%s scheduled. provider=%s, wait=%.1fs, error=%s",
                     request_name,
@@ -658,10 +776,34 @@ async def _run_provider_with_retry(
                 await asyncio.sleep(wait_seconds)
                 continue
             if provider_retry_index >= total_attempts - 1:
+                if attempt_history is not None:
+                    attempt_history.append(
+                        _build_retry_failure_record(
+                            request_name=request_name,
+                            provider_label=provider_label,
+                            attempt_no=call_attempt,
+                            retry_kind="exhausted",
+                            wait_seconds=0.0,
+                            retryable=False,
+                            error=exc,
+                        )
+                    )
                 raise
             retry_no = provider_retry_index + 1
             wait_seconds = _compute_provider_retry_backoff_seconds(provider_retry_index)
             provider_retry_index += 1
+            if attempt_history is not None:
+                attempt_history.append(
+                    _build_retry_failure_record(
+                        request_name=request_name,
+                        provider_label=provider_label,
+                        attempt_no=call_attempt,
+                        retry_kind="provider_retry",
+                        wait_seconds=wait_seconds,
+                        retryable=True,
+                        error=exc,
+                    )
+                )
             logger.warning(
                 "[LLM-retry] %s failed, retry %s/%s scheduled. provider=%s, wait=%.1fs, error=%s",
                 request_name,
@@ -775,9 +917,7 @@ def _hash_text(value: str) -> str:
     1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
     2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
     3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-    h = hashlib.sha256()
-    h.update((value or "").encode("utf-8"))
-    return h.hexdigest()
+    return fast_digest_text(value)
 
 
 def _build_deepseek_client_key(
@@ -859,7 +999,7 @@ def _build_qwen_fallback_client(
     fallback_api_key, api_key_source = _resolve_qwen_fallback_api_key()
     if not fallback_api_key:
         logger.warning(
-            "[LLM降级] 无法降级到Qwen：缺少API Key，来源=%s",
+            "[LLM-alt-provider] Cannot switch to Qwen alternate provider because API key is missing. source=%s",
             api_key_source,
         )
         return None
@@ -885,7 +1025,7 @@ async def _fallback_to_qwen_text(
     cache_enabled: Optional[bool],
     inflight_dedup_enabled: Optional[bool],
     source_error: Exception,
-) -> Optional[Tuple[str, Any, Any]]:
+) -> Optional[Tuple[Tuple[str, Any, Any], list[Dict[str, Any]]]]:
     fallback_client = _build_qwen_fallback_client(
         temperature=temperature,
         enable_logprobs=enable_logprobs,
@@ -896,11 +1036,12 @@ async def _fallback_to_qwen_text(
         return None
 
     logger.warning(
-        "[LLM-degrade] DeepSeek text call failed; switching to Qwen. model=%s, base_url=%s, error=%s",
+        "[LLM-alt-provider] DeepSeek text call failed; switching to Qwen alternate provider. model=%s, base_url=%s, error=%s",
         _DEEPSEEK_QWEN_FALLBACK_MODEL,
         _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
         source_error,
     )
+    fallback_attempt_history: list[Dict[str, Any]] = []
     try:
         result = await _run_provider_with_retry(
             request_name="qwen_fallback_text",
@@ -913,15 +1054,16 @@ async def _fallback_to_qwen_text(
                 need_logprobs=need_logprobs,
                 disable_inflight_dedup=False,
             ),
+            attempt_history=fallback_attempt_history,
         )
         logger.warning(
-            "[LLM-degrade] DeepSeek text call succeeded via Qwen fallback. model=%s",
+            "[LLM-alt-provider] DeepSeek text call succeeded via Qwen alternate provider. model=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
         )
-        return result
+        return result, fallback_attempt_history
     except Exception as fallback_exc:
         logger.error(
-            "[LLM-degrade] DeepSeek text fallback to Qwen failed. model=%s, original_error=%s, fallback_error=%s",
+            "[LLM-alt-provider] DeepSeek text alternate-provider switch to Qwen failed. model=%s, original_error=%s, fallback_error=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
             source_error,
             fallback_exc,
@@ -940,7 +1082,7 @@ async def _fallback_to_qwen_json(
     cache_enabled: Optional[bool],
     inflight_dedup_enabled: Optional[bool],
     source_error: Exception,
-) -> Optional[Tuple[Dict[str, Any], Any, Any]]:
+) -> Optional[Tuple[Tuple[Dict[str, Any], Any, Any], list[Dict[str, Any]]]]:
     fallback_client = _build_qwen_fallback_client(
         temperature=temperature,
         enable_logprobs=enable_logprobs,
@@ -951,11 +1093,12 @@ async def _fallback_to_qwen_json(
         return None
 
     logger.warning(
-        "[LLM-degrade] DeepSeek JSON call failed; switching to Qwen. model=%s, base_url=%s, error=%s",
+        "[LLM-alt-provider] DeepSeek JSON call failed; switching to Qwen alternate provider. model=%s, base_url=%s, error=%s",
         _DEEPSEEK_QWEN_FALLBACK_MODEL,
         _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
         source_error,
     )
+    fallback_attempt_history: list[Dict[str, Any]] = []
     try:
         result = await _run_provider_with_retry(
             request_name="qwen_fallback_json",
@@ -969,15 +1112,16 @@ async def _fallback_to_qwen_json(
                 max_tokens=max_tokens,
                 disable_inflight_dedup=False,
             ),
+            attempt_history=fallback_attempt_history,
         )
         logger.warning(
-            "[LLM-degrade] DeepSeek JSON call succeeded via Qwen fallback. model=%s",
+            "[LLM-alt-provider] DeepSeek JSON call succeeded via Qwen alternate provider. model=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
         )
-        return result
+        return result, fallback_attempt_history
     except Exception as fallback_exc:
         logger.error(
-            "[LLM-degrade] DeepSeek JSON fallback to Qwen failed. model=%s, original_error=%s, fallback_error=%s",
+            "[LLM-alt-provider] DeepSeek JSON alternate-provider switch to Qwen failed. model=%s, original_error=%s, fallback_error=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
             source_error,
             fallback_exc,
@@ -999,6 +1143,7 @@ async def deepseek_complete_text(
     enable_logprobs: Optional[bool] = None,
     cache_enabled: Optional[bool] = None,
     inflight_dedup_enabled: Optional[bool] = None,
+    runtime_identity: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Any, Any]:
     """
     作用：统一调用 DeepSeek 文本输出。
@@ -1016,10 +1161,41 @@ async def deepseek_complete_text(
             cache_enabled=cache_enabled,
             inflight_dedup_enabled=inflight_dedup_enabled,
         )
+    runtime_context = current_runtime_llm_context()
+    request_payload = build_runtime_llm_request_payload(
+        model=resolved_model,
+        prompt=prompt,
+        system_prompt=system_message or "",
+        kwargs={
+            "need_logprobs": bool(need_logprobs),
+            "temperature": float(temperature),
+            "hedge_context": dict(hedge_context or {}),
+            "gateway": "deepseek_complete_text",
+        },
+    )
+    if runtime_context is not None:
+        restored = runtime_context.load_committed_call(
+            provider="deepseek",
+            request_name="deepseek_complete_text",
+            request_payload=request_payload,
+            runtime_identity=runtime_identity,
+        )
+        if restored is not None:
+            restored_metadata = dict(restored.get("response_metadata", {}) or {})
+            return (
+                str(restored.get("response_text", "") or ""),
+                build_restored_llm_response(
+                    response_text=str(restored.get("response_text", "") or ""),
+                    response_metadata=restored_metadata,
+                ),
+                None,
+            )
     output_text = ""
     metadata = None
     logprobs = None
     error_text = ""
+    primary_attempt_history: list[Dict[str, Any]] = []
+    fallback_payload: Dict[str, Any] = {}
     delay_ms = _resolve_deepseek_hedge_delay_ms(
         request_name="deepseek_complete_text",
         prompt=prompt,
@@ -1053,15 +1229,29 @@ async def deepseek_complete_text(
                     disable_inflight_dedup=True,
                 ),
             ),
+            attempt_history=primary_attempt_history,
         )
         if deepseek_fast_fallback_open and _reset_deepseek_fast_fallback():
-            logger.warning("[LLM-degrade] DeepSeek recovered; fast fallback mode closed.")
+            logger.warning("[LLM-alt-provider] DeepSeek recovered; alternate-provider fast switch mode closed.")
+        if runtime_context is not None:
+            runtime_context.persist_success(
+                provider="deepseek",
+                request_name="deepseek_complete_text",
+                request_payload=request_payload,
+                response_text=output_text,
+                response_metadata=_build_runtime_response_metadata(
+                    metadata=metadata,
+                    requested_model=resolved_model,
+                    fallback_payload=fallback_payload,
+                ),
+                runtime_identity=runtime_identity,
+            )
         return output_text, metadata, logprobs
     except Exception as exc:
         error_text = str(exc)
         if not deepseek_fast_fallback_open and _trip_deepseek_fast_fallback():
             logger.warning(
-                "[LLM-degrade] DeepSeek exhausted retries; fast fallback mode opened. retries=%s, error=%s",
+                "[LLM-alt-provider] DeepSeek exhausted retries; alternate-provider fast switch mode opened. retries=%s, error=%s",
                 _DEEPSEEK_PROVIDER_MAX_RETRIES,
                 exc,
             )
@@ -1076,7 +1266,44 @@ async def deepseek_complete_text(
             source_error=exc,
         )
         if fallback_output is not None:
-            return fallback_output
+            (output_text, metadata, logprobs), fallback_attempt_history = fallback_output
+            fallback_payload = {
+                "is_fallback": False,
+                "fallback_kind": "provider_switch",
+                "fallback_label": "deepseek_to_qwen_text",
+                "fallback_reason": str(exc or ""),
+                "source_provider": "DeepSeek",
+                "target_provider": f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+                "fast_fallback_mode": bool(deepseek_fast_fallback_open),
+                "previous_failures": primary_attempt_history + list(fallback_attempt_history or []),
+            }
+            metadata = _attach_fallback_metadata(
+                metadata,
+                fallback_payload=fallback_payload,
+            )
+            error_text = ""
+            if runtime_context is not None:
+                runtime_context.persist_success(
+                    provider="deepseek",
+                    request_name="deepseek_complete_text",
+                    request_payload=request_payload,
+                    response_text=output_text,
+                    response_metadata=_build_runtime_response_metadata(
+                        metadata=metadata,
+                        requested_model=resolved_model,
+                        fallback_payload=fallback_payload,
+                    ),
+                    runtime_identity=runtime_identity,
+                )
+            return output_text, metadata, logprobs
+        if runtime_context is not None:
+            runtime_context.persist_failure(
+                provider="deepseek",
+                request_name="deepseek_complete_text",
+                request_payload=request_payload,
+                error=exc,
+                runtime_identity=runtime_identity,
+            )
         raise
     finally:
         try:
@@ -1099,6 +1326,7 @@ async def deepseek_complete_text(
                 error=error_text,
                 extra={
                     "gateway": "deepseek_complete_text",
+                    "fallback": fallback_payload,
                 },
             )
         except Exception as audit_exc:
@@ -1120,6 +1348,7 @@ async def deepseek_complete_json(
     enable_logprobs: Optional[bool] = None,
     cache_enabled: Optional[bool] = None,
     inflight_dedup_enabled: Optional[bool] = None,
+    runtime_identity: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Any, Any]:
     """
     作用：统一调用 DeepSeek JSON 输出。
@@ -1137,7 +1366,42 @@ async def deepseek_complete_json(
             cache_enabled=cache_enabled,
             inflight_dedup_enabled=inflight_dedup_enabled,
         )
+    runtime_context = current_runtime_llm_context()
+    request_payload = build_runtime_llm_request_payload(
+        model=resolved_model,
+        prompt=prompt,
+        system_prompt=system_message or "",
+        kwargs={
+            "need_logprobs": bool(need_logprobs),
+            "max_tokens": max_tokens,
+            "temperature": float(temperature),
+            "hedge_context": dict(hedge_context or {}),
+            "gateway": "deepseek_complete_json",
+        },
+    )
+    if runtime_context is not None:
+        restored = runtime_context.load_committed_call(
+            provider="deepseek",
+            request_name="deepseek_complete_json",
+            request_payload=request_payload,
+            runtime_identity=runtime_identity,
+        )
+        if restored is not None:
+            restored_metadata = dict(restored.get("response_metadata", {}) or {})
+            restored_text = str(restored.get("response_text", "") or "")
+            return (
+                json.loads(restored_text),
+                build_restored_llm_response(
+                    response_text=restored_text,
+                    response_metadata=restored_metadata,
+                ),
+                None,
+            )
     metadata = None
+    result_json: Dict[str, Any] = {}
+    error_text = ""
+    primary_attempt_history: list[Dict[str, Any]] = []
+    fallback_payload: Dict[str, Any] = {}
     delay_ms = _resolve_deepseek_hedge_delay_ms(
         request_name="deepseek_complete_json",
         prompt=prompt,
@@ -1173,14 +1437,29 @@ async def deepseek_complete_json(
                     disable_inflight_dedup=True,
                 ),
             ),
+            attempt_history=primary_attempt_history,
         )
         if deepseek_fast_fallback_open and _reset_deepseek_fast_fallback():
-            logger.warning("[LLM-degrade] DeepSeek JSON recovered; fast fallback mode closed.")
+            logger.warning("[LLM-alt-provider] DeepSeek JSON recovered; alternate-provider fast switch mode closed.")
+        if runtime_context is not None:
+            runtime_context.persist_success(
+                provider="deepseek",
+                request_name="deepseek_complete_json",
+                request_payload=request_payload,
+                response_text=dump_runtime_json_text(result_json),
+                response_metadata=_build_runtime_response_metadata(
+                    metadata=metadata,
+                    requested_model=resolved_model,
+                    fallback_payload=fallback_payload,
+                ),
+                runtime_identity=runtime_identity,
+            )
         return result_json, metadata, logprobs
     except Exception as exc:
+        error_text = str(exc)
         if not deepseek_fast_fallback_open and _trip_deepseek_fast_fallback():
             logger.warning(
-                "[LLM-degrade] DeepSeek JSON exhausted retries; fast fallback mode opened. retries=%s, error=%s",
+                "[LLM-alt-provider] DeepSeek JSON exhausted retries; alternate-provider fast switch mode opened. retries=%s, error=%s",
                 _DEEPSEEK_PROVIDER_MAX_RETRIES,
                 exc,
             )
@@ -1196,7 +1475,44 @@ async def deepseek_complete_json(
             source_error=exc,
         )
         if fallback_json is not None:
-            return fallback_json
+            (result_json, metadata, logprobs), fallback_attempt_history = fallback_json
+            fallback_payload = {
+                "is_fallback": False,
+                "fallback_kind": "provider_switch",
+                "fallback_label": "deepseek_to_qwen_json",
+                "fallback_reason": str(exc or ""),
+                "source_provider": "DeepSeek",
+                "target_provider": f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+                "fast_fallback_mode": bool(deepseek_fast_fallback_open),
+                "previous_failures": primary_attempt_history + list(fallback_attempt_history or []),
+            }
+            metadata = _attach_fallback_metadata(
+                metadata,
+                fallback_payload=fallback_payload,
+            )
+            error_text = ""
+            if runtime_context is not None:
+                runtime_context.persist_success(
+                    provider="deepseek",
+                    request_name="deepseek_complete_json",
+                    request_payload=request_payload,
+                    response_text=dump_runtime_json_text(result_json),
+                    response_metadata=_build_runtime_response_metadata(
+                        metadata=metadata,
+                        requested_model=resolved_model,
+                        fallback_payload=fallback_payload,
+                    ),
+                    runtime_identity=runtime_identity,
+                )
+            return result_json, metadata, logprobs
+        if runtime_context is not None:
+            runtime_context.persist_failure(
+                provider="deepseek",
+                request_name="deepseek_complete_json",
+                request_payload=request_payload,
+                error=exc,
+                runtime_identity=runtime_identity,
+            )
         raise
     finally:
         try:
@@ -1207,11 +1523,73 @@ async def deepseek_complete_json(
             )
         except Exception as hedge_observe_exc:
             logger.debug("DeepSeek hedge estimator observe failed: %s", hedge_observe_exc)
+        try:
+            append_deepseek_call_record(
+                prompt=prompt,
+                system_message=str(system_message or ""),
+                model=resolved_model,
+                temperature=float(temperature),
+                need_logprobs=bool(need_logprobs),
+                output_text=dump_runtime_json_text(result_json) if result_json else "",
+                metadata=metadata,
+                error=error_text,
+                extra={
+                    "gateway": "deepseek_complete_json",
+                    "fallback": fallback_payload,
+                },
+            )
+        except Exception as audit_exc:
+            logger.warning(f"DeepSeek JSON audit append failed: {audit_exc}")
 
 
 # =============================================================================
 # Vision AI 统一入口
 # =============================================================================
+
+
+def _extract_vision_response_metadata(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        raw_metadata = payload.get(_VISION_INTERNAL_RESPONSE_METADATA_KEY, {})
+        if isinstance(raw_metadata, dict):
+            metadata = dict(raw_metadata)
+            usage_details = metadata.get("usage_details")
+            if usage_details is not None:
+                metadata["usage_details"] = normalize_usage_payload(usage_details)
+            return metadata
+        return {}
+    if isinstance(payload, list):
+        for item in payload:
+            metadata = _extract_vision_response_metadata(item)
+            if metadata:
+                return metadata
+    return {}
+
+
+def _strip_vision_response_metadata(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        cleaned = dict(payload)
+        cleaned.pop(_VISION_INTERNAL_RESPONSE_METADATA_KEY, None)
+        return cleaned
+    if isinstance(payload, list):
+        return [_strip_vision_response_metadata(item) for item in payload]
+    return payload
+
+
+def _build_vision_runtime_metadata(
+    *,
+    request_payload: Dict[str, Any],
+    response_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    usage_details = normalize_usage_payload(response_metadata.get("usage_details"))
+    return {
+        "model": str(response_metadata.get("model") or request_payload.get("model", "") or ""),
+        "prompt_tokens": int(response_metadata.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(response_metadata.get("completion_tokens", 0) or 0),
+        "total_tokens": int(response_metadata.get("total_tokens", 0) or 0),
+        "latency_ms": float(response_metadata.get("latency_ms", 0.0) or 0.0),
+        "cache_hit": bool(response_metadata.get("cache_hit", False)),
+        "usage_details": usage_details,
+    }
 
 
 async def vision_validate_image(
@@ -1222,6 +1600,7 @@ async def vision_validate_image(
     skip_duplicate_check: bool = False,
     client: Optional[VisionAIClient] = None,
     config: Optional[VisionAIConfig] = None,
+    runtime_identity: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     作用：统一 Vision AI 异步调用入口。
@@ -1230,82 +1609,27 @@ async def vision_validate_image(
     """
     if client is None:
         client = get_vision_ai_client(config)
-    return await _run_hedged_async_request(
-        request_name="vision_validate_image",
-        enabled=_VISION_HEDGE_ENABLED,
-        delay_ms=_VISION_HEDGE_DELAY_MS,
-        primary_factory=lambda: client.validate_image(
-            image_path=image_path,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            skip_duplicate_check=skip_duplicate_check,
-        ),
-        secondary_factory=lambda: client.validate_image(
-            image_path=image_path,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            skip_duplicate_check=skip_duplicate_check,
-        ),
-    )
-
-
-async def vision_validate_images(
-    *,
-    image_paths: list[str],
-    prompt: str = "",
-    system_prompt: Optional[str] = None,
-    skip_duplicate_check: bool = False,
-    max_batch_size: Optional[int] = None,
-    client: Optional[VisionAIClient] = None,
-    config: Optional[VisionAIConfig] = None,
-) -> list[Dict[str, Any]]:
-    """
-    作用：统一 Vision AI 批量异步调用入口。
-    为什么：集中管理批量参数与回退逻辑，避免业务层直接操作客户端细节。
-    """
-    if client is None:
-        client = get_vision_ai_client(config)
-    return await _run_hedged_async_request(
-        request_name="vision_validate_images",
-        enabled=_VISION_HEDGE_ENABLED,
-        delay_ms=_VISION_HEDGE_DELAY_MS,
-        primary_factory=lambda: client.validate_images_batch(
-            image_paths=image_paths,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            skip_duplicate_check=skip_duplicate_check,
-            max_batch_size=max_batch_size,
-        ),
-        secondary_factory=lambda: client.validate_images_batch(
-            image_paths=image_paths,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            skip_duplicate_check=skip_duplicate_check,
-            max_batch_size=max_batch_size,
-        ),
-    )
-
-
-def vision_validate_image_sync(
-    *,
-    image_path: str,
-    prompt: str = "",
-    system_prompt: Optional[str] = None,
-    skip_duplicate_check: bool = False,
-    client: Optional[VisionAIClient] = None,
-    config: Optional[VisionAIConfig] = None,
-    timeout: Optional[float] = None,
-) -> Dict[str, Any]:
-    """
-    作用：统一 Vision AI 同步调用入口（复用后台事件循环）。
-    为什么：同步路径更常见于旧代码，统一入口便于后续收敛。
-    权衡：同步调用占用线程，但对外 API 行为保持不变。
-    """
-    if client is None:
-        client = get_vision_ai_client(config)
-    return _VISION_BG_LOOP.submit(
-        _run_hedged_async_request(
-            request_name="vision_validate_image_sync",
+    runtime_context = current_runtime_llm_context()
+    request_payload = {
+        "model": str(getattr(getattr(client, "config", None), "model", "") or ""),
+        "image_path": str(image_path or ""),
+        "prompt": str(prompt or ""),
+        "system_prompt": str(system_prompt or ""),
+        "skip_duplicate_check": bool(skip_duplicate_check),
+        "gateway": "vision_validate_image",
+    }
+    if runtime_context is not None:
+        restored = runtime_context.load_committed_call(
+            provider="vision_ai",
+            request_name="vision_validate_image",
+            request_payload=request_payload,
+            runtime_identity=runtime_identity,
+        )
+        if restored is not None:
+            return json.loads(str(restored.get("response_text", "{}") or "{}"))
+    try:
+        raw_result = await _run_hedged_async_request(
+            request_name="vision_validate_image",
             enabled=_VISION_HEDGE_ENABLED,
             delay_ms=_VISION_HEDGE_DELAY_MS,
             primary_factory=lambda: client.validate_image(
@@ -1320,12 +1644,50 @@ def vision_validate_image_sync(
                 system_prompt=system_prompt,
                 skip_duplicate_check=skip_duplicate_check,
             ),
-        ),
-        timeout=timeout,
-    )
+        )
+        response_metadata = _extract_vision_response_metadata(raw_result)
+        result = _strip_vision_response_metadata(raw_result)
+        if runtime_context is not None:
+            runtime_context.persist_success(
+                provider="vision_ai",
+                request_name="vision_validate_image",
+                request_payload=request_payload,
+                response_text=dump_runtime_json_text(result),
+                response_metadata=_build_vision_runtime_metadata(
+                    request_payload=request_payload,
+                    response_metadata=response_metadata,
+                ),
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_image",
+            request_payload=request_payload,
+            response_payload=result,
+            response_metadata=response_metadata,
+            extra={"gateway": "vision_validate_image"},
+        )
+        return result
+    except Exception as error:
+        if runtime_context is not None:
+            runtime_context.persist_failure(
+                provider="vision_ai",
+                request_name="vision_validate_image",
+                request_payload=request_payload,
+                error=error,
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_image",
+            request_payload=request_payload,
+            response_payload=None,
+            response_metadata=None,
+            error=str(error),
+            extra={"gateway": "vision_validate_image"},
+        )
+        raise
 
 
-def vision_validate_images_sync(
+async def vision_validate_images(
     *,
     image_paths: list[str],
     prompt: str = "",
@@ -1334,17 +1696,36 @@ def vision_validate_images_sync(
     max_batch_size: Optional[int] = None,
     client: Optional[VisionAIClient] = None,
     config: Optional[VisionAIConfig] = None,
-    timeout: Optional[float] = None,
+    runtime_identity: Optional[Dict[str, Any]] = None,
 ) -> list[Dict[str, Any]]:
     """
-    作用：统一 Vision AI 批量同步调用入口（复用后台事件循环）。
-    为什么：兼容同步调用方，减少业务层对异步模型的耦合。
+    作用：统一 Vision AI 批量异步调用入口。
+    为什么：集中管理批量参数与回退逻辑，避免业务层直接操作客户端细节。
     """
     if client is None:
         client = get_vision_ai_client(config)
-    return _VISION_BG_LOOP.submit(
-        _run_hedged_async_request(
-            request_name="vision_validate_images_sync",
+    runtime_context = current_runtime_llm_context()
+    request_payload = {
+        "model": str(getattr(getattr(client, "config", None), "model", "") or ""),
+        "image_paths": list(image_paths or []),
+        "prompt": str(prompt or ""),
+        "system_prompt": str(system_prompt or ""),
+        "skip_duplicate_check": bool(skip_duplicate_check),
+        "max_batch_size": max_batch_size,
+        "gateway": "vision_validate_images",
+    }
+    if runtime_context is not None:
+        restored = runtime_context.load_committed_call(
+            provider="vision_ai",
+            request_name="vision_validate_images",
+            request_payload=request_payload,
+            runtime_identity=runtime_identity,
+        )
+        if restored is not None:
+            return json.loads(str(restored.get("response_text", "[]") or "[]"))
+    try:
+        raw_result = await _run_hedged_async_request(
+            request_name="vision_validate_images",
             enabled=_VISION_HEDGE_ENABLED,
             delay_ms=_VISION_HEDGE_DELAY_MS,
             primary_factory=lambda: client.validate_images_batch(
@@ -1361,9 +1742,250 @@ def vision_validate_images_sync(
                 skip_duplicate_check=skip_duplicate_check,
                 max_batch_size=max_batch_size,
             ),
-        ),
-        timeout=timeout,
-    )
+        )
+        response_metadata = _extract_vision_response_metadata(raw_result)
+        result = _strip_vision_response_metadata(raw_result)
+        if runtime_context is not None:
+            runtime_context.persist_success(
+                provider="vision_ai",
+                request_name="vision_validate_images",
+                request_payload=request_payload,
+                response_text=dump_runtime_json_text(result),
+                response_metadata=_build_vision_runtime_metadata(
+                    request_payload=request_payload,
+                    response_metadata=response_metadata,
+                ),
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_images",
+            request_payload=request_payload,
+            response_payload=result,
+            response_metadata=response_metadata,
+            extra={"gateway": "vision_validate_images"},
+        )
+        return result
+    except Exception as error:
+        if runtime_context is not None:
+            runtime_context.persist_failure(
+                provider="vision_ai",
+                request_name="vision_validate_images",
+                request_payload=request_payload,
+                error=error,
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_images",
+            request_payload=request_payload,
+            response_payload=None,
+            response_metadata=None,
+            error=str(error),
+            extra={"gateway": "vision_validate_images"},
+        )
+        raise
+
+
+def vision_validate_image_sync(
+    *,
+    image_path: str,
+    prompt: str = "",
+    system_prompt: Optional[str] = None,
+    skip_duplicate_check: bool = False,
+    client: Optional[VisionAIClient] = None,
+    config: Optional[VisionAIConfig] = None,
+    timeout: Optional[float] = None,
+    runtime_identity: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    ensure_sync_bridge_not_in_running_loop("llm_gateway.vision_validate_image_sync")
+    """
+    作用：统一 Vision AI 同步调用入口（复用后台事件循环）。
+    为什么：同步路径更常见于旧代码，统一入口便于后续收敛。
+    权衡：同步调用占用线程，但对外 API 行为保持不变。
+    """
+    if client is None:
+        client = get_vision_ai_client(config)
+    runtime_context = current_runtime_llm_context()
+    request_payload = {
+        "model": str(getattr(getattr(client, "config", None), "model", "") or ""),
+        "image_path": str(image_path or ""),
+        "prompt": str(prompt or ""),
+        "system_prompt": str(system_prompt or ""),
+        "skip_duplicate_check": bool(skip_duplicate_check),
+        "gateway": "vision_validate_image_sync",
+    }
+    if runtime_context is not None:
+        restored = runtime_context.load_committed_call(
+            provider="vision_ai",
+            request_name="vision_validate_image_sync",
+            request_payload=request_payload,
+            runtime_identity=runtime_identity,
+        )
+        if restored is not None:
+            return json.loads(str(restored.get("response_text", "{}") or "{}"))
+    try:
+        raw_result = _VISION_BG_LOOP.submit(
+            _run_hedged_async_request(
+                request_name="vision_validate_image_sync",
+                enabled=_VISION_HEDGE_ENABLED,
+                delay_ms=_VISION_HEDGE_DELAY_MS,
+                primary_factory=lambda: client.validate_image(
+                    image_path=image_path,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    skip_duplicate_check=skip_duplicate_check,
+                ),
+                secondary_factory=lambda: client.validate_image(
+                    image_path=image_path,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    skip_duplicate_check=skip_duplicate_check,
+                ),
+            ),
+            timeout=timeout,
+        )
+        response_metadata = _extract_vision_response_metadata(raw_result)
+        result = _strip_vision_response_metadata(raw_result)
+        if runtime_context is not None:
+            runtime_context.persist_success(
+                provider="vision_ai",
+                request_name="vision_validate_image_sync",
+                request_payload=request_payload,
+                response_text=dump_runtime_json_text(result),
+                response_metadata=_build_vision_runtime_metadata(
+                    request_payload=request_payload,
+                    response_metadata=response_metadata,
+                ),
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_image_sync",
+            request_payload=request_payload,
+            response_payload=result,
+            response_metadata=response_metadata,
+            extra={"gateway": "vision_validate_image_sync"},
+        )
+        return result
+    except Exception as error:
+        if runtime_context is not None:
+            runtime_context.persist_failure(
+                provider="vision_ai",
+                request_name="vision_validate_image_sync",
+                request_payload=request_payload,
+                error=error,
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_image_sync",
+            request_payload=request_payload,
+            response_payload=None,
+            response_metadata=None,
+            error=str(error),
+            extra={"gateway": "vision_validate_image_sync"},
+        )
+        raise
+
+
+def vision_validate_images_sync(
+    *,
+    image_paths: list[str],
+    prompt: str = "",
+    system_prompt: Optional[str] = None,
+    skip_duplicate_check: bool = False,
+    max_batch_size: Optional[int] = None,
+    client: Optional[VisionAIClient] = None,
+    config: Optional[VisionAIConfig] = None,
+    timeout: Optional[float] = None,
+    runtime_identity: Optional[Dict[str, Any]] = None,
+) -> list[Dict[str, Any]]:
+    ensure_sync_bridge_not_in_running_loop("llm_gateway.vision_validate_images_sync")
+    """
+    作用：统一 Vision AI 批量同步调用入口（复用后台事件循环）。
+    为什么：兼容同步调用方，减少业务层对异步模型的耦合。
+    """
+    if client is None:
+        client = get_vision_ai_client(config)
+    runtime_context = current_runtime_llm_context()
+    request_payload = {
+        "model": str(getattr(getattr(client, "config", None), "model", "") or ""),
+        "image_paths": list(image_paths or []),
+        "prompt": str(prompt or ""),
+        "system_prompt": str(system_prompt or ""),
+        "skip_duplicate_check": bool(skip_duplicate_check),
+        "max_batch_size": max_batch_size,
+        "gateway": "vision_validate_images_sync",
+    }
+    if runtime_context is not None:
+        restored = runtime_context.load_committed_call(
+            provider="vision_ai",
+            request_name="vision_validate_images_sync",
+            request_payload=request_payload,
+            runtime_identity=runtime_identity,
+        )
+        if restored is not None:
+            return json.loads(str(restored.get("response_text", "[]") or "[]"))
+    try:
+        raw_result = _VISION_BG_LOOP.submit(
+            _run_hedged_async_request(
+                request_name="vision_validate_images_sync",
+                enabled=_VISION_HEDGE_ENABLED,
+                delay_ms=_VISION_HEDGE_DELAY_MS,
+                primary_factory=lambda: client.validate_images_batch(
+                    image_paths=image_paths,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    skip_duplicate_check=skip_duplicate_check,
+                    max_batch_size=max_batch_size,
+                ),
+                secondary_factory=lambda: client.validate_images_batch(
+                    image_paths=image_paths,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    skip_duplicate_check=skip_duplicate_check,
+                    max_batch_size=max_batch_size,
+                ),
+            ),
+            timeout=timeout,
+        )
+        response_metadata = _extract_vision_response_metadata(raw_result)
+        result = _strip_vision_response_metadata(raw_result)
+        if runtime_context is not None:
+            runtime_context.persist_success(
+                provider="vision_ai",
+                request_name="vision_validate_images_sync",
+                request_payload=request_payload,
+                response_text=dump_runtime_json_text(result),
+                response_metadata=_build_vision_runtime_metadata(
+                    request_payload=request_payload,
+                    response_metadata=response_metadata,
+                ),
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_images_sync",
+            request_payload=request_payload,
+            response_payload=result,
+            response_metadata=response_metadata,
+            extra={"gateway": "vision_validate_images_sync"},
+        )
+        return result
+    except Exception as error:
+        if runtime_context is not None:
+            runtime_context.persist_failure(
+                provider="vision_ai",
+                request_name="vision_validate_images_sync",
+                request_payload=request_payload,
+                error=error,
+                runtime_identity=runtime_identity,
+            )
+        append_vision_ai_call_record(
+            request_name="vision_validate_images_sync",
+            request_payload=request_payload,
+            response_payload=None,
+            response_metadata=None,
+            error=str(error),
+            extra={"gateway": "vision_validate_images_sync"},
+        )
+        raise
 
 
 # =============================================================================
@@ -1380,7 +2002,7 @@ class VLChatResult:
     """
     content: str
     finish_reason: Optional[str]
-    usage: Dict[str, int]
+    usage: Dict[str, Any]
     model: str
     cache_hit: bool = False
 
@@ -1394,7 +2016,7 @@ class _VLCacheEntry:
     3) 步骤3：输出处理结果并提供可复用能力。"""
     content: str
     finish_reason: Optional[str]
-    usage: Dict[str, int]
+    usage: Dict[str, Any]
     model: str
     created_at: float
     expires_at: float
@@ -1428,26 +2050,14 @@ _VL_EST_TOKENS_PER_MEDIA = max(1, _env_int("VL_EST_TOKENS_PER_MEDIA", 1024))
 _VL_EST_COMPLETION_RATIO = max(0.0, min(1.0, _env_float("VL_EST_COMPLETION_RATIO", 0.4)))
 
 
-def _extract_usage_from_response(response: Any) -> Dict[str, int]:
+def _extract_usage_from_response(response: Any) -> Dict[str, Any]:
     """方法说明：_extract_usage_from_response 工具方法。
     执行步骤：
     1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
     2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
     3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
     usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
-    normalized = normalize_usage_payload(usage)
-    return {
-        key: value
-        for key, value in normalized.items()
-        if key in {
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "cached_tokens",
-            "prompt_cache_hit_tokens",
-            "prompt_cache_miss_tokens",
-        }
-    }
+    return normalize_usage_payload(usage)
 
 
 def _estimate_vl_request_tokens(messages: Any, max_tokens: int) -> int:
@@ -1509,7 +2119,7 @@ async def _call_vl_api_once(
     temperature: float,
     response_format: Optional[Dict[str, Any]] = None,
     timeout: Optional[float] = None,
-) -> Tuple[str, Optional[str], Dict[str, int], str]:
+) -> Tuple[str, Optional[str], Dict[str, Any], str]:
     """方法说明：_call_vl_api_once 工具方法。
     执行步骤：
     1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。

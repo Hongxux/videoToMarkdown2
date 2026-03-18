@@ -1,7 +1,9 @@
 ﻿import asyncio
+import json
 import types
 from pathlib import Path
 
+from services.python_grpc.src.common.utils.runtime_recovery_store import RuntimeRecoveryStore
 from services.python_grpc.src.content_pipeline.phase2b.assembly.request_models import (
     ClipRequest,
     MaterialRequests,
@@ -866,11 +868,14 @@ def test_analyze_only_exposes_phase2a_contract(tmp_path):
 
     assert len(screenshot_requests) == 1
     assert len(clip_requests) == 1
-    assert Path(semantic_units_path).exists()
+    assert not Path(semantic_units_path).exists()
 
-    import json
-
-    payload = json.loads(Path(semantic_units_path).read_text(encoding="utf-8"))
+    store = RuntimeRecoveryStore(
+        output_dir=str(output_dir),
+        task_id=output_dir.name,
+        storage_key=output_dir.name,
+    )
+    payload = store.load_projection_payload(stage="phase2a", projection_name="semantic_units")
     assert isinstance(payload, dict)
     assert payload.get("knowledge_groups")
     first_group = payload["knowledge_groups"][0]
@@ -881,7 +886,8 @@ def test_analyze_only_exposes_phase2a_contract(tmp_path):
     assert first_unit["material_requests"]["clip_requests"]
 
 
-def test_assemble_only_exposes_phase2b_contract(tmp_path):
+def test_assemble_only_exposes_phase2b_contract(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     output_dir = tmp_path / "out"
     assets_dir = output_dir / "assets" / "SUB01"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -958,12 +964,15 @@ def test_assemble_only_exposes_phase2b_contract(tmp_path):
     )
 
     assert Path(markdown_path).exists()
-    assert Path(json_path).exists()
+    assert not Path(json_path).exists()
     assert Path(markdown_path).name == "Assemble Title.md"
 
-    import json
-
-    doc_payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    store = RuntimeRecoveryStore(
+        output_dir=str(output_dir),
+        task_id=output_dir.name,
+        storage_key=output_dir.name,
+    )
+    doc_payload = store.load_projection_payload(stage="phase2b", projection_name="result_document")
     assert doc_payload.get("title") == "Assemble Title"
     assert doc_payload.get("knowledge_groups")
     first_group = doc_payload["knowledge_groups"][0]

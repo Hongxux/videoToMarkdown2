@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 
+from services.python_grpc.src.common.utils.runtime_llm_context import activate_runtime_llm_context
 from services.python_grpc.src.transcript_pipeline.llm.client import LLMConfig, LLMResponse
 from services.python_grpc.src.transcript_pipeline.llm.deepseek import DeepSeekClient
 
@@ -135,3 +136,88 @@ def test_complete_text_result_cache_hits(monkeypatch):
     assert r1.content == "cached"
     assert r2.content == "cached"
     assert calls["n"] == 1
+
+
+def test_complete_json_persists_runtime_identity_metadata(tmp_path, monkeypatch):
+    client = _make_client()
+
+    async def fake_complete(prompt, system_prompt=None, **kwargs):
+        return _make_response(json.dumps({"ok": True}, ensure_ascii=False))
+
+    monkeypatch.setattr(client, "complete", fake_complete)
+
+    async def run_once():
+        with activate_runtime_llm_context(
+            stage="stage1",
+            output_dir=str(tmp_path),
+            task_id="task-stage1-runtime",
+            storage_key="task-stage1-runtime",
+        ) as runtime_context:
+            parsed, _response = await client.complete_json(
+                "fix subtitles",
+                __runtime_identity__={
+                    "step_name": "stage1_step2_correction",
+                    "request_name": "complete_json",
+                    "unit_id": "batch_0001",
+                    "llm_call_id": "stage1_step2_correction.batch_0001",
+                },
+                __runtime_metadata__={
+                    "stage_step": "step2_correction",
+                    "scope_variant": "batch_0001",
+                    "unit_id": "batch_0001",
+                },
+            )
+            nodes = runtime_context.store.list_scope_nodes(stage="stage1", scope_type="llm_call")
+            return parsed, nodes
+
+    parsed, nodes = asyncio.run(run_once())
+
+    assert parsed == {"ok": True}
+    assert len(nodes) == 1
+    assert nodes[0]["scope_id"] == "stage1_step2_correction.batch_0001"
+    assert nodes[0]["stage_step"] == "step2_correction"
+    assert nodes[0]["scope_variant"] == "batch_0001"
+
+
+def test_complete_json_emits_llm_call_event(tmp_path, monkeypatch):
+    client = _make_client()
+    events = []
+
+    async def fake_complete(prompt, system_prompt=None, **kwargs):
+        return _make_response(json.dumps({"ok": True}, ensure_ascii=False))
+
+    monkeypatch.setattr(client, "complete", fake_complete)
+
+    async def run_once():
+        with activate_runtime_llm_context(
+            stage="stage1",
+            output_dir=str(tmp_path),
+            task_id="task-stage1-heartbeat",
+            storage_key="task-stage1-heartbeat",
+            llm_event_emitter=events.append,
+        ):
+            return await client.complete_json(
+                "fix subtitles",
+                __runtime_identity__={
+                    "step_name": "stage1_step2_correction",
+                    "request_name": "complete_json",
+                    "unit_id": "batch_0001",
+                    "llm_call_id": "stage1_step2_correction.batch_0001",
+                },
+                __runtime_metadata__={
+                    "stage_step": "step2_correction",
+                    "scope_variant": "batch_0001",
+                    "unit_id": "batch_0001",
+                },
+            )
+
+    parsed, _response = asyncio.run(run_once())
+
+    assert parsed == {"ok": True}
+    assert len(events) == 1
+    assert events[0]["event"] == "llm_call_completed"
+    assert events[0]["signal_type"] == "hard"
+    assert events[0]["step_name"] == "step2_correction"
+    assert events[0]["checkpoint"] == "step2_correction.llm_call.batch_0001"
+    assert events[0]["llm_call_id"] == "stage1_step2_correction.batch_0001"
+    assert events[0]["runtime_restored"] is False

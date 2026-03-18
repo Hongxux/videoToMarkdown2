@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 from services.python_grpc.src.server.vl_report_writer import VLReportWriter
 
 
-def test_persist_token_report_writes_immediates_and_intermediates(tmp_path: Path):
+def test_persist_token_report_writes_non_zero_dashscope_cost_and_video_breakdown(tmp_path: Path):
     writes = []
 
     def _capture(path, payload, **kwargs):
@@ -27,24 +27,28 @@ def test_persist_token_report_writes_immediates_and_intermediates(tmp_path: Path
         payload={
             "status": "success",
             "token_stats": {
-                "prompt_tokens_actual": 1000,
-                "completion_tokens_actual": 500,
+                "prompt_tokens_actual": 305,
+                "completion_tokens_actual": 20,
+                "text_input_tokens_actual": 39,
+                "video_input_tokens_actual": 266,
             },
         },
-        vl_model="qwen3-vl-plus",
+        vl_model="qwen-vl-max-latest",
     )
 
-    assert report_path.endswith(os.path.join("immediates", "vl_token_report_VT_CASE_1.json"))
-    assert len(writes) == 4
+    assert report_path.endswith(os.path.join("intermediates", "stages", "phase2a", "audits", "vl_token_report_VT_CASE_1.json"))
+    assert len(writes) == 6
+    assert any(path.endswith(os.path.join("immediates", "vl_token_report_VT_CASE_1.json")) for path, _, _ in writes)
+    assert any(path.endswith(os.path.join("intermediates", "vl_token_report_VT_CASE_1.json")) for path, _, _ in writes)
     payload = writes[0][1]
-    assert payload["token_usage"]["prompt_tokens"] == 1000
-    assert payload["token_usage"]["completion_tokens"] == 500
-    assert payload["token_usage"]["total_tokens"] == 1500
-    assert payload["pricing"]["selected_pricing_model"] == "qwen3-vl-plus"
-    assert payload["pricing"]["selected_cost_usd"] == 0.00375
+    assert payload["token_usage"]["prompt_tokens"] == 305
+    assert payload["token_usage"]["video_input_tokens"] == 266
+    assert payload["pricing"]["status"] == "ok"
+    assert payload["pricing"]["currency"] == "CNY"
+    assert payload["pricing"]["total_cost"] > 0
 
 
-def test_persist_analysis_output_unknown_model_keeps_cost_range(tmp_path: Path):
+def test_persist_analysis_output_unknown_model_marks_pricing_as_unsupported(tmp_path: Path):
     writes = []
 
     def _capture(path, payload, **kwargs):
@@ -72,10 +76,10 @@ def test_persist_analysis_output_unknown_model_keeps_cost_range(tmp_path: Path):
         vl_model="unknown-vl-model",
     )
 
-    assert report_path.endswith(os.path.join("immediates", "vl_analysis_output_VT_CASE_2.json"))
-    assert len(writes) == 4
+    assert report_path.endswith(os.path.join("intermediates", "stages", "phase2a", "audits", "vl_analysis_output_VT_CASE_2.json"))
+    assert len(writes) == 6
+    assert any(path.endswith(os.path.join("immediates", "vl_analysis_output_VT_CASE_2.json")) for path, _, _ in writes)
+    assert any(path.endswith(os.path.join("intermediates", "vl_analysis_output_VT_CASE_2.json")) for path, _, _ in writes)
     payload = writes[0][1]
-    assert payload["pricing"]["selected_pricing_model"] == "unknown"
-    assert payload["pricing"]["selected_cost_usd_min"] == 4.0
-    assert payload["pricing"]["selected_cost_usd_max"] == 6.0
-    assert "selected_cost_usd" not in payload["pricing"]
+    assert payload["pricing"]["status"] == "unsupported_model"
+    assert payload["pricing"]["total_cost"] is None

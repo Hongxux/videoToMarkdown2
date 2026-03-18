@@ -152,3 +152,4 @@ docker-compose.dev.yml
 scripts/dev/
 services/java-orchestrator/src/test/java/com/mvp/module2/fusion/scheduler/
 tools/bgutil-ytdlp-pot-provider/
+docs/architecture/面试.md

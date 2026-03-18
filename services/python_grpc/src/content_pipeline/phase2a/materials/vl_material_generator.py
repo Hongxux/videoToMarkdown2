@@ -13,6 +13,7 @@ VL Material Generator - VL 素材生成鍣?
     result = await generator.generate(video_path, semantic_units)
 """
 
+import copy
 import os
 import json
 import logging
@@ -38,7 +39,20 @@ from services.python_grpc.src.common.utils.opencv_decode import open_video_captu
 from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
 from services.python_grpc.src.common.utils.runtime_recovery_store import (
     RuntimeRecoveryStore,
+    STATUS_ERROR,
+    STATUS_FAILED,
+    STATUS_MANUAL_NEEDED,
+    STATUS_PLANNED,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+    build_runtime_payload_fingerprint,
     build_screenshot_chunk_fingerprint,
+    classify_runtime_error,
+)
+from services.python_grpc.src.common.utils.stage_artifact_paths import (
+    phase2a_token_cost_audit_path,
+    phase2a_vl_analysis_candidates,
+    phase2a_vl_analysis_path,
 )
 from services.python_grpc.src.content_pipeline.shared.subtitle.subtitle_repository import SubtitleRepository
 from services.python_grpc.src.content_pipeline.infra.runtime.vl_interval_utils import (
@@ -355,7 +369,15 @@ class VLMaterialGenerator:
     _visual_extractor_cache: Dict[str, Any] = {}
     _visual_extractor_cache_lock = threading.Lock()
     
-    def __init__(self, config: Dict[str, Any] = None, *, cv_executor: Any = None):
+    def __init__(
+        self,
+        config: Dict[str, Any] = None,
+        *,
+        cv_executor: Any = None,
+        task_id: str = "",
+        storage_key: str = "",
+        normalized_video_key: str = "",
+    ):
         """
         初始化生成器
         
@@ -370,8 +392,15 @@ class VLMaterialGenerator:
         
         self.config = config
         self.enabled = config.get("enabled", False)
+        self._runtime_task_id = str(task_id or "").strip()
+        self._runtime_storage_key = str(storage_key or "").strip()
+        self._runtime_normalized_video_key = str(normalized_video_key or "").strip()
         self._runtime_store: Optional[RuntimeRecoveryStore] = None
         self._runtime_output_dir = ""
+        self._runtime_chunk_restore_cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        self._runtime_chunk_dispatch_summary: Dict[str, Any] = {}
+        self._runtime_chunk_wave_ids: Dict[Tuple[str, str], str] = {}
+        self._runtime_vl_wave_ids: Dict[str, str] = {}
         self.screenshot_config = config.get("screenshot_optimization", {})
         self.fallback_config = config.get("fallback", {})
         self.best_frame_vision_select_enabled = bool(
@@ -919,7 +948,7 @@ class VLMaterialGenerator:
     def _get_cache_path(self, video_path: str, output_dir: str = None) -> Path:
         """获取VL结果缓存文件路径"""
         if output_dir:
-            cache_dir = Path(output_dir)
+            return phase2a_vl_analysis_path(output_dir)
         else:
             cache_dir = Path(video_path).parent
         
@@ -952,8 +981,14 @@ class VLMaterialGenerator:
                 "successful_units": sum(1 for r in serialized_results if r.get("success", False))
             }
             
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            resolved_output_dir = str(cache_path.parents[4]) if cache_path.name == "vl_analysis.json" and len(cache_path.parents) >= 5 else str(cache_path.parent)
+            self._prepare_runtime_store_for_output_dir(resolved_output_dir)
+            if self._runtime_store is not None:
+                self._runtime_store.commit_projection_payload(
+                    stage="phase2a",
+                    projection_name="vl_analysis_cache",
+                    payload=cache_data,
+                )
             
             logger.info(f"鉁?VL 分析结果已保存到缓存: {cache_path}")
             logger.info(f"   - 总单元数: {cache_data['total_units']}")
@@ -1017,10 +1052,14 @@ class VLMaterialGenerator:
                             "timeout_sec": request.get("timeout_sec"),
                             "hedge_delay_ms": request.get("hedge_delay_ms"),
                             "offline_task_enabled": request.get("offline_task_enabled"),
+                            "message_transport": request.get("message_transport"),
+                            "message_transport_meta": request.get("message_transport_meta"),
                         },
                         "response": {
                             "finish_reason": response.get("finish_reason"),
                             "cache_hit": bool(response.get("cache_hit", False)),
+                            "billing_input_token_field": cost_estimate.get("billing_input_token_field"),
+                            "prompt_tokens_include_media": bool(cost_estimate.get("prompt_tokens_include_media", False)),
                             "error": str(interaction.get("error", "") or interaction.get("error_raw", "") or ""),
                         },
                     }
@@ -1052,14 +1091,23 @@ class VLMaterialGenerator:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "video_path": str(video_path or ""),
                 "pricing_snapshot": get_token_pricing_snapshot(),
+                "billing_notes": [
+                    "For DashScope/OpenAI-compatible VL, provider usage.prompt_tokens is the billed input token field.",
+                    "When prompt_tokens_details is present, video/text breakdown should be read from that structure instead of inferred from names alone.",
+                ],
                 "task_token_stats": dict(token_stats or {}),
                 "summary": summary,
                 "records": audit_records,
             }
-            audit_path = Path(output_text) / "intermediates" / "phase2a_token_cost_audit.json"
+            audit_path = phase2a_token_cost_audit_path(output_text)
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             with open(audit_path, "w", encoding="utf-8") as file_obj:
                 json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+            legacy_audit_path = Path(output_text) / "intermediates" / "phase2a_token_cost_audit.json"
+            if legacy_audit_path != audit_path:
+                legacy_audit_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(legacy_audit_path, "w", encoding="utf-8") as file_obj:
+                    json.dump(payload, file_obj, ensure_ascii=False, indent=2)
             logger.info(
                 "[VL-TokenAudit] phase2a token cost audit saved: path=%s, records=%s, priced=%s",
                 audit_path,
@@ -1111,16 +1159,37 @@ class VLMaterialGenerator:
             )
         return serialized_results
 
-    def _load_vl_results(self, cache_path: Path) -> Optional[Dict[str, Any]]:
+    def _load_vl_results(self, cache_path: Path, *, output_dir: str = "") -> Optional[Dict[str, Any]]:
         """从JSON文件加载VL分析结果"""
         try:
-            if not cache_path.exists():
+            candidate_paths = [cache_path]
+            if output_dir:
+                candidate_paths = [Path(path_item) for path_item in phase2a_vl_analysis_candidates(output_dir)]
+
+            resolved_cache_path = None
+            for candidate_path in candidate_paths:
+                if candidate_path.exists():
+                    resolved_cache_path = candidate_path
+                    break
+            if resolved_cache_path is None:
+                resolved_output_dir = str(output_dir or "")
+                if not resolved_output_dir:
+                    resolved_output_dir = str(cache_path.parents[4]) if cache_path.name == "vl_analysis.json" and len(cache_path.parents) >= 5 else str(cache_path.parent)
+                self._prepare_runtime_store_for_output_dir(resolved_output_dir)
+                if self._runtime_store is not None:
+                    cache_data = self._runtime_store.load_projection_payload(
+                        stage="phase2a",
+                        projection_name="vl_analysis_cache",
+                    )
+                    if isinstance(cache_data, dict):
+                        logger.info(f"🔍 从任务内 SQLite 加载VL分析结果: output_dir={resolved_output_dir}")
+                        return cache_data
                 return None
             
-            with open(cache_path, 'r', encoding='utf-8') as f:
+            with open(resolved_cache_path, 'r', encoding='utf-8') as f:
                 cache_data = json.load(f)
             
-            logger.info(f"鉁?从缓存加载VL分析结果: {cache_path}")
+            logger.info(f"鉁?从缓存加载VL分析结果: {resolved_cache_path}")
             logger.info(f"   - 缓存版本: {cache_data.get('version', 'unknown')}")
             logger.info(f"   - 总单元数: {cache_data.get('total_units', 0)}")
             logger.info(f"   - 成功单元: {cache_data.get('successful_units', 0)}")
@@ -1438,6 +1507,7 @@ class VLMaterialGenerator:
                 semantic_unit_id=unit_id,
                 extra_prompt=extra_prompt,
                 analysis_mode="concrete",
+                wave_id=str(self._runtime_vl_wave_ids.get(unit_id, "") or ""),
             )
         except Exception as error:
             logger.warning(
@@ -1611,6 +1681,39 @@ class VLMaterialGenerator:
                 else:
                     extra_prompt = pre_context_prompt
 
+            wave_id = f"wave_{index + 1:04d}"
+            analysis_input_fingerprint = build_runtime_payload_fingerprint(
+                {
+                    "unit_id": unit_id,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "analysis_mode": analysis_mode,
+                    "clip_path_for_vl": clip_path_for_vl,
+                    "extra_prompt": extra_prompt,
+                    "stage": "phase2a.vl_analysis",
+                }
+            )
+            self._runtime_vl_wave_ids[unit_id] = wave_id
+            if self._runtime_store is not None:
+                self._runtime_store.plan_substage_scope(
+                    stage="phase2a",
+                    substage_name="vl_analysis",
+                    wave_id=wave_id,
+                    input_fingerprint=analysis_input_fingerprint,
+                    plan_context={
+                        "unit_id": unit_id,
+                        "analysis_mode": analysis_mode,
+                        "clip_path": clip_path_for_vl,
+                        "work_units": [
+                            {
+                                "scope_type": "llm_call",
+                                "unit_id": unit_id,
+                                "chunk_id": self._build_phase2a_runtime_chunk_id(unit_id=unit_id),
+                            }
+                        ],
+                    },
+                )
+
             task_inputs.append(
                 {
                     "clip_path": clip_path_for_vl,
@@ -1618,6 +1721,7 @@ class VLMaterialGenerator:
                     "semantic_unit_id": unit_id,
                     "extra_prompt": extra_prompt,
                     "analysis_mode": analysis_mode,
+                    "wave_id": wave_id,
                 }
             )
             task_metadata.append(
@@ -1632,6 +1736,8 @@ class VLMaterialGenerator:
                     "pre_prune": pre_prune_info,
                     "analysis_mode": analysis_mode,
                     "extra_prompt": extra_prompt,
+                    "wave_id": wave_id,
+                    "input_fingerprint": analysis_input_fingerprint,
                 }
             )
 
@@ -1690,6 +1796,49 @@ class VLMaterialGenerator:
 
         async def _emit_stream_result(original_index: int, result_item: Any) -> None:
             analysis_results[original_index] = result_item
+            if self._runtime_store is not None and original_index < len(task_metadata):
+                meta = task_metadata[original_index]
+                wave_id = str(meta.get("wave_id", "") or "").strip() or "wave_0001"
+                input_fingerprint = str(meta.get("input_fingerprint", "") or "").strip()
+                unit_id = str(meta.get("unit_id", "") or "").strip()
+                analysis_success = not isinstance(result_item, Exception) and bool(
+                    getattr(result_item, "success", False)
+                )
+                error_message = (
+                    str(result_item)
+                    if isinstance(result_item, Exception)
+                    else str(getattr(result_item, "error_msg", "") or "")
+                )
+                self._runtime_store.transition_scope_node(
+                    scope_ref=self._runtime_store.build_substage_scope_ref(
+                        stage="phase2a",
+                        substage_name="vl_analysis",
+                        wave_id=wave_id,
+                    ),
+                    stage="phase2a",
+                    scope_type="substage",
+                    scope_id=self._runtime_store.build_substage_scope_id(
+                        substage_name="vl_analysis",
+                        wave_id=wave_id,
+                    ),
+                    status=STATUS_SUCCESS,
+                    input_fingerprint=input_fingerprint,
+                    stage_step="vl_analysis",
+                    plan_context={
+                        "unit_id": unit_id,
+                        "analysis_mode": str(meta.get("analysis_mode", "") or ""),
+                        "clip_path": str(meta.get("vl_clip_path", "") or ""),
+                        "analysis_success": analysis_success,
+                        "error_message": error_message,
+                    },
+                    result_hash=build_runtime_payload_fingerprint(
+                        {
+                            "unit_id": unit_id,
+                            "analysis_success": analysis_success,
+                            "error_message": error_message,
+                        }
+                    ),
+                )
             if on_result is None:
                 return
             if original_index in streamed_indexes:
@@ -1703,6 +1852,33 @@ class VLMaterialGenerator:
 
         batch_runner = getattr(self.analyzer, "analyze_clips_batch", None)
         if callable(batch_runner):
+            if self._runtime_store is not None:
+                for original_index in dispatch_order:
+                    if original_index >= len(task_metadata):
+                        continue
+                    meta = task_metadata[original_index]
+                    self._runtime_store.transition_scope_node(
+                        scope_ref=self._runtime_store.build_substage_scope_ref(
+                            stage="phase2a",
+                            substage_name="vl_analysis",
+                            wave_id=str(meta.get("wave_id", "") or "wave_0001"),
+                        ),
+                        stage="phase2a",
+                        scope_type="substage",
+                        scope_id=self._runtime_store.build_substage_scope_id(
+                            substage_name="vl_analysis",
+                            wave_id=str(meta.get("wave_id", "") or "wave_0001"),
+                        ),
+                        status=STATUS_RUNNING,
+                        input_fingerprint=str(meta.get("input_fingerprint", "") or ""),
+                        stage_step="vl_analysis",
+                        plan_context={
+                            "unit_id": str(meta.get("unit_id", "") or ""),
+                            "analysis_mode": str(meta.get("analysis_mode", "") or ""),
+                            "clip_path": str(meta.get("vl_clip_path", "") or ""),
+                        },
+                    )
+
             async def _dispatch_result_callback(dispatch_index: int, result_item: Any) -> None:
                 if dispatch_index >= len(dispatch_order):
                     return
@@ -1743,6 +1919,32 @@ class VLMaterialGenerator:
                 await _emit_stream_result(original_index, result_item)
         else:
             semaphore = asyncio.Semaphore(worker_count)
+            if self._runtime_store is not None:
+                for original_index in dispatch_order:
+                    if original_index >= len(task_metadata):
+                        continue
+                    meta = task_metadata[original_index]
+                    self._runtime_store.transition_scope_node(
+                        scope_ref=self._runtime_store.build_substage_scope_ref(
+                            stage="phase2a",
+                            substage_name="vl_analysis",
+                            wave_id=str(meta.get("wave_id", "") or "wave_0001"),
+                        ),
+                        stage="phase2a",
+                        scope_type="substage",
+                        scope_id=self._runtime_store.build_substage_scope_id(
+                            substage_name="vl_analysis",
+                            wave_id=str(meta.get("wave_id", "") or "wave_0001"),
+                        ),
+                        status=STATUS_RUNNING,
+                        input_fingerprint=str(meta.get("input_fingerprint", "") or ""),
+                        stage_step="vl_analysis",
+                        plan_context={
+                            "unit_id": str(meta.get("unit_id", "") or ""),
+                            "analysis_mode": str(meta.get("analysis_mode", "") or ""),
+                            "clip_path": str(meta.get("vl_clip_path", "") or ""),
+                        },
+                    )
 
             async def _run_single(dispatch_index: int, task_input: Dict[str, Any]) -> Tuple[int, Any]:
                 async with semaphore:
@@ -1753,6 +1955,7 @@ class VLMaterialGenerator:
                             semantic_unit_id=task_input["semantic_unit_id"],
                             extra_prompt=task_input.get("extra_prompt"),
                             analysis_mode=task_input.get("analysis_mode", "default"),
+                            wave_id=str(task_input.get("wave_id", "") or ""),
                         )
                     except Exception as exc:
                         result_item = exc
@@ -2766,6 +2969,24 @@ class VLMaterialGenerator:
                 retry_label="main_operation batch postprocess",
             )
         except Exception as error:
+            self._append_phase2a_raw_interaction(
+                analysis_result,
+                {
+                    "stage": "vl_arg_main_operation_postprocess_batch",
+                    "attempt": 1,
+                    "success": False,
+                    "request": {
+                        "model": self.vl_arg_postprocess_model,
+                        "system_message": self._vl_arg_structured_system_prompt,
+                        "prompt": prompt,
+                        "analysis_mode": "tutorial_stepwise",
+                        "semantic_unit_id": unit_id,
+                        "step_ids": step_ids_in_batch,
+                    },
+                    "error": str(error),
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             logger.warning(
                 "[VL-Arg] batch postprocess failed: unit=%s, step_ids=%s, error=%s",
                 unit_id,
@@ -2773,6 +2994,31 @@ class VLMaterialGenerator:
                 error,
             )
             return
+
+        self._append_phase2a_raw_interaction(
+            analysis_result,
+            {
+                "stage": "vl_arg_main_operation_postprocess_batch",
+                "attempt": 1,
+                "success": True,
+                "request": {
+                    "model": self.vl_arg_postprocess_model,
+                    "system_message": self._vl_arg_structured_system_prompt,
+                    "prompt": prompt,
+                    "analysis_mode": "tutorial_stepwise",
+                    "semantic_unit_id": unit_id,
+                    "step_ids": step_ids_in_batch,
+                },
+                "response": {
+                    "model": str(getattr(_metadata, "model", self.vl_arg_postprocess_model) or self.vl_arg_postprocess_model),
+                    "prompt_tokens": getattr(_metadata, "prompt_tokens", None),
+                    "completion_tokens": getattr(_metadata, "completion_tokens", None),
+                    "total_tokens": getattr(_metadata, "total_tokens", None),
+                    "content": str(enhanced_text or ""),
+                },
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
         enhanced_by_step = self._parse_vl_arg_batch_response(
             text=str(enhanced_text or ""),
@@ -3007,6 +3253,23 @@ class VLMaterialGenerator:
                 retry_label="main_content batch postprocess",
             )
         except Exception as error:
+            self._append_phase2a_raw_interaction(
+                analysis_result,
+                {
+                    "stage": "vl_arg_main_content_postprocess_batch",
+                    "attempt": 1,
+                    "success": False,
+                    "request": {
+                        "model": self.vl_arg_postprocess_model,
+                        "prompt": prompt,
+                        "analysis_mode": "concrete",
+                        "semantic_unit_id": unit_id,
+                        "segment_ids": segment_ids,
+                    },
+                    "error": str(error),
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             logger.warning(
                 "[VL-Arg] concrete main_content postprocess failed: unit=%s, segment_ids=%s, error=%s",
                 unit_id,
@@ -3014,6 +3277,30 @@ class VLMaterialGenerator:
                 error,
             )
             return
+
+        self._append_phase2a_raw_interaction(
+            analysis_result,
+            {
+                "stage": "vl_arg_main_content_postprocess_batch",
+                "attempt": 1,
+                "success": True,
+                "request": {
+                    "model": self.vl_arg_postprocess_model,
+                    "prompt": prompt,
+                    "analysis_mode": "concrete",
+                    "semantic_unit_id": unit_id,
+                    "segment_ids": segment_ids,
+                },
+                "response": {
+                    "model": str(getattr(_metadata, "model", self.vl_arg_postprocess_model) or self.vl_arg_postprocess_model),
+                    "prompt_tokens": getattr(_metadata, "prompt_tokens", None),
+                    "completion_tokens": getattr(_metadata, "completion_tokens", None),
+                    "total_tokens": getattr(_metadata, "total_tokens", None),
+                    "content": str(enhanced_text or ""),
+                },
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
         enhanced_by_segment = self._parse_vl_arg_concrete_batch_response(
             text=str(enhanced_text or ""),
@@ -3145,6 +3432,16 @@ class VLMaterialGenerator:
         *,
         keyframe_path: Path,
     ) -> Dict[str, Any]:
+        def _finalize_grid_result(result_payload: Dict[str, Any]) -> Dict[str, Any]:
+            interaction = result_payload.get("grid_anchor_llm_interaction")
+            if isinstance(interaction, dict):
+                self._persist_phase2a_llm_interaction(
+                    unit_id=keyframe_path.stem,
+                    interaction=interaction,
+                    interaction_kind="phase2a_grid_anchor",
+                )
+            return result_payload
+
         if not self.tutorial_grid_anchor_enabled:
             return {"grid_anchor_status": "disabled"}
 
@@ -3174,7 +3471,7 @@ class VLMaterialGenerator:
                 skip_duplicate_check=True,
             )
         except Exception as error:
-            return {
+            return _finalize_grid_result({
                 "grid_anchor_status": "vision_failed",
                 "grid_anchor_error": str(error),
                 "grid_overlay_file": overlay_path.name,
@@ -3184,13 +3481,13 @@ class VLMaterialGenerator:
                     "request": request_audit,
                     "error": str(error),
                 },
-            }
+            })
 
         parsed = self._parse_grid_anchor_payload(payload)
         grid_start = str(parsed.get("grid_start", "") or "").strip().upper()
         grid_end = str(parsed.get("grid_end", "") or "").strip().upper()
         if not grid_start or not grid_end:
-            return {
+            return _finalize_grid_result({
                 "grid_anchor_status": "invalid_grid_response",
                 "grid_overlay_file": overlay_path.name,
                 "grid_anchor_llm_interaction": {
@@ -3200,7 +3497,7 @@ class VLMaterialGenerator:
                     "response": payload if isinstance(payload, dict) else {"raw_response": str(payload)},
                     "error": "invalid_grid_response",
                 },
-            }
+            })
 
         crop_meta = crop_keyframe_inplace_by_grid_range(
             image_path=keyframe_path,
@@ -3212,7 +3509,7 @@ class VLMaterialGenerator:
             min_border_px=self.tutorial_grid_crop_min_border_px,
         )
         if crop_meta is None:
-            return {
+            return _finalize_grid_result({
                 "grid_anchor_status": "crop_failed",
                 "grid_start": grid_start,
                 "grid_end": grid_end,
@@ -3225,7 +3522,7 @@ class VLMaterialGenerator:
                     "parsed": parsed,
                     "error": "crop_failed",
                 },
-            }
+            })
 
         result: Dict[str, Any] = {
             "grid_anchor_status": "ok",
@@ -3247,7 +3544,7 @@ class VLMaterialGenerator:
         visual_verification = str(parsed.get("visual_verification", "") or "").strip()
         if visual_verification:
             result["visual_verification"] = visual_verification
-        return result
+        return _finalize_grid_result(result)
 
     def _slugify_action_brief(self, text_value: str, max_len: int = 48) -> str:
         """将步骤描述转换为稳定文件名片段。"""
@@ -5654,17 +5951,135 @@ class VLMaterialGenerator:
                     token_stats.get("should_type_concrete_reanalysis_units", 0)
                 ) + 1
 
-        await self._postprocess_unit_main_operations(
-            analysis_result=analysis_result,
-            semantic_unit=meta.get("semantic_unit", {}),
-            output_dir=resolved_output_dir,
-        )
-        await self._postprocess_unit_main_content(
-            analysis_result=analysis_result,
-            semantic_unit=meta.get("semantic_unit", {}),
-            output_dir=resolved_output_dir,
-        )
+        wave_id = str(meta.get("wave_id", "") or "wave_0001")
+        input_fingerprint = str(meta.get("input_fingerprint", "") or "")
+        analysis_mode = str(meta.get("analysis_mode", "") or "")
+        clip_path = str(meta.get("vl_clip_path", meta.get("clip_path", "")) or "")
         semantic_unit = meta.get("semantic_unit", {})
+        restored_unit_projection = self._restore_unit_material_projection_if_committed(
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            semantic_unit=semantic_unit,
+            analysis_result=analysis_result,
+        )
+        if isinstance(restored_unit_projection, dict):
+            restored_clip_requests = list(restored_unit_projection.get("clip_requests", []) or [])
+            restored_screenshot_requests = list(restored_unit_projection.get("screenshot_requests", []) or [])
+            all_clip_requests.extend(restored_clip_requests)
+            all_screenshot_requests.extend(restored_screenshot_requests)
+            logger.info(
+                "[VL-Streaming] unit projection restored: unit=%s, idx=%s, clips=%s, screenshots=%s",
+                unit_id,
+                result_index,
+                len(restored_clip_requests),
+                len(restored_screenshot_requests),
+            )
+            return
+        self._transition_phase2a_unit_substage(
+            substage_name="asset_capture",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=input_fingerprint,
+            status=STATUS_PLANNED,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+        )
+        self._transition_phase2a_unit_substage(
+            substage_name="asset_capture",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=input_fingerprint,
+            status=STATUS_RUNNING,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+        )
+        try:
+            await self._postprocess_unit_main_operations(
+                analysis_result=analysis_result,
+                semantic_unit=meta.get("semantic_unit", {}),
+                output_dir=resolved_output_dir,
+            )
+        except Exception as error:
+            self._transition_phase2a_unit_substage(
+                substage_name="asset_capture",
+                unit_id=str(unit_id or ""),
+                wave_id=wave_id,
+                input_fingerprint=input_fingerprint,
+                status=STATUS_FAILED,
+                analysis_mode=analysis_mode,
+                clip_path=clip_path,
+                error=error,
+            )
+            raise
+        self._transition_phase2a_unit_substage(
+            substage_name="asset_capture",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=input_fingerprint,
+            status=STATUS_SUCCESS,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            result_summary={
+                "clip_requests": len(list(getattr(analysis_result, "clip_requests", []) or [])),
+                "screenshot_requests": len(list(getattr(analysis_result, "screenshot_requests", []) or [])),
+            },
+        )
+        self._transition_phase2a_unit_substage(
+            substage_name="main_content_structure",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=input_fingerprint,
+            status=STATUS_PLANNED,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+        )
+        self._transition_phase2a_unit_substage(
+            substage_name="main_content_structure",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=input_fingerprint,
+            status=STATUS_RUNNING,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+        )
+        try:
+            await self._postprocess_unit_main_content(
+                analysis_result=analysis_result,
+                semantic_unit=meta.get("semantic_unit", {}),
+                output_dir=resolved_output_dir,
+            )
+        except Exception as error:
+            self._transition_phase2a_unit_substage(
+                substage_name="main_content_structure",
+                unit_id=str(unit_id or ""),
+                wave_id=wave_id,
+                input_fingerprint=input_fingerprint,
+                status=STATUS_FAILED,
+                analysis_mode=analysis_mode,
+                clip_path=clip_path,
+                error=error,
+            )
+            raise
+        self._transition_phase2a_unit_substage(
+            substage_name="main_content_structure",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=input_fingerprint,
+            status=STATUS_SUCCESS,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            result_summary={
+                "analysis_mode": analysis_mode,
+                "has_raw_response_json": bool(getattr(analysis_result, "raw_response_json", [])),
+            },
+        )
+        self._persist_phase2a_raw_interactions(
+            unit_id=str(unit_id or ""),
+            interactions=getattr(analysis_result, "raw_llm_interactions", []) or [],
+            interaction_kind="phase2a_unit_analysis",
+        )
         if not is_tutorial_stepwise:
             should_type_override = self._analysis_result_should_type_override(analysis_result)
             has_no_needed_video = self._analysis_result_has_no_needed_video(analysis_result)
@@ -5727,9 +6142,25 @@ class VLMaterialGenerator:
         prompt_actual = int(usage.get("prompt_tokens", 0) or 0)
         completion_actual = int(usage.get("completion_tokens", 0) or 0)
         total_actual = int(usage.get("total_tokens", prompt_actual + completion_actual) or 0)
+        input_actual = int(usage.get("input_tokens", prompt_actual) or 0)
+        output_actual = int(usage.get("output_tokens", completion_actual) or 0)
+        text_input_actual = int(usage.get("text_input_tokens", 0) or 0)
+        image_input_actual = int(usage.get("image_input_tokens", 0) or 0)
+        audio_input_actual = int(usage.get("audio_input_tokens", 0) or 0)
+        video_input_actual = int(usage.get("video_input_tokens", 0) or 0)
+        media_input_actual = int(usage.get("media_input_tokens", 0) or 0)
+        if media_input_actual <= 0:
+            media_input_actual = max(0, image_input_actual + audio_input_actual + video_input_actual)
         token_stats["prompt_tokens_actual"] += prompt_actual
         token_stats["completion_tokens_actual"] += completion_actual
         token_stats["total_tokens_actual"] += total_actual
+        token_stats["input_tokens_actual"] += input_actual
+        token_stats["output_tokens_actual"] += output_actual
+        token_stats["text_input_tokens_actual"] += text_input_actual
+        token_stats["image_input_tokens_actual"] += image_input_actual
+        token_stats["audio_input_tokens_actual"] += audio_input_actual
+        token_stats["video_input_tokens_actual"] += video_input_actual
+        token_stats["media_input_tokens_actual"] += media_input_actual
 
         pre_prune_info = meta.get("pre_prune") or {}
         kept_segments = pre_prune_info.get("kept_segments") or []
@@ -5759,6 +6190,8 @@ class VLMaterialGenerator:
         token_stats["prompt_tokens_baseline_est"] += max(0, prompt_base)
         token_stats["completion_tokens_baseline_est"] += max(0, completion_base)
         token_stats["total_tokens_baseline_est"] += max(0, total_base)
+        token_stats["input_tokens_baseline_est"] += max(0, prompt_base)
+        token_stats["output_tokens_baseline_est"] += max(0, completion_base)
 
         if pre_prune_info.get("applied") and kept_segments:
             for clip_item in analysis_result.clip_requests:
@@ -5858,6 +6291,53 @@ class VLMaterialGenerator:
                 use_analysis_relative_timestamps=use_relative_ts_for_export,
                 prefer_screenshot_requests_keyframes=prefer_screenshot_keyframes,
             )
+
+        unit_projection_input_fingerprint = self._build_unit_material_projection_input_fingerprint(
+            unit_id=str(unit_id or ""),
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            semantic_unit=semantic_unit,
+            analysis_result=analysis_result,
+        )
+        self._transition_phase2a_unit_substage(
+            substage_name="unit_material_projection",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=unit_projection_input_fingerprint,
+            status=STATUS_PLANNED,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+        )
+        self._transition_phase2a_unit_substage(
+            substage_name="unit_material_projection",
+            unit_id=str(unit_id or ""),
+            wave_id=wave_id,
+            input_fingerprint=unit_projection_input_fingerprint,
+            status=STATUS_RUNNING,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+        )
+        try:
+            self._commit_unit_material_projection(
+                unit_id=str(unit_id or ""),
+                wave_id=wave_id,
+                analysis_mode=analysis_mode,
+                clip_path=clip_path,
+                semantic_unit=semantic_unit,
+                analysis_result=analysis_result,
+            )
+        except Exception as error:
+            self._transition_phase2a_unit_substage(
+                substage_name="unit_material_projection",
+                unit_id=str(unit_id or ""),
+                wave_id=wave_id,
+                input_fingerprint=unit_projection_input_fingerprint,
+                status=STATUS_FAILED,
+                analysis_mode=analysis_mode,
+                clip_path=clip_path,
+                error=error,
+            )
+            raise
 
         all_clip_requests.extend(analysis_result.clip_requests)
         all_screenshot_requests.extend(analysis_result.screenshot_requests)
@@ -6189,6 +6669,7 @@ class VLMaterialGenerator:
             "semantic_unit_id": unit_id,
             "extra_prompt": extra_prompt,
             "analysis_mode": analysis_mode,
+            "wave_id": str(unit_task.get("wave_id", "") or ""),
         }
         task_meta = {
             "unit_id": unit_id,
@@ -6201,6 +6682,7 @@ class VLMaterialGenerator:
             "pre_prune": pre_prune_info,
             "analysis_mode": analysis_mode,
             "extra_prompt": extra_prompt,
+            "wave_id": str(unit_task.get("wave_id", "") or ""),
         }
         return task_input, task_meta, bool(pre_prune_info.get("applied"))
 
@@ -6267,11 +6749,50 @@ class VLMaterialGenerator:
 
         def _schedule_analysis_task(unit_task: Dict[str, Any], pre_prune_info: Dict[str, Any]) -> None:
             nonlocal pruned_units, dispatched_vl_units
+            result_index = len(task_metadata)
+            wave_id = f"wave_{result_index + 1:04d}"
+            unit_task = dict(unit_task or {})
+            unit_task["wave_id"] = wave_id
             task_input, task_meta, pre_prune_applied = self._build_single_task_dispatch_payload(
                 unit_task=unit_task,
                 pre_prune_info=pre_prune_info,
             )
-            result_index = len(task_metadata)
+            analysis_input_fingerprint = build_runtime_payload_fingerprint(
+                {
+                    "unit_id": str(task_meta.get("unit_id", "") or ""),
+                    "start_sec": float(task_meta.get("start_sec", 0.0) or 0.0),
+                    "end_sec": float(task_meta.get("end_sec", task_meta.get("start_sec", 0.0)) or 0.0),
+                    "analysis_mode": str(task_meta.get("analysis_mode", "default") or "default"),
+                    "clip_path_for_vl": str(task_meta.get("vl_clip_path", "") or ""),
+                    "extra_prompt": task_meta.get("extra_prompt"),
+                    "stage": "phase2a.vl_analysis",
+                }
+            )
+            task_input["wave_id"] = wave_id
+            task_meta["wave_id"] = wave_id
+            task_meta["input_fingerprint"] = analysis_input_fingerprint
+            self._runtime_vl_wave_ids[str(task_meta.get("unit_id", "") or "")] = wave_id
+            if self._runtime_store is not None:
+                self._runtime_store.plan_substage_scope(
+                    stage="phase2a",
+                    substage_name="vl_analysis",
+                    wave_id=wave_id,
+                    input_fingerprint=analysis_input_fingerprint,
+                    plan_context={
+                        "unit_id": str(task_meta.get("unit_id", "") or ""),
+                        "analysis_mode": str(task_meta.get("analysis_mode", "") or ""),
+                        "clip_path": str(task_meta.get("vl_clip_path", "") or ""),
+                        "work_units": [
+                            {
+                                "scope_type": "llm_call",
+                                "unit_id": str(task_meta.get("unit_id", "") or ""),
+                                "chunk_id": self._build_phase2a_runtime_chunk_id(
+                                    unit_id=str(task_meta.get("unit_id", "") or "")
+                                ),
+                            }
+                        ],
+                    },
+                )
             task_metadata.append(task_meta)
             analysis_results.append(RuntimeError("vl_stream_result_pending"))
             if pre_prune_applied:
@@ -6291,6 +6812,7 @@ class VLMaterialGenerator:
                             semantic_unit_id=str(input_value.get("semantic_unit_id", "") or ""),
                             extra_prompt=input_value.get("extra_prompt"),
                             analysis_mode=str(input_value.get("analysis_mode", "default") or "default"),
+                            wave_id=str(input_value.get("wave_id", "") or ""),
                         )
                     except Exception as error:
                         analyzed_result = error
@@ -6509,11 +7031,20 @@ class VLMaterialGenerator:
             "prompt_tokens_actual": 0,
             "completion_tokens_actual": 0,
             "total_tokens_actual": 0,
+            "input_tokens_actual": 0,
+            "output_tokens_actual": 0,
+            "text_input_tokens_actual": 0,
+            "image_input_tokens_actual": 0,
+            "audio_input_tokens_actual": 0,
+            "video_input_tokens_actual": 0,
+            "media_input_tokens_actual": 0,
             # 基线定义：若不做前置裁剪，则 pruned 单元鎸?"原片娈?token/绉?* 原始时长" 估算
             # 闈?pruned 单元基线=实际（因为路径一致）
             "prompt_tokens_baseline_est": 0,
             "completion_tokens_baseline_est": 0,
             "total_tokens_baseline_est": 0,
+            "input_tokens_baseline_est": 0,
+            "output_tokens_baseline_est": 0,
             "saved_tokens_est": 0,
             "saved_ratio_est": 0.0,
         }
@@ -6537,7 +7068,7 @@ class VLMaterialGenerator:
             return result
         
         if use_cache:
-            cached_data = self._load_vl_results(cache_path)
+            cached_data = self._load_vl_results(cache_path, output_dir=resolved_output_dir)
             if cached_data:
                 logger.info("🚀 使用缓存的VL分析结果,跳过VL API调用")
                 all_screenshot_requests = cached_data.get("aggregated_screenshots", [])
@@ -7883,19 +8414,780 @@ class VLMaterialGenerator:
         if not resolved_output_dir:
             self._runtime_store = None
             self._runtime_output_dir = ""
+            self._runtime_chunk_restore_cache = {}
+            self._runtime_chunk_dispatch_summary = {}
             return
         if self._runtime_store is not None and self._runtime_output_dir == resolved_output_dir:
             return
         try:
             self._runtime_store = RuntimeRecoveryStore(
                 output_dir=resolved_output_dir,
-                task_id=Path(resolved_output_dir).name,
+                task_id=self._runtime_task_id or Path(resolved_output_dir).name,
+                storage_key=self._runtime_storage_key or Path(resolved_output_dir).name,
+                normalized_video_key=self._runtime_normalized_video_key,
             )
             self._runtime_output_dir = resolved_output_dir
+            self._runtime_chunk_restore_cache = {}
+            self._runtime_chunk_dispatch_summary = {}
+            self._runtime_chunk_wave_ids = {}
+            self._runtime_vl_wave_ids = {}
         except Exception as exc:
             logger.warning(f"Failed to prepare phase2a runtime recovery store: {exc}")
             self._runtime_store = None
             self._runtime_output_dir = resolved_output_dir
+            self._runtime_chunk_restore_cache = {}
+            self._runtime_chunk_dispatch_summary = {}
+            self._runtime_chunk_wave_ids = {}
+            self._runtime_vl_wave_ids = {}
+
+    def prime_phase2a_chunk_stage_dispatch(
+        self,
+        *,
+        video_path: str,
+        chunks: List[Dict[str, Any]],
+        modes: List[str],
+    ) -> None:
+        if self._runtime_store is None:
+            self._runtime_chunk_restore_cache = {}
+            self._runtime_chunk_dispatch_summary = {}
+            return
+        self._runtime_chunk_wave_ids = {}
+        dispatch_items: List[Dict[str, Any]] = []
+        for chunk_index, chunk in enumerate(list(chunks or [])):
+            chunk_id = self._runtime_store.build_chunk_id(chunk_index=chunk_index, prefix="ss")
+            for mode in list(modes or []):
+                input_fingerprint = build_screenshot_chunk_fingerprint(
+                    video_path=video_path,
+                    mode=mode,
+                    chunk=chunk,
+                )
+                dependency_fingerprints = self._upsert_screenshot_chunk_input_scope(
+                    video_path=video_path,
+                    mode=mode,
+                    chunk_id=chunk_id,
+                    chunk=chunk,
+                )
+                wave_id = f"wave_{chunk_index + 1:04d}"
+                self._runtime_chunk_wave_ids[(mode, chunk_id)] = wave_id
+                dispatch_items.append(
+                    {
+                        "chunk": chunk,
+                        "chunk_id": chunk_id,
+                        "input_fingerprint": input_fingerprint,
+                        "dependency_fingerprints": dependency_fingerprints,
+                        "mode": mode,
+                        "wave_id": wave_id,
+                    }
+                )
+        prefetch_result = self._runtime_store.prefetch_restorable_chunk_scope_cache(
+            stage="phase2a",
+            candidate_chunk_ids=[str(item.get("chunk_id", "") or "") for item in dispatch_items],
+            limit=max(512, len(dispatch_items) * 4),
+        )
+        self._runtime_chunk_dispatch_summary = dict(prefetch_result.get("summary", {}) or {})
+        self._runtime_chunk_restore_cache = dict(prefetch_result.get("cache", {}) or {})
+        for item in dispatch_items:
+            cache_key = self._runtime_store.build_chunk_restore_cache_key(
+                stage="phase2a",
+                chunk_id=str(item.get("chunk_id", "") or ""),
+                input_fingerprint=str(item.get("input_fingerprint", "") or ""),
+            )
+            if cache_key in self._runtime_chunk_restore_cache:
+                continue
+            chunk = dict(item.get("chunk", {}) or {})
+            substage_scope_ref = self._runtime_store.build_substage_scope_ref(
+                stage="phase2a",
+                substage_name="screenshot_select",
+                wave_id=str(item.get("wave_id", "") or "wave_0001"),
+                scope_variant=str(item.get("mode", "") or ""),
+            )
+            self._runtime_store.plan_substage_scope(
+                stage="phase2a",
+                substage_name="screenshot_select",
+                wave_id=str(item.get("wave_id", "") or "wave_0001"),
+                scope_variant=str(item.get("mode", "") or ""),
+                input_fingerprint=str(item.get("input_fingerprint", "") or ""),
+                dependency_fingerprints=dict(item.get("dependency_fingerprints", {}) or {}),
+                plan_context={
+                    "mode": str(item.get("mode", "") or ""),
+                    "chunk_id": str(item.get("chunk_id", "") or ""),
+                    "window_count": len(list(chunk.get("windows", []) or [])),
+                    "work_units": [
+                        {
+                            "scope_type": "chunk",
+                            "chunk_id": str(item.get("chunk_id", "") or ""),
+                            "kind": "screenshot_select",
+                        }
+                    ],
+                },
+            )
+            self._runtime_store.record_chunk_state(
+                stage="phase2a",
+                chunk_id=str(item.get("chunk_id", "") or ""),
+                input_fingerprint=str(item.get("input_fingerprint", "") or ""),
+                status=STATUS_PLANNED,
+                metadata={
+                    "mode": str(item.get("mode", "") or ""),
+                    "storage_backend": "sqlite",
+                    "scope_variant": str(item.get("mode", "") or ""),
+                    "dependency_fingerprints": dict(item.get("dependency_fingerprints", {}) or {}),
+                    "substage_scope_ref": substage_scope_ref,
+                    "substage_name": "screenshot_select",
+                    "wave_id": str(item.get("wave_id", "") or "wave_0001"),
+                    "stage_step": "phase2a.screenshot_select",
+                    "window_count": len(list(chunk.get("windows", []) or [])),
+                    "union_start": float(chunk.get("union_start", 0.0) or 0.0),
+                    "union_end": float(chunk.get("union_end", 0.0) or 0.0),
+                },
+            )
+        if self._runtime_chunk_dispatch_summary:
+            logger.info(
+                "[Phase2A Runtime] stage chunk dispatch prepared: hints=%s pending=%s prefetched=%s",
+                int(self._runtime_chunk_dispatch_summary.get("hint_count", 0) or 0),
+                int(self._runtime_chunk_dispatch_summary.get("pending_count", 0) or 0),
+                len(self._runtime_chunk_restore_cache),
+            )
+
+    def _mark_screenshot_chunk_runtime_running(
+        self,
+        *,
+        video_path: str,
+        mode: str,
+        chunk_index: int,
+        chunk: Dict[str, Any],
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        chunk_id = self._runtime_store.build_chunk_id(chunk_index=chunk_index, prefix="ss")
+        input_fingerprint = build_screenshot_chunk_fingerprint(
+            video_path=video_path,
+            mode=mode,
+            chunk=chunk,
+        )
+        dependency_fingerprints = self._upsert_screenshot_chunk_input_scope(
+            video_path=video_path,
+            mode=mode,
+            chunk_id=chunk_id,
+            chunk=chunk,
+        )
+        wave_id = self._runtime_chunk_wave_ids.get((mode, chunk_id), f"wave_{chunk_index + 1:04d}")
+        substage_scope_ref = self._runtime_store.build_substage_scope_ref(
+            stage="phase2a",
+            substage_name="screenshot_select",
+            wave_id=wave_id,
+            scope_variant=mode,
+        )
+        substage_scope_id = self._runtime_store.build_substage_scope_id(
+            substage_name="screenshot_select",
+            wave_id=wave_id,
+        )
+        self._runtime_store.transition_scope_node(
+            scope_ref=substage_scope_ref,
+            stage="phase2a",
+            scope_type="substage",
+            scope_id=substage_scope_id,
+            scope_variant=mode,
+            status=STATUS_RUNNING,
+            input_fingerprint=input_fingerprint,
+            dependency_fingerprints=dependency_fingerprints,
+            stage_step="screenshot_select",
+            plan_context={
+                "mode": mode,
+                "chunk_id": chunk_id,
+                "window_count": len(list(chunk.get("windows", []) or [])),
+            },
+        )
+        self._runtime_store.record_chunk_state(
+            stage="phase2a",
+            chunk_id=chunk_id,
+            input_fingerprint=input_fingerprint,
+            status=STATUS_RUNNING,
+            metadata={
+                "mode": mode,
+                "storage_backend": "sqlite",
+                "scope_variant": mode,
+                "dependency_fingerprints": dependency_fingerprints,
+                "substage_scope_ref": substage_scope_ref,
+                "substage_name": "screenshot_select",
+                "wave_id": wave_id,
+                "stage_step": "phase2a.screenshot_select",
+                "window_count": len(list(chunk.get("windows", []) or [])),
+                "union_start": float(chunk.get("union_start", 0.0) or 0.0),
+                "union_end": float(chunk.get("union_end", 0.0) or 0.0),
+            },
+        )
+
+    @staticmethod
+    def _build_unit_material_projection_name(unit_id: str) -> str:
+        normalized = re.sub(r"[^0-9A-Za-z._-]+", "_", str(unit_id or "UNKNOWN_UNIT").strip())
+        normalized = normalized.strip("._") or "UNKNOWN_UNIT"
+        return f"unit_material_projection.{normalized}"
+
+    @staticmethod
+    def _build_unit_material_projection_semantic_snapshot(semantic_unit: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(semantic_unit, dict):
+            return {}
+        snapshot: Dict[str, Any] = {}
+        for field_name in ("unit_id", "start_sec", "end_sec", "knowledge_topic", "group_id"):
+            if field_name not in semantic_unit:
+                continue
+            snapshot[field_name] = copy.deepcopy(semantic_unit.get(field_name))
+        return snapshot
+
+    def _build_unit_material_projection_input_fingerprint(
+        self,
+        *,
+        unit_id: str,
+        analysis_mode: str,
+        clip_path: str,
+        semantic_unit: Dict[str, Any],
+        analysis_result: Any,
+    ) -> str:
+        return build_runtime_payload_fingerprint(
+            {
+                "stage": "phase2a.unit_material_projection",
+                "unit_id": str(unit_id or "").strip(),
+                "analysis_mode": str(analysis_mode or "").strip().lower(),
+                "clip_path": str(clip_path or "").strip(),
+                "semantic_unit": self._build_unit_material_projection_semantic_snapshot(semantic_unit),
+                "raw_response_json": copy.deepcopy(list(getattr(analysis_result, "raw_response_json", []) or [])),
+                "vl_arg_postprocess_config": copy.deepcopy(dict(self.vl_arg_postprocess_config or {})),
+                "tutorial_export_assets": bool(self.tutorial_export_assets),
+                "tutorial_save_step_json": bool(self.tutorial_save_step_json),
+                "tutorial_export_from_original_clip_when_prepruned": bool(
+                    self.tutorial_export_from_original_clip_when_prepruned
+                ),
+                "tutorial_grid_anchor_enabled": bool(self.tutorial_grid_anchor_enabled),
+            }
+        )
+
+    def _collect_unit_material_projection_dependency_fingerprints(
+        self,
+        *,
+        unit_id: str,
+        input_scope_ref: str,
+        input_fingerprint: str,
+    ) -> Dict[str, str]:
+        dependency_fingerprints: Dict[str, str] = {}
+        if input_scope_ref and input_fingerprint:
+            dependency_fingerprints[input_scope_ref] = input_fingerprint
+        if self._runtime_store is None:
+            return dependency_fingerprints
+        normalized_unit_id = str(unit_id or "").strip()
+        if not normalized_unit_id:
+            return dependency_fingerprints
+        for node_payload in self._runtime_store.list_scope_nodes(stage="phase2a", scope_type="llm_call"):
+            if not isinstance(node_payload, dict):
+                continue
+            if str(node_payload.get("unit_id", "") or "").strip() != normalized_unit_id:
+                continue
+            scope_ref = str(node_payload.get("scope_ref", "") or "").strip()
+            fingerprint = str(node_payload.get("input_fingerprint", "") or "").strip()
+            if not scope_ref or not fingerprint:
+                continue
+            dependency_fingerprints[scope_ref] = fingerprint
+        return dict(sorted(dependency_fingerprints.items()))
+
+    @staticmethod
+    def _extract_unit_material_projection_semantic_patch(semantic_unit: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(semantic_unit, dict):
+            return {}
+        patch: Dict[str, Any] = {}
+        for field_name in (
+            "knowledge_type",
+            "_vl_route_override",
+            "_vl_route_reason",
+            "_vl_no_needed_video",
+            "_vl_no_needed_video_reason",
+        ):
+            if field_name not in semantic_unit:
+                continue
+            patch[field_name] = copy.deepcopy(semantic_unit.get(field_name))
+        return patch
+
+    def _build_unit_material_projection_payload(
+        self,
+        *,
+        unit_id: str,
+        analysis_mode: str,
+        semantic_unit: Dict[str, Any],
+        analysis_result: Any,
+    ) -> Dict[str, Any]:
+        return {
+            "unit_id": str(unit_id or "").strip(),
+            "analysis_mode": str(analysis_mode or "").strip().lower(),
+            "semantic_unit_patch": self._extract_unit_material_projection_semantic_patch(semantic_unit),
+            "clip_requests": copy.deepcopy(list(getattr(analysis_result, "clip_requests", []) or [])),
+            "screenshot_requests": copy.deepcopy(list(getattr(analysis_result, "screenshot_requests", []) or [])),
+            "result_summary": {
+                "clip_requests": len(list(getattr(analysis_result, "clip_requests", []) or [])),
+                "screenshot_requests": len(list(getattr(analysis_result, "screenshot_requests", []) or [])),
+            },
+        }
+
+    @staticmethod
+    def _apply_unit_material_projection_payload(
+        *,
+        semantic_unit: Dict[str, Any],
+        analysis_result: Any,
+        projection_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = dict(projection_payload or {})
+        semantic_patch = payload.get("semantic_unit_patch", {})
+        if isinstance(semantic_unit, dict) and isinstance(semantic_patch, dict):
+            for field_name, field_value in semantic_patch.items():
+                semantic_unit[field_name] = copy.deepcopy(field_value)
+        clip_requests = copy.deepcopy(list(payload.get("clip_requests", []) or []))
+        screenshot_requests = copy.deepcopy(list(payload.get("screenshot_requests", []) or []))
+        try:
+            analysis_result.clip_requests = copy.deepcopy(clip_requests)
+            analysis_result.screenshot_requests = copy.deepcopy(screenshot_requests)
+        except Exception:
+            pass
+        return {
+            "clip_requests": clip_requests,
+            "screenshot_requests": screenshot_requests,
+            "result_summary": dict(payload.get("result_summary", {}) or {}),
+        }
+
+    def _restore_unit_material_projection_if_committed(
+        self,
+        *,
+        unit_id: str,
+        wave_id: str,
+        analysis_mode: str,
+        clip_path: str,
+        semantic_unit: Dict[str, Any],
+        analysis_result: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if self._runtime_store is None:
+            return None
+        normalized_unit_id = str(unit_id or "").strip()
+        if not normalized_unit_id:
+            return None
+        projection_name = self._build_unit_material_projection_name(normalized_unit_id)
+        projection_chunk_id = self._runtime_store.build_projection_chunk_id(projection_name=projection_name)
+        projection_input_fingerprint = self._build_unit_material_projection_input_fingerprint(
+            unit_id=normalized_unit_id,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            semantic_unit=semantic_unit,
+            analysis_result=analysis_result,
+        )
+        input_scope_ref = self._runtime_store.build_scope_ref(
+            stage="phase2a",
+            scope_type="input",
+            scope_id=projection_name,
+        )
+        self._runtime_store.upsert_scope_node(
+            scope_ref=input_scope_ref,
+            stage="phase2a",
+            scope_type="input",
+            scope_id=projection_name,
+            status=STATUS_SUCCESS,
+            input_fingerprint=projection_input_fingerprint,
+            extra_payload={
+                "unit_id": normalized_unit_id,
+                "analysis_mode": str(analysis_mode or "").strip().lower(),
+                "clip_path": str(clip_path or "").strip(),
+            },
+        )
+        dependency_fingerprints = self._collect_unit_material_projection_dependency_fingerprints(
+            unit_id=normalized_unit_id,
+            input_scope_ref=input_scope_ref,
+            input_fingerprint=projection_input_fingerprint,
+        )
+        self._runtime_store.plan_substage_scope(
+            stage="phase2a",
+            substage_name="unit_material_projection",
+            wave_id=wave_id,
+            input_fingerprint=projection_input_fingerprint,
+            dependency_fingerprints=dependency_fingerprints,
+            plan_context={
+                "unit_id": normalized_unit_id,
+                "analysis_mode": str(analysis_mode or "").strip().lower(),
+                "clip_path": str(clip_path or "").strip(),
+                "work_units": [
+                    {
+                        "scope_type": "chunk",
+                        "chunk_id": projection_chunk_id,
+                        "kind": "unit_material_projection",
+                    }
+                ],
+            },
+        )
+        self._runtime_store.plan_chunk_scope(
+            stage="phase2a",
+            chunk_id=projection_chunk_id,
+            input_fingerprint=projection_input_fingerprint,
+            metadata={
+                "storage_backend": "sqlite",
+                "scope_variant": "projection",
+                "projection_name": projection_name,
+                "unit_id": normalized_unit_id,
+                "stage_step": "unit_material_projection",
+                "substage_name": "unit_material_projection",
+                "wave_id": wave_id,
+                "dependency_fingerprints": dependency_fingerprints,
+            },
+            extra_payload={"kind": "unit_material_projection"},
+        )
+        reuse_plan = self._runtime_store.plan_scope_reuse(
+            scope_ref=self._runtime_store.build_scope_ref(
+                stage="phase2a",
+                scope_type="chunk",
+                scope_id=projection_chunk_id,
+                scope_variant="projection",
+            ),
+            expected_input_fingerprint=projection_input_fingerprint,
+            current_dependency_fingerprints=dependency_fingerprints,
+        )
+        if not bool(reuse_plan.get("can_restore", False)):
+            return None
+        restored = self._runtime_store.load_committed_chunk_payload(
+            stage="phase2a",
+            chunk_id=projection_chunk_id,
+            input_fingerprint=projection_input_fingerprint,
+        )
+        if not isinstance(restored, dict):
+            return None
+        result_payload = restored.get("result_payload")
+        if not isinstance(result_payload, dict):
+            return None
+        applied_payload = self._apply_unit_material_projection_payload(
+            semantic_unit=semantic_unit,
+            analysis_result=analysis_result,
+            projection_payload=result_payload,
+        )
+        self._transition_phase2a_unit_substage(
+            substage_name="unit_material_projection",
+            unit_id=normalized_unit_id,
+            wave_id=wave_id,
+            input_fingerprint=projection_input_fingerprint,
+            status=STATUS_SUCCESS,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            result_summary={
+                **dict(applied_payload.get("result_summary", {}) or {}),
+                "restored": True,
+            },
+            dependency_fingerprints=dependency_fingerprints,
+        )
+        return applied_payload
+
+    def _commit_unit_material_projection(
+        self,
+        *,
+        unit_id: str,
+        wave_id: str,
+        analysis_mode: str,
+        clip_path: str,
+        semantic_unit: Dict[str, Any],
+        analysis_result: Any,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        normalized_unit_id = str(unit_id or "").strip()
+        if not normalized_unit_id:
+            return
+        projection_name = self._build_unit_material_projection_name(normalized_unit_id)
+        projection_chunk_id = self._runtime_store.build_projection_chunk_id(projection_name=projection_name)
+        projection_input_fingerprint = self._build_unit_material_projection_input_fingerprint(
+            unit_id=normalized_unit_id,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            semantic_unit=semantic_unit,
+            analysis_result=analysis_result,
+        )
+        input_scope_ref = self._runtime_store.build_scope_ref(
+            stage="phase2a",
+            scope_type="input",
+            scope_id=projection_name,
+        )
+        self._runtime_store.upsert_scope_node(
+            scope_ref=input_scope_ref,
+            stage="phase2a",
+            scope_type="input",
+            scope_id=projection_name,
+            status=STATUS_SUCCESS,
+            input_fingerprint=projection_input_fingerprint,
+            extra_payload={
+                "unit_id": normalized_unit_id,
+                "analysis_mode": str(analysis_mode or "").strip().lower(),
+                "clip_path": str(clip_path or "").strip(),
+            },
+        )
+        dependency_fingerprints = self._collect_unit_material_projection_dependency_fingerprints(
+            unit_id=normalized_unit_id,
+            input_scope_ref=input_scope_ref,
+            input_fingerprint=projection_input_fingerprint,
+        )
+        projection_payload = self._build_unit_material_projection_payload(
+            unit_id=normalized_unit_id,
+            analysis_mode=analysis_mode,
+            semantic_unit=semantic_unit,
+            analysis_result=analysis_result,
+        )
+        self._runtime_store.record_chunk_state(
+            stage="phase2a",
+            chunk_id=projection_chunk_id,
+            input_fingerprint=projection_input_fingerprint,
+            status=STATUS_RUNNING,
+            metadata={
+                "storage_backend": "sqlite",
+                "scope_variant": "projection",
+                "projection_name": projection_name,
+                "unit_id": normalized_unit_id,
+                "stage_step": "unit_material_projection",
+                "substage_name": "unit_material_projection",
+                "wave_id": wave_id,
+                "dependency_fingerprints": dependency_fingerprints,
+            },
+        )
+        self._runtime_store.commit_chunk_payload(
+            stage="phase2a",
+            chunk_id=projection_chunk_id,
+            input_fingerprint=projection_input_fingerprint,
+            result_payload=projection_payload,
+            metadata={
+                "storage_backend": "sqlite",
+                "scope_variant": "projection",
+                "projection_name": projection_name,
+                "unit_id": normalized_unit_id,
+                "stage_step": "unit_material_projection",
+                "substage_name": "unit_material_projection",
+                "wave_id": wave_id,
+                "dependency_fingerprints": dependency_fingerprints,
+            },
+        )
+        self._transition_phase2a_unit_substage(
+            substage_name="unit_material_projection",
+            unit_id=normalized_unit_id,
+            wave_id=wave_id,
+            input_fingerprint=projection_input_fingerprint,
+            status=STATUS_SUCCESS,
+            analysis_mode=analysis_mode,
+            clip_path=clip_path,
+            result_summary=dict(projection_payload.get("result_summary", {}) or {}),
+            dependency_fingerprints=dependency_fingerprints,
+        )
+
+    def _transition_phase2a_unit_substage(
+        self,
+        *,
+        substage_name: str,
+        unit_id: str,
+        wave_id: str,
+        input_fingerprint: str,
+        status: str,
+        analysis_mode: str = "",
+        clip_path: str = "",
+        result_summary: Optional[Dict[str, Any]] = None,
+        error: Optional[Exception] = None,
+        dependency_fingerprints: Optional[Dict[str, str]] = None,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        scope_ref = self._runtime_store.build_substage_scope_ref(
+            stage="phase2a",
+            substage_name=substage_name,
+            wave_id=wave_id,
+        )
+        scope_id = self._runtime_store.build_substage_scope_id(
+            substage_name=substage_name,
+            wave_id=wave_id,
+        )
+        plan_context = {
+            "unit_id": str(unit_id or ""),
+            "analysis_mode": str(analysis_mode or ""),
+            "clip_path": str(clip_path or ""),
+        }
+        if isinstance(result_summary, dict) and result_summary:
+            plan_context["result_summary"] = dict(result_summary)
+        normalized_status = str(status or "").strip().upper()
+        if normalized_status in {STATUS_PLANNED, STATUS_RUNNING, STATUS_SUCCESS}:
+            self._runtime_store.transition_scope_node(
+                scope_ref=scope_ref,
+                stage="phase2a",
+                scope_type="substage",
+                scope_id=scope_id,
+                status=normalized_status,
+                input_fingerprint=input_fingerprint,
+                stage_step=substage_name,
+                plan_context=plan_context,
+                dependency_fingerprints=dependency_fingerprints,
+                result_hash=(
+                    build_runtime_payload_fingerprint(result_summary or {})
+                    if normalized_status == STATUS_SUCCESS
+                    else None
+                ),
+            )
+            return
+        runtime_error = error or RuntimeError(f"{substage_name} failed")
+        error_info = classify_runtime_error(runtime_error)
+        if error_info["error_class"] == "AUTO_RETRYABLE":
+            failure_status = STATUS_ERROR
+        elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+            failure_status = STATUS_FAILED
+        else:
+            failure_status = STATUS_MANUAL_NEEDED
+        self._runtime_store.transition_scope_node(
+            scope_ref=scope_ref,
+            stage="phase2a",
+            scope_type="substage",
+            scope_id=scope_id,
+            status=failure_status,
+            input_fingerprint=input_fingerprint,
+            stage_step=substage_name,
+            plan_context=plan_context,
+            dependency_fingerprints=dependency_fingerprints,
+            resource_snapshot={"error": str(runtime_error)},
+            retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+            required_action=str(error_info.get("action_hint", "") or ""),
+            error_class=error_info["error_class"],
+            error_code=error_info["error_code"],
+            error_message=error_info["error_message"],
+        )
+
+    @staticmethod
+    def _build_phase2a_runtime_chunk_id(unit_id: str, suffix: str = "") -> str:
+        normalized = re.sub(r"[^0-9A-Za-z._-]+", "_", str(unit_id or "UNKNOWN_UNIT").strip())
+        normalized = normalized.strip("._") or "UNKNOWN_UNIT"
+        if suffix:
+            safe_suffix = re.sub(r"[^0-9A-Za-z._-]+", "_", str(suffix or "").strip()).strip("._")
+            if safe_suffix:
+                return f"unit_{normalized}_{safe_suffix}"
+        return f"unit_{normalized}"
+
+    @staticmethod
+    def _extract_phase2a_response_text(payload: Any) -> str:
+        if isinstance(payload, dict):
+            if "content" in payload:
+                return VLMaterialGenerator._extract_phase2a_response_text(payload.get("content"))
+            if "raw_response" in payload:
+                return VLMaterialGenerator._extract_phase2a_response_text(payload.get("raw_response"))
+        if isinstance(payload, str):
+            return payload
+        if isinstance(payload, list):
+            try:
+                return json.dumps(payload, ensure_ascii=False)
+            except Exception:
+                return str(payload)
+        if isinstance(payload, dict):
+            try:
+                return json.dumps(payload, ensure_ascii=False)
+            except Exception:
+                return str(payload)
+        return str(payload or "")
+
+    @staticmethod
+    def _build_phase2a_response_metadata(payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        metadata = dict(payload)
+        metadata.pop("content", None)
+        metadata.pop("raw_response", None)
+        return metadata
+
+    @staticmethod
+    def _append_phase2a_raw_interaction(analysis_result: Any, interaction: Dict[str, Any]) -> None:
+        if analysis_result is None or not isinstance(interaction, dict):
+            return
+        current = list(getattr(analysis_result, "raw_llm_interactions", []) or [])
+        current.append(interaction)
+        try:
+            analysis_result.raw_llm_interactions = current
+        except Exception:
+            pass
+
+    def _persist_phase2a_llm_interaction(
+        self,
+        *,
+        unit_id: str,
+        interaction: Dict[str, Any],
+        interaction_kind: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        if self._runtime_store is None or not isinstance(interaction, dict):
+            return None
+        stage_name = str(interaction.get("stage", interaction_kind or "phase2a_llm") or "phase2a_llm").strip()
+        request_payload = dict(interaction.get("request", {}) or {})
+        normalized_unit_id = str(unit_id or "").strip()
+        if normalized_unit_id and not list(request_payload.get("request_scope_ids", []) or []):
+            request_payload["request_scope_ids"] = [normalized_unit_id]
+        response_payload = dict(interaction.get("response", {}) or {})
+        request_fingerprint_payload = {
+            "stage": stage_name,
+            "interaction_kind": str(interaction_kind or "").strip(),
+            "unit_id": normalized_unit_id,
+            "request": request_payload,
+        }
+        input_fingerprint = build_runtime_payload_fingerprint(request_fingerprint_payload)
+        chunk_id = self._build_phase2a_runtime_chunk_id(unit_id=normalized_unit_id)
+        llm_call_id = self._runtime_store.build_llm_call_id(
+            step_name=f"phase2a_{stage_name}",
+            unit_id=normalized_unit_id or "UNKNOWN_UNIT",
+            input_fingerprint=input_fingerprint,
+        )
+        metadata = {
+            "interaction_kind": str(interaction_kind or "").strip(),
+            "original_stage": stage_name,
+            "original_attempt": int(safe_float(interaction.get("attempt", 0), 0.0)),
+            "timestamp_utc": str(interaction.get("timestamp_utc", "") or ""),
+            "storage_backend": "sqlite",
+            "request_scope_ids": [normalized_unit_id] if normalized_unit_id else [],
+            "request_summary": {
+                "model": str(request_payload.get("model", "") or ""),
+                "analysis_mode": str(request_payload.get("analysis_mode", "") or ""),
+            },
+        }
+        success = bool(interaction.get("success", False))
+        if success:
+            return self._runtime_store.persist_observed_llm_interaction(
+                stage="phase2a",
+                chunk_id=chunk_id,
+                llm_call_id=llm_call_id,
+                input_fingerprint=input_fingerprint,
+                request_payload=request_payload,
+                response_text=self._extract_phase2a_response_text(response_payload),
+                response_metadata=self._build_phase2a_response_metadata(response_payload),
+                metadata=metadata,
+            )
+        error_message = str(interaction.get("error", interaction.get("error_raw", "")) or "").strip() or "phase2a llm failed"
+        return self._runtime_store.persist_observed_llm_interaction(
+            stage="phase2a",
+            chunk_id=chunk_id,
+            llm_call_id=llm_call_id,
+            input_fingerprint=input_fingerprint,
+            request_payload=request_payload,
+            error=RuntimeError(error_message),
+            metadata=metadata,
+        )
+
+    def _persist_phase2a_raw_interactions(
+        self,
+        *,
+        unit_id: str,
+        interactions: Any,
+        interaction_kind: str = "",
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        for interaction in list(interactions or []):
+            if not isinstance(interaction, dict):
+                continue
+            try:
+                self._persist_phase2a_llm_interaction(
+                    unit_id=unit_id,
+                    interaction=interaction,
+                    interaction_kind=interaction_kind,
+                )
+            except Exception as error:
+                logger.warning(
+                    "[Phase2A Runtime] persist llm interaction failed: unit=%s stage=%s error=%s",
+                    unit_id,
+                    str(interaction.get("stage", "") or ""),
+                    error,
+                )
 
     @staticmethod
     def _build_screenshot_request_runtime_key(req: Dict[str, Any]) -> str:
@@ -7964,13 +9256,48 @@ class VLMaterialGenerator:
             mode=mode,
             chunk=chunk,
         )
-        restored = self._runtime_store.load_committed_chunk_payload(
+        dependency_fingerprints = self._upsert_screenshot_chunk_input_scope(
+            video_path=video_path,
+            mode=mode,
+            chunk_id=chunk_id,
+            chunk=chunk,
+        )
+        reuse_plan = self._runtime_store.plan_scope_reuse(
+            scope_ref=self._runtime_store.build_scope_ref(
+                stage="phase2a",
+                scope_type="chunk",
+                scope_id=chunk_id,
+                scope_variant=mode,
+            ),
+            expected_input_fingerprint=input_fingerprint,
+            current_dependency_fingerprints=dependency_fingerprints,
+        )
+        if not bool(reuse_plan.get("can_restore", False)):
+            logger.info(
+                "[Phase2A Runtime] skip committed screenshot chunk restore: chunk=%s mode=%s reason=%s dirty=%s",
+                chunk_id,
+                mode,
+                str(reuse_plan.get("reason", "") or "restore_blocked"),
+                int(reuse_plan.get("dirty_scope_count", 0) or 0),
+            )
+            return False
+        cache_key = self._runtime_store.build_chunk_restore_cache_key(
             stage="phase2a",
             chunk_id=chunk_id,
             input_fingerprint=input_fingerprint,
         )
+        cached_restored = dict(self._runtime_chunk_restore_cache.get(cache_key, {}) or {})
+        if cached_restored:
+            restored = cached_restored
+        else:
+            restored = self._runtime_store.load_committed_chunk_payload(
+                stage="phase2a",
+                chunk_id=chunk_id,
+                input_fingerprint=input_fingerprint,
+            )
         if restored is None:
             return False
+        self._runtime_chunk_restore_cache[cache_key] = dict(restored)
         request_update_map = {}
         for item in list(restored.get("result_payload", {}).get("request_updates", []) or []):
             if not isinstance(item, dict):
@@ -7989,6 +9316,34 @@ class VLMaterialGenerator:
             self._apply_screenshot_request_runtime_update(req, update)
             restored_count += 1
         if restored_count > 0:
+            wave_id = self._runtime_chunk_wave_ids.get((mode, chunk_id), f"wave_{chunk_index + 1:04d}")
+            self._runtime_store.transition_scope_node(
+                scope_ref=self._runtime_store.build_substage_scope_ref(
+                    stage="phase2a",
+                    substage_name="screenshot_select",
+                    wave_id=wave_id,
+                    scope_variant=mode,
+                ),
+                stage="phase2a",
+                scope_type="substage",
+                scope_id=self._runtime_store.build_substage_scope_id(
+                    substage_name="screenshot_select",
+                    wave_id=wave_id,
+                ),
+                scope_variant=mode,
+                status=STATUS_SUCCESS,
+                input_fingerprint=input_fingerprint,
+                dependency_fingerprints=dependency_fingerprints,
+                stage_step="screenshot_select",
+                plan_context={"mode": mode, "chunk_id": chunk_id, "restored": True},
+                result_hash=build_runtime_payload_fingerprint(
+                    {
+                        "mode": mode,
+                        "chunk_id": chunk_id,
+                        "restored_count": restored_count,
+                    }
+                ),
+            )
             logger.info(
                 "[Phase2A Runtime] restored committed screenshot chunk: chunk=%s restored=%s/%s mode=%s",
                 chunk_id,
@@ -8014,6 +9369,12 @@ class VLMaterialGenerator:
             mode=mode,
             chunk=chunk,
         )
+        dependency_fingerprints = self._upsert_screenshot_chunk_input_scope(
+            video_path=video_path,
+            mode=mode,
+            chunk_id=chunk_id,
+            chunk=chunk,
+        )
         request_updates = []
         for window in list(chunk.get("windows", []) or []):
             if not isinstance(window, dict):
@@ -8029,10 +9390,41 @@ class VLMaterialGenerator:
             result_payload={"request_updates": request_updates},
             metadata={
                 "mode": mode,
+                "storage_backend": "sqlite",
+                "scope_variant": mode,
+                "dependency_fingerprints": dependency_fingerprints,
                 "window_count": len(list(chunk.get("windows", []) or [])),
                 "union_start": float(chunk.get("union_start", 0.0) or 0.0),
                 "union_end": float(chunk.get("union_end", 0.0) or 0.0),
             },
+        )
+        wave_id = self._runtime_chunk_wave_ids.get((mode, chunk_id), f"wave_{chunk_index + 1:04d}")
+        self._runtime_store.transition_scope_node(
+            scope_ref=self._runtime_store.build_substage_scope_ref(
+                stage="phase2a",
+                substage_name="screenshot_select",
+                wave_id=wave_id,
+                scope_variant=mode,
+            ),
+            stage="phase2a",
+            scope_type="substage",
+            scope_id=self._runtime_store.build_substage_scope_id(
+                substage_name="screenshot_select",
+                wave_id=wave_id,
+            ),
+            scope_variant=mode,
+            status=STATUS_SUCCESS,
+            input_fingerprint=input_fingerprint,
+            dependency_fingerprints=dependency_fingerprints,
+            stage_step="screenshot_select",
+            plan_context={"mode": mode, "chunk_id": chunk_id},
+            result_hash=build_runtime_payload_fingerprint(
+                {
+                    "mode": mode,
+                    "chunk_id": chunk_id,
+                    "window_count": len(list(chunk.get("windows", []) or [])),
+                }
+            ),
         )
 
     def _mark_screenshot_chunk_runtime_error(
@@ -8052,6 +9444,12 @@ class VLMaterialGenerator:
             mode=mode,
             chunk=chunk,
         )
+        dependency_fingerprints = self._upsert_screenshot_chunk_input_scope(
+            video_path=video_path,
+            mode=mode,
+            chunk_id=chunk_id,
+            chunk=chunk,
+        )
         self._runtime_store.fail_chunk_payload(
             stage="phase2a",
             chunk_id=chunk_id,
@@ -8059,11 +9457,123 @@ class VLMaterialGenerator:
             error=error,
             metadata={
                 "mode": mode,
+                "storage_backend": "sqlite",
+                "scope_variant": mode,
+                "dependency_fingerprints": dependency_fingerprints,
                 "window_count": len(list(chunk.get("windows", []) or [])),
                 "union_start": float(chunk.get("union_start", 0.0) or 0.0),
                 "union_end": float(chunk.get("union_end", 0.0) or 0.0),
             },
         )
+        wave_id = self._runtime_chunk_wave_ids.get((mode, chunk_id), f"wave_{chunk_index + 1:04d}")
+        error_info = classify_runtime_error(error)
+        if error_info["error_class"] == "AUTO_RETRYABLE":
+            failure_status = STATUS_ERROR
+        elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+            failure_status = STATUS_FAILED
+        else:
+            failure_status = STATUS_MANUAL_NEEDED
+        self._runtime_store.transition_scope_node(
+            scope_ref=self._runtime_store.build_substage_scope_ref(
+                stage="phase2a",
+                substage_name="screenshot_select",
+                wave_id=wave_id,
+                scope_variant=mode,
+            ),
+            stage="phase2a",
+            scope_type="substage",
+            scope_id=self._runtime_store.build_substage_scope_id(
+                substage_name="screenshot_select",
+                wave_id=wave_id,
+            ),
+            scope_variant=mode,
+            status=failure_status,
+            input_fingerprint=input_fingerprint,
+            dependency_fingerprints=dependency_fingerprints,
+            stage_step="screenshot_select",
+            plan_context={"mode": mode, "chunk_id": chunk_id},
+            resource_snapshot={"error": str(error)},
+            retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+            required_action=str(error_info.get("action_hint", "") or ""),
+            error_class=error_info["error_class"],
+            error_code=error_info["error_code"],
+            error_message=error_info["error_message"],
+        )
+
+    def _build_screenshot_chunk_dependency_fingerprints(
+        self,
+        *,
+        video_path: str,
+        mode: str,
+        chunk_id: str,
+        chunk: Dict[str, Any],
+    ) -> Dict[str, str]:
+        if self._runtime_store is None:
+            return {}
+        normalized_windows: List[Dict[str, Any]] = []
+        for window in list(chunk.get("windows", []) or []):
+            if not isinstance(window, dict):
+                continue
+            req = window.get("req")
+            if not isinstance(req, dict):
+                continue
+            normalized_windows.append(
+                {
+                    "request_key": self._build_screenshot_request_runtime_key(req),
+                    "timestamp_sec": float(
+                        safe_float(req.get("_original_timestamp", req.get("timestamp_sec", 0.0)), 0.0)
+                    ),
+                    "expanded_start": float(safe_float(window.get("expanded_start", 0.0), 0.0)),
+                    "expanded_end": float(safe_float(window.get("expanded_end", 0.0), 0.0)),
+                }
+            )
+        dependency_fingerprint = build_runtime_payload_fingerprint(
+            {
+                "video_path": str(video_path or ""),
+                "mode": str(mode or ""),
+                "chunk_id": str(chunk_id or ""),
+                "windows": normalized_windows,
+            }
+        )
+        dependency_scope_ref = self._runtime_store.build_scope_ref(
+            stage="phase2a",
+            scope_type="chunk_input",
+            scope_id=chunk_id,
+            scope_variant=mode,
+        )
+        return {dependency_scope_ref: dependency_fingerprint}
+
+    def _upsert_screenshot_chunk_input_scope(
+        self,
+        *,
+        video_path: str,
+        mode: str,
+        chunk_id: str,
+        chunk: Dict[str, Any],
+    ) -> Dict[str, str]:
+        if self._runtime_store is None:
+            return {}
+        dependency_fingerprints = self._build_screenshot_chunk_dependency_fingerprints(
+            video_path=video_path,
+            mode=mode,
+            chunk_id=chunk_id,
+            chunk=chunk,
+        )
+        for dependency_scope_ref, dependency_fingerprint in list(dependency_fingerprints.items()):
+            self._runtime_store.upsert_scope_node(
+                scope_ref=dependency_scope_ref,
+                stage="phase2a",
+                scope_type="chunk_input",
+                scope_id=chunk_id,
+                scope_variant=mode,
+                status=STATUS_SUCCESS,
+                input_fingerprint=dependency_fingerprint,
+                extra_payload={
+                    "mode": mode,
+                    "window_count": len(list(chunk.get("windows", []) or [])),
+                },
+            )
+        return dependency_fingerprints
 
     def _apply_selection_result(self, *, req: Dict[str, Any], original_ts: float, unit_id: str, result: Any) -> None:
         """

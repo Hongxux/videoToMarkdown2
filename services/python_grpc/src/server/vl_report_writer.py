@@ -6,14 +6,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
-
-
-QWEN3_VL_PLUS_INPUT_PER_M = 1.50
-QWEN3_VL_PLUS_OUTPUT_PER_M = 4.50
-ERNIE_45_TURBO_VL_INPUT_MIN_PER_M = 0.80
-ERNIE_45_TURBO_VL_INPUT_MAX_PER_M = 1.50
-ERNIE_45_TURBO_VL_OUTPUT_MIN_PER_M = 3.20
-ERNIE_45_TURBO_VL_OUTPUT_MAX_PER_M = 4.50
+from services.python_grpc.src.common.utils.stage_artifact_paths import stage_audits_dir
+from services.python_grpc.src.content_pipeline.infra.llm.token_costing import (
+    build_token_cost_estimate,
+    get_token_pricing_snapshot,
+    normalize_usage_payload,
+)
 
 
 def _safe_int_token(value: Any, default: int = 0) -> int:
@@ -23,20 +21,9 @@ def _safe_int_token(value: Any, default: int = 0) -> int:
         return max(0, int(default))
 
 
-def _round_usd(value: Any) -> float:
-    try:
-        return round(max(0.0, float(value)), 6)
-    except Exception:
-        return 0.0
-
-
-def _token_cost_usd(tokens: int, rate_per_million: float) -> float:
-    return _round_usd((max(0, int(tokens)) / 1_000_000.0) * float(rate_per_million))
-
-
 @dataclass
 class VLReportWriter:
-    """VL 报告写盘器：负责 token/价格补齐与异步双目录落盘。"""
+    """Persist VL reports with one shared pricing/costing path."""
 
     task_id: str
     video_path: str
@@ -48,88 +35,54 @@ class VLReportWriter:
     def _resolve_report_dirs(self) -> List[str]:
         base_dir = self.output_dir or (os.path.dirname(self.video_path) if self.video_path else os.getcwd())
         report_dirs: List[str] = []
-        for folder_name in ("immediates", "intermediates"):
-            report_dir = os.path.join(base_dir, folder_name)
+        canonical_dir = str(stage_audits_dir(base_dir, "phase2a"))
+        for report_dir in (canonical_dir, os.path.join(base_dir, "immediates"), os.path.join(base_dir, "intermediates")):
             os.makedirs(report_dir, exist_ok=True)
-            report_dirs.append(report_dir)
+            if report_dir not in report_dirs:
+                report_dirs.append(report_dir)
         return report_dirs
 
-    def _build_token_usage(self, token_stats: Any) -> Dict[str, int]:
+    def _build_token_usage(self, token_stats: Any) -> Dict[str, Any]:
         stats = token_stats if isinstance(token_stats, dict) else {}
-        prompt_tokens = _safe_int_token(stats.get("prompt_tokens_actual", stats.get("prompt_tokens", 0)), 0)
-        completion_tokens = _safe_int_token(stats.get("completion_tokens_actual", stats.get("completion_tokens", 0)), 0)
+        prompt_tokens = _safe_int_token(
+            stats.get(
+                "input_tokens_actual",
+                stats.get("prompt_tokens_actual", stats.get("input_tokens", stats.get("prompt_tokens", 0))),
+            ),
+            0,
+        )
+        completion_tokens = _safe_int_token(
+            stats.get(
+                "output_tokens_actual",
+                stats.get("completion_tokens_actual", stats.get("output_tokens", stats.get("completion_tokens", 0))),
+            ),
+            0,
+        )
         total_tokens = _safe_int_token(
             stats.get("total_tokens_actual", stats.get("total_tokens", prompt_tokens + completion_tokens)),
             prompt_tokens + completion_tokens,
         )
         if total_tokens <= 0:
             total_tokens = prompt_tokens + completion_tokens
-        return {
+
+        detail_payload: Dict[str, Any] = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": max(0, total_tokens),
+            "input_tokens_details": {
+                "text_tokens": _safe_int_token(stats.get("text_input_tokens_actual", 0), 0),
+                "image_tokens": _safe_int_token(stats.get("image_input_tokens_actual", 0), 0),
+                "audio_tokens": _safe_int_token(stats.get("audio_input_tokens_actual", 0), 0),
+                "video_tokens": _safe_int_token(stats.get("video_input_tokens_actual", 0), 0),
+            },
         }
+        return normalize_usage_payload(detail_payload)
 
-    def _build_vl_pricing(self, token_usage: Dict[str, int], model_name: str) -> Dict[str, Any]:
-        prompt_tokens = _safe_int_token(token_usage.get("prompt_tokens", 0), 0)
-        completion_tokens = _safe_int_token(token_usage.get("completion_tokens", 0), 0)
-
-        qwen_input_cost = _token_cost_usd(prompt_tokens, QWEN3_VL_PLUS_INPUT_PER_M)
-        qwen_output_cost = _token_cost_usd(completion_tokens, QWEN3_VL_PLUS_OUTPUT_PER_M)
-        qwen_total_cost = _round_usd(qwen_input_cost + qwen_output_cost)
-
-        ernie_input_min_cost = _token_cost_usd(prompt_tokens, ERNIE_45_TURBO_VL_INPUT_MIN_PER_M)
-        ernie_input_max_cost = _token_cost_usd(prompt_tokens, ERNIE_45_TURBO_VL_INPUT_MAX_PER_M)
-        ernie_output_min_cost = _token_cost_usd(completion_tokens, ERNIE_45_TURBO_VL_OUTPUT_MIN_PER_M)
-        ernie_output_max_cost = _token_cost_usd(completion_tokens, ERNIE_45_TURBO_VL_OUTPUT_MAX_PER_M)
-        ernie_total_min_cost = _round_usd(ernie_input_min_cost + ernie_output_min_cost)
-        ernie_total_max_cost = _round_usd(ernie_input_max_cost + ernie_output_max_cost)
-
-        normalized_model = str(model_name or "").strip().lower()
-        if "qwen3-vl-plus" in normalized_model:
-            selected_pricing_model = "qwen3-vl-plus"
-            selected_min_cost = qwen_total_cost
-            selected_max_cost = qwen_total_cost
-        elif "ernie-4.5-turbo-vl" in normalized_model or "ernie" in normalized_model:
-            selected_pricing_model = "ernie-4.5-turbo-vl"
-            selected_min_cost = ernie_total_min_cost
-            selected_max_cost = ernie_total_max_cost
-        else:
-            selected_pricing_model = "unknown"
-            selected_min_cost = min(qwen_total_cost, ernie_total_min_cost)
-            selected_max_cost = max(qwen_total_cost, ernie_total_max_cost)
-
-        pricing_payload: Dict[str, Any] = {
-            "currency": "USD",
-            "pricing_basis": "per_1m_tokens",
-            "rates_usd_per_1m_tokens": {
-                "qwen3_vl_plus_input": QWEN3_VL_PLUS_INPUT_PER_M,
-                "qwen3_vl_plus_output": QWEN3_VL_PLUS_OUTPUT_PER_M,
-                "ernie_4_5_turbo_vl_input_min": ERNIE_45_TURBO_VL_INPUT_MIN_PER_M,
-                "ernie_4_5_turbo_vl_input_max": ERNIE_45_TURBO_VL_INPUT_MAX_PER_M,
-                "ernie_4_5_turbo_vl_output_min": ERNIE_45_TURBO_VL_OUTPUT_MIN_PER_M,
-                "ernie_4_5_turbo_vl_output_max": ERNIE_45_TURBO_VL_OUTPUT_MAX_PER_M,
-            },
-            "qwen3_vl_plus_cost": {
-                "input_cost_usd": qwen_input_cost,
-                "output_cost_usd": qwen_output_cost,
-                "total_cost_usd": qwen_total_cost,
-            },
-            "ernie_4_5_turbo_vl_cost_range": {
-                "input_cost_usd_min": ernie_input_min_cost,
-                "input_cost_usd_max": ernie_input_max_cost,
-                "output_cost_usd_min": ernie_output_min_cost,
-                "output_cost_usd_max": ernie_output_max_cost,
-                "total_cost_usd_min": ernie_total_min_cost,
-                "total_cost_usd_max": ernie_total_max_cost,
-            },
-            "selected_pricing_model": selected_pricing_model,
-            "selected_cost_usd_min": _round_usd(selected_min_cost),
-            "selected_cost_usd_max": _round_usd(selected_max_cost),
-        }
-        if abs(selected_max_cost - selected_min_cost) < 1e-12:
-            pricing_payload["selected_cost_usd"] = _round_usd(selected_min_cost)
-        return pricing_payload
+    def _build_vl_pricing(self, token_usage: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        return build_token_cost_estimate(
+            usage=token_usage,
+            model=str(model_name or "").strip(),
+        )
 
     def _build_report_payload(self, payload: Dict[str, Any], vl_model: str) -> Dict[str, Any]:
         report_payload: Dict[str, Any] = {
@@ -145,6 +98,7 @@ class VLReportWriter:
         token_usage = self._build_token_usage(report_payload.get("token_stats", {}))
         report_payload["token_usage"] = token_usage
         report_payload["pricing"] = self._build_vl_pricing(token_usage, report_payload.get("vl_model", ""))
+        report_payload["pricing_snapshot"] = get_token_pricing_snapshot()
         return report_payload
 
     def _persist_report(self, *, base_name: str, payload: Dict[str, Any], vl_model: str) -> str:

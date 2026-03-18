@@ -11,10 +11,16 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
+from services.python_grpc.src.common.utils.stage_artifact_paths import (
+    stage1_step_legacy_paths,
+    stage1_step_output_path,
+)
+from services.python_grpc.src.common.utils.runtime_llm_context import activate_runtime_llm_context
+
 if TYPE_CHECKING:
     from langgraph.graph import StateGraph
 
-from .checkpoint import STEP_INDEX_MAP, SQLiteCheckpointer, generate_thread_id
+from .checkpoint import STEP_INDEX_MAP, generate_thread_id
 from .monitoring.logger import setup_logging
 from .monitoring.metrics import MetricsCollector
 from .monitoring.tracer import PipelineTracer
@@ -147,7 +153,7 @@ class StepOutputConfig:
 
     def __init__(
         self,
-        output_dir: str = "output/intermediates",
+        output_dir: str = "output",
         enabled_steps: Optional[List[str]] = None,
         enable_all: bool = False,
         disable_all: bool = False,
@@ -168,7 +174,7 @@ class StepOutputConfig:
         else:
             resolved_steps = self.DEFAULT_ENABLED_STEPS.copy()
 
-        self.enabled_steps = resolved_steps | self.REQUIRED_ENABLED_STEPS
+        self.enabled_steps = set() if disable_all else resolved_steps | self.REQUIRED_ENABLED_STEPS
 
     def should_output(self, step_name: str) -> bool:
         """方法说明：StepOutputConfig.should_output 核心方法。
@@ -190,8 +196,9 @@ class StepOutputConfig:
             return
 
         step_output = self._extract_step_output(canonical_name, state)
-        output_step_name = self.OUTPUT_FILE_STEP_ALIASES.get(canonical_name, canonical_name)
-        output_file = self.output_dir / f"{output_step_name}_output.json"
+        output_file = stage1_step_output_path(self.output_dir, canonical_name)
+        legacy_output_files = stage1_step_legacy_paths(self.output_dir, canonical_name)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
 
         if self.async_write:
             from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
@@ -203,10 +210,23 @@ class StepOutputConfig:
                 indent=2,
                 scope_key=self.write_scope_key,
             )
+            for legacy_output_file in legacy_output_files:
+                legacy_output_file.parent.mkdir(parents=True, exist_ok=True)
+                enqueue_json_write(
+                    str(legacy_output_file),
+                    step_output,
+                    ensure_ascii=False,
+                    indent=2,
+                    scope_key=self.write_scope_key,
+                )
             return
 
         with open(output_file, "w", encoding="utf-8") as output_stream:
             json.dump(step_output, output_stream, ensure_ascii=False, indent=2, default=str)
+        for legacy_output_file in legacy_output_files:
+            legacy_output_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(legacy_output_file, "w", encoding="utf-8") as output_stream:
+                json.dump(step_output, output_stream, ensure_ascii=False, indent=2, default=str)
 
     @staticmethod
     def _sanitize_output_field(step_name: str, field: str, value: Any) -> Any:
@@ -293,19 +313,18 @@ class StepOutputConfig:
         return result
 
 
-def create_checkpointed_node(
+def create_tracked_node(
     node_func,
     step_name: str,
-    checkpointer: Optional[SQLiteCheckpointer] = None,
     output_config: Optional[StepOutputConfig] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     max_step: int = 6,
 ):
-    """方法说明：create_checkpointed_node 核心方法。
+    """方法说明：create_tracked_node 核心方法。
     执行步骤：
     1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
     2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
-    3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
+    3) 步骤3：写出阶段产物/进度事件，供后续流程继续使用。"""
     async def wrapper(state: PipelineState) -> Dict[str, Any]:
         step_index = STEP_INDEX_MAP.get(step_name, 0)
         last_index = state.get("_last_completed_index", -1)
@@ -315,10 +334,6 @@ def create_checkpointed_node(
 
         result = await node_func(state)
         merged_state = {**state, **result}
-
-        if checkpointer:
-            thread_id = state.get("_thread_id", "default")
-            checkpointer.save_checkpoint(thread_id, step_name, step_index, merged_state)
 
         if output_config:
             output_config.save_step_output(step_name, merged_state)
@@ -363,9 +378,95 @@ STEP_NAME_TO_NUMBER = {
 }
 
 
+def _build_stage1_llm_progress_event(
+    event: Optional[Dict[str, Any]],
+    *,
+    max_step: int,
+) -> Dict[str, Any]:
+    normalized_event = dict(event or {})
+    stage_step = str(
+        normalized_event.get("stage_step")
+        or normalized_event.get("step_name")
+        or normalized_event.get("checkpoint")
+        or ""
+    ).strip()
+    if stage_step.startswith("stage1_"):
+        stage_step = stage_step.removeprefix("stage1_")
+    if ".llm_call" in stage_step:
+        stage_step = stage_step.split(".llm_call", 1)[0].strip()
+
+    step_index = int(STEP_INDEX_MAP.get(stage_step, 0) or 0)
+    safe_max_step = max(1, int(max_step or 1))
+
+    completed_raw = normalized_event.get("completed")
+    try:
+        safe_completed = max(0, min(int(completed_raw), safe_max_step))
+    except Exception:
+        safe_completed = max(0, min(max(0, step_index - 1), safe_max_step))
+
+    pending_raw = normalized_event.get("pending")
+    try:
+        safe_pending = max(0, min(int(pending_raw), safe_max_step))
+    except Exception:
+        safe_pending = max(0, safe_max_step - safe_completed)
+
+    checkpoint = str(normalized_event.get("checkpoint") or "").strip()
+    if not checkpoint:
+        unit_id = str(normalized_event.get("unit_id") or "").strip()
+        checkpoint_parts = [stage_step or "unknown", "llm_call"]
+        if unit_id:
+            checkpoint_parts.append(unit_id)
+        checkpoint = ".".join(checkpoint_parts)
+
+    signal_type = str(normalized_event.get("signal_type") or "hard").strip().lower() or "hard"
+    if signal_type not in {"hard", "soft"}:
+        signal_type = "hard"
+
+    return {
+        **normalized_event,
+        "event": str(normalized_event.get("event") or "llm_call_completed").strip() or "llm_call_completed",
+        "stage": "stage1",
+        "status": str(normalized_event.get("status") or "running").strip().lower() or "running",
+        "step_name": stage_step or str(normalized_event.get("step_name") or "unknown"),
+        "stage_step": stage_step or str(normalized_event.get("stage_step") or ""),
+        "checkpoint": checkpoint or "unknown.llm_call",
+        "completed": safe_completed,
+        "pending": safe_pending,
+        "signal_type": signal_type,
+        "timestamp_ms": int(normalized_event.get("timestamp_ms", int(time.time() * 1000)) or int(time.time() * 1000)),
+    }
+
+
+def _normalize_resume_plan(resume_plan: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(resume_plan, dict):
+        return {}
+
+    normalized_plan = dict(resume_plan)
+    raw_resume_state = normalized_plan.get("resume_state")
+    normalized_plan["resume_state"] = dict(raw_resume_state) if isinstance(raw_resume_state, dict) else {}
+
+    resume_from_step = str(normalized_plan.get("resume_from_step") or "").strip()
+    resume_entry_step = str(normalized_plan.get("resume_entry_step") or "").strip()
+    retry_entry_point = str(normalized_plan.get("retry_entry_point") or "").strip()
+    if not resume_entry_step and retry_entry_point.startswith("step"):
+        resume_entry_step = retry_entry_point
+
+    try:
+        resume_last_completed_index = int(normalized_plan.get("resume_last_completed_index", -1) or -1)
+    except Exception:
+        resume_last_completed_index = -1
+    if resume_last_completed_index < 0 and resume_from_step:
+        resume_last_completed_index = STEP_INDEX_MAP.get(resume_from_step, 0)
+
+    normalized_plan["resume_from_step"] = resume_from_step
+    normalized_plan["resume_entry_step"] = resume_entry_step
+    normalized_plan["retry_entry_point"] = retry_entry_point or resume_entry_step
+    normalized_plan["resume_last_completed_index"] = resume_last_completed_index
+    return normalized_plan
+
+
 def create_pipeline_graph(
     checkpointer: Optional[Any] = None,
-    sqlite_checkpointer: Optional[SQLiteCheckpointer] = None,
     output_config: Optional[StepOutputConfig] = None,
     max_step: int = 6,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -379,11 +480,10 @@ def create_pipeline_graph(
     graph = state_graph_class(PipelineState)
 
     def add_node(name: str, func):
-        if sqlite_checkpointer or output_config:
-            wrapped = create_checkpointed_node(
+        if output_config or progress_callback:
+            wrapped = create_tracked_node(
                 func,
                 name,
-                sqlite_checkpointer,
                 output_config,
                 progress_callback=progress_callback,
                 max_step=max_step,
@@ -454,7 +554,6 @@ async def run_pipeline(
     subtitle_path: str,
     output_dir: str = "output",
     enable_checkpoints: bool = False,
-    enable_sqlite: bool = False,
     enable_logging: bool = False,
     enable_traces: bool = False,
     enable_metrics: bool = False,
@@ -465,7 +564,10 @@ async def run_pipeline(
     max_step: int = 6,
     resume_state: Optional[Dict[str, Any]] = None,
     resume_from_step: Optional[str] = None,
+    resume_plan: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    task_id: str = "",
+    disable_output_persistence: bool = False,
 ) -> Dict[str, Any]:
     """方法说明：run_pipeline 核心方法。
     执行步骤：
@@ -490,21 +592,18 @@ async def run_pipeline(
     metrics = MetricsCollector(Path(output_dir) / "metrics") if enable_metrics else None
 
     output_config = StepOutputConfig(
-        output_dir=f"{output_dir}/intermediates",
+        output_dir=output_dir,
         enabled_steps=output_steps,
         enable_all=output_all_steps,
+        disable_all=disable_output_persistence,
         async_write=str(os.getenv("TRANSCRIPT_ASYNC_PERSIST_WRITES", "1")).strip().lower()
         not in {"0", "false", "no", "off"},
         write_scope_key=str(Path(output_dir).resolve()),
     )
-    main_logger.info(f"Intermediate outputs: {len(output_config.enabled_steps)} steps enabled")
-
-    sqlite_checkpointer = None
-    if enable_sqlite:
-        db_path = Path(output_dir) / "checkpoints.db"
-        sqlite_checkpointer = SQLiteCheckpointer(str(db_path))
-        sqlite_checkpointer.start_run(thread_id, video_path, subtitle_path, output_dir)
-        main_logger.info(f"Metadata tracking enabled: {db_path}")
+    if disable_output_persistence:
+        main_logger.info("Intermediate outputs disabled for runtime-only Stage1 execution")
+    else:
+        main_logger.info(f"Intermediate outputs: {len(output_config.enabled_steps)} steps enabled")
 
     checkpointer = None
     if enable_checkpoints:
@@ -527,12 +626,12 @@ async def run_pipeline(
         resume=resume,
         resume_state=resume_state,
         resume_from_step=resume_from_step,
+        resume_plan=resume_plan,
         enable_checkpoints=enable_checkpoints,
     )
     if use_streaming_executor:
         main_logger.info("Stage1 streaming executor enabled")
         graph = StreamingStage1Graph(
-            sqlite_checkpointer=sqlite_checkpointer,
             output_config=output_config,
             progress_callback=progress_callback,
             max_step=max_step,
@@ -541,7 +640,6 @@ async def run_pipeline(
         main_logger.info("Stage1 streaming executor disabled: %s", streaming_reason)
         graph = create_pipeline_graph(
             checkpointer=checkpointer,
-            sqlite_checkpointer=sqlite_checkpointer,
             output_config=output_config,
             max_step=max_step,
             progress_callback=progress_callback,
@@ -556,12 +654,14 @@ async def run_pipeline(
         resume,
         tracer,
         metrics,
-        sqlite_checkpointer,
         main_logger,
         resume_state,
         resume_from_step,
+        resume_plan,
         progress_callback,
         max_step,
+        task_id,
+        disable_output_persistence,
     )
 
 
@@ -599,12 +699,14 @@ async def _execute_pipeline(
     resume,
     tracer,
     metrics,
-    sqlite_checkpointer,
     main_logger,
     resume_state: Optional[Dict[str, Any]] = None,
     resume_from_step: Optional[str] = None,
+    resume_plan: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     max_step: int = 6,
+    task_id: str = "",
+    disable_output_persistence: bool = False,
 ):
     """方法说明：_execute_pipeline 工具方法。
     执行步骤：
@@ -613,28 +715,40 @@ async def _execute_pipeline(
     3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
     initial_state = create_initial_state(video_path, subtitle_path, output_dir)
     initial_state["_thread_id"] = thread_id
+    initial_state["task_id"] = str(task_id or "").strip()
+    initial_state["storage_key"] = str(Path(output_dir).resolve().name or "").strip()
+    initial_state["max_step"] = int(max_step or 6)
+    initial_state["_disable_stage1_artifact_persistence"] = bool(disable_output_persistence)
+    normalized_resume_plan = _normalize_resume_plan(resume_plan)
 
     config = {"configurable": {"thread_id": thread_id}}
 
-    if resume and sqlite_checkpointer:
-        last_checkpoint = sqlite_checkpointer.load_checkpoint(thread_id)
-        if last_checkpoint:
-            last_checkpoint["video_path"] = video_path
-            last_checkpoint["subtitle_path"] = subtitle_path
-            last_checkpoint["output_dir"] = output_dir
-            last_checkpoint["_thread_id"] = thread_id
-
-            last_checkpoint["_resume_mode"] = True
-            last_step = sqlite_checkpointer.get_last_completed_step(thread_id)
-            last_checkpoint["_last_completed_index"] = STEP_INDEX_MAP.get(last_step, 0)
-
-            initial_state = last_checkpoint
+    if normalized_resume_plan:
+        initial_state["_resume_plan"] = normalized_resume_plan
+        plan_resume_state = normalized_resume_plan.get("resume_state")
+        if isinstance(plan_resume_state, dict) and plan_resume_state:
+            initial_state.update(plan_resume_state)
             main_logger.info(
-                f"Resume mode: loaded state from step '{last_step}' "
-                f"(index {last_checkpoint['_last_completed_index']})"
+                "Resume plan state injected: fields=%s",
+                sorted(plan_resume_state.keys()),
             )
-        else:
-            main_logger.warning(f"No checkpoint found for thread {thread_id}, starting from scratch.")
+        resume_index = int(normalized_resume_plan.get("resume_last_completed_index", -1) or -1)
+        if resume_index >= 0:
+            initial_state["_resume_mode"] = True
+            initial_state["_last_completed_index"] = max(
+                int(initial_state.get("_last_completed_index", -1)),
+                resume_index,
+            )
+        resume_entry_step = str(normalized_resume_plan.get("resume_entry_step") or "").strip()
+        if resume_entry_step:
+            initial_state["_resume_entry_step"] = resume_entry_step
+        main_logger.info(
+            "Resume plan injected: resume_from=%s entry_step=%s last_completed_index=%s dirty_scope_count=%s",
+            str(normalized_resume_plan.get("resume_from_step") or ""),
+            resume_entry_step,
+            int(initial_state.get("_last_completed_index", -1)),
+            int(normalized_resume_plan.get("dirty_scope_count", 0) or 0),
+        )
 
     if resume_state and isinstance(resume_state, dict):
         initial_state.update(resume_state)
@@ -642,6 +756,12 @@ async def _execute_pipeline(
             "Resume state injected: fields=%s",
             sorted(resume_state.keys()),
         )
+
+    initial_state["task_id"] = str(task_id or initial_state.get("task_id", "") or "").strip()
+    initial_state["storage_key"] = str(
+        initial_state.get("storage_key") or Path(output_dir).resolve().name or ""
+    ).strip()
+    initial_state["_disable_stage1_artifact_persistence"] = bool(disable_output_persistence)
 
     normalized_resume_from_step = str(resume_from_step or "").strip()
     if normalized_resume_from_step:
@@ -662,6 +782,16 @@ async def _execute_pipeline(
                 "Ignore unknown resume_from_step=%s",
                 normalized_resume_from_step,
             )
+
+    if resume and not (
+        normalized_resume_plan
+        or (resume_state and isinstance(resume_state, dict))
+        or normalized_resume_from_step
+    ):
+        main_logger.info(
+            "Legacy Stage1 resume flag detected without resume payload; "
+            "dedicated checkpoints.db has been removed, so execution starts from fresh initial state."
+        )
 
     try:
         if progress_callback:
@@ -684,13 +814,26 @@ async def _execute_pipeline(
         if tracer:
             tracer.checkpoint("pipeline_start", {"video": video_path, "thread_id": thread_id, "resume": resume})
 
-        final_state = await graph.ainvoke(initial_state, config)
-        _raise_if_final_state_failed(final_state)
+        def _emit_stage1_llm_progress(runtime_event: Dict[str, Any]) -> None:
+            if not progress_callback:
+                return
+            progress_callback(
+                _build_stage1_llm_progress_event(
+                    runtime_event,
+                    max_step=max_step,
+                )
+            )
 
-        if sqlite_checkpointer:
-            last_step = str(final_state.get("current_step") or "step5_6_dedup_merge")
-            completed_index = STEP_INDEX_MAP.get(last_step, STEP_INDEX_MAP.get("step5_6_dedup_merge", 6))
-            sqlite_checkpointer.update_run_status(thread_id, "completed", last_step, completed_index)
+        with activate_runtime_llm_context(
+            stage="stage1",
+            output_dir=output_dir,
+            task_id=str(task_id or thread_id or "").strip(),
+            storage_key=str(Path(output_dir).resolve().name or "").strip(),
+            storage_backend="sqlite",
+            llm_event_emitter=_emit_stage1_llm_progress if progress_callback else None,
+        ):
+            final_state = await graph.ainvoke(initial_state, config)
+        _raise_if_final_state_failed(final_state)
 
         if tracer:
             tracer.checkpoint("pipeline_end", {"status": "success"})
@@ -722,9 +865,6 @@ async def _execute_pipeline(
 
     except Exception as error:
         main_logger.error(f"Pipeline failed: {str(error)}")
-
-        if sqlite_checkpointer:
-            sqlite_checkpointer.update_run_status(thread_id, "failed", "unknown", 0)
 
         if tracer:
             tracer.checkpoint("pipeline_error", {"error": str(error)})

@@ -13,9 +13,11 @@ import com.mvp.module2.fusion.service.CategoryClassificationResultsRepository;
 import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
+import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
 import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import com.mvp.module2.fusion.service.TaskManualCollectionRepository;
 import com.mvp.module2.fusion.service.TaskBundleExportService;
+import com.mvp.module2.fusion.service.TaskCostSummaryService;
 import com.mvp.module2.fusion.service.VideoMetaService;
 import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import org.slf4j.Logger;
@@ -98,6 +100,10 @@ public class MobileMarkdownController {
     private static final int MARKDOWN_SCAN_DEPTH = 4;
     private static final String META_FILE_NAME = "mobile_task_meta.json";
     private static final String TELEMETRY_FILE_NAME = "mobile_task_telemetry.ndjson";
+    private static final String TASK_RUNTIME_AUDIT_DIR = "intermediates/rt";
+    private static final String FALLBACK_RECORDS_FILE_NAME = "fallback_records.jsonl";
+    private static final String ERROR_RECORDS_FILE_NAME = "error_records.jsonl";
+    private static final String MANUAL_RETRY_REQUIRED_RECORDS_FILE_NAME = "manual_retry_required_records.jsonl";
     private static final String META_DEFAULT_NOTE_KEY = "__default__";
     private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[^A-Za-z0-9._-]");
     private static final Pattern MARKDOWN_LINK_PATTERN = Pattern.compile("(!?\\[[^\\]]*])\\(([^)\\s]+)([^)]*)\\)");
@@ -142,6 +148,15 @@ public class MobileMarkdownController {
 
     @Autowired(required = false)
     private TaskStatusPresentationService taskStatusPresentationService = new TaskStatusPresentationService();
+
+    @Autowired(required = false)
+    private TaskRuntimeRecoveryService taskRuntimeRecoveryService;
+
+    @Autowired(required = false)
+    private TaskCostSummaryService taskCostSummaryService = new TaskCostSummaryService();
+
+    @Autowired(required = false)
+    private com.mvp.module2.fusion.service.TaskCleanupIndexService taskCleanupIndexService;
 
     @Autowired
     private FileTransferService fileTransferService;
@@ -1193,10 +1208,13 @@ public class MobileMarkdownController {
         response.put("status", task.status != null ? task.status : "");
         response.put("progress", task.progress);
         response.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        response.put("userMessage", task.userMessage != null ? task.userMessage : "");
+        response.put("errorMessage", task.errorMessage != null ? task.errorMessage : "");
         response.put("createdAt", instantToText(task.createdAt));
         response.put("completedAt", instantToText(task.completedAt));
         response.put("markdownAvailable", task.markdownAvailable);
         taskStatusPresentationService.appendRecoveryFields(response, task.status, task.recoveryPayload);
+        appendFallbackRepairFields(response, task.runtimeTask);
         return ResponseEntity.ok(response);
     }
 
@@ -1265,6 +1283,7 @@ public class MobileMarkdownController {
         payload.put("storageDeleted", storageDelete.deleted);
         payload.put("deletedEntries", storageDelete.deletedEntries);
         payload.put("message", (runtimeRemoved || storageDelete.deleted) ? "task deleted" : "task removed");
+        clearTaskCleanupIndexQuietly(normalizedTaskId);
         return ResponseEntity.ok(payload);
     }
 
@@ -1301,8 +1320,115 @@ public class MobileMarkdownController {
         if (refreshedTask != null) {
             TaskView taskView = fromRuntimeTask(refreshedTask);
             taskStatusPresentationService.appendRecoveryFields(response, taskView.status, taskView.recoveryPayload);
+            appendFallbackRepairFields(response, taskView.runtimeTask);
         }
         return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/tasks/{taskId}/repair-fallback")
+    public ResponseEntity<Map<String, Object>> repairFallbackTask(@PathVariable String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "status", "INVALID_ARGUMENT",
+                    "message", "taskId cannot be empty"
+            ));
+        }
+        TaskEntry task = taskQueueManager.getTask(normalizedTaskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "message", "task not found"
+            ));
+        }
+        if (taskRuntimeRecoveryService == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "message", "task runtime recovery service unavailable"
+            ));
+        }
+        Optional<TaskRuntimeRecoveryService.FallbackRepairDirective> directiveOpt =
+                taskRuntimeRecoveryService.prepareFallbackRepair(task);
+        if (directiveOpt.isEmpty()) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "status", task.status != null ? task.status.name() : "",
+                    "message", "fallback repair plan is not available for current task"
+            ));
+        }
+        TaskRuntimeRecoveryService.FallbackRepairDirective directive = directiveOpt.get();
+        TaskQueueManager.TaskTransitionResult transition = taskQueueManager.retryTaskTransition(normalizedTaskId);
+        if (transition.isRejected()) {
+            int statusCode = transition.reason != null && transition.reason.contains("not found") ? 404 : 409;
+            return ResponseEntity.status(statusCode).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "status", transition.currentStatus != null ? transition.currentStatus.name() : "",
+                    "message", transition.reason != null ? transition.reason : "task cannot repair fallback in current state"
+            ));
+        }
+        TaskEntry refreshedTask = taskQueueManager.getTask(normalizedTaskId);
+        if (refreshedTask != null && taskWebSocketHandler != null) {
+            taskWebSocketHandler.broadcastTaskUpdate(refreshedTask);
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("taskId", normalizedTaskId);
+        response.put("status", transition.currentStatus != null ? transition.currentStatus.name() : "");
+        response.put("previousStatus", transition.previousStatus != null ? transition.previousStatus.name() : "");
+        response.put("message", "fallback repair plan prepared and task requeued");
+        response.put("fallbackRepair", directive.toPayload());
+        if (refreshedTask != null) {
+            TaskView taskView = fromRuntimeTask(refreshedTask);
+            taskStatusPresentationService.appendRecoveryFields(response, taskView.status, taskView.recoveryPayload);
+            appendFallbackRepairFields(response, taskView.runtimeTask);
+        }
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/tasks/{taskId}/audit-ledgers")
+    public ResponseEntity<?> inspectTaskAuditLedgers(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.status(409).body(Map.of("message", ex.getMessage()));
+        } catch (IOException ex) {
+            logger.warn("resolve task root failed for audit ledgers: taskId={} err={}", taskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "resolve task root failed"));
+        }
+
+        Path auditRoot = taskRoot.resolve(TASK_RUNTIME_AUDIT_DIR).normalize();
+        Map<String, Object> ledgers = new LinkedHashMap<>();
+        ledgers.put("fallback", readRuntimeAuditLedger(taskRoot, "fallback", "Fallback", FALLBACK_RECORDS_FILE_NAME));
+        ledgers.put("error", readRuntimeAuditLedger(taskRoot, "error", "Error", ERROR_RECORDS_FILE_NAME));
+        ledgers.put(
+                "manual_retry_required",
+                readRuntimeAuditLedger(
+                        taskRoot,
+                        "manual_retry_required",
+                        "Manual Retry Required",
+                        MANUAL_RETRY_REQUIRED_RECORDS_FILE_NAME
+                )
+        );
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId != null ? task.taskId : trimToNullSafe(taskId));
+        payload.put("taskTitle", task.title != null ? task.title : "");
+        payload.put("status", task.status != null ? task.status : "");
+        payload.put("auditRoot", auditRoot.toString());
+        payload.put("ledgers", ledgers);
+        return ResponseEntity.ok(payload);
     }
 
     @GetMapping("/tasks/{taskId}/personalization/cache")
@@ -2468,6 +2594,7 @@ public class MobileMarkdownController {
             task.taskPath = resolveTaskPath(task);
             attachCollectionBinding(task, bindingByTaskId.get(task.taskId));
             attachCategoryAssignment(task, categoryAssignmentsByTaskPath.get(task.taskPath));
+            attachTaskCostSummary(task);
         }
         return finalViewList;
     }
@@ -2551,6 +2678,9 @@ public class MobileMarkdownController {
         if (task.completedAt != null) {
             version = Math.max(version, task.completedAt.toEpochMilli());
         }
+        if (task.costUpdatedAt != null) {
+            version = Math.max(version, task.costUpdatedAt.toEpochMilli());
+        }
         if (task.createdAt != null) {
             version = Math.max(version, task.createdAt.toEpochMilli());
         }
@@ -2576,6 +2706,8 @@ public class MobileMarkdownController {
         item.put("bookLeafOutlineIndex", task.bookLeafOutlineIndex != null ? task.bookLeafOutlineIndex : "");
         item.put("progress", task.progress);
         item.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        item.put("userMessage", task.userMessage != null ? task.userMessage : "");
+        item.put("errorMessage", task.errorMessage != null ? task.errorMessage : "");
         item.put("collectionId", task.collectionId != null ? task.collectionId : "");
         item.put("collectionTitle", task.collectionTitle != null ? task.collectionTitle : "");
         item.put("collectionPath", task.collectionPath != null ? task.collectionPath : "");
@@ -2584,7 +2716,12 @@ public class MobileMarkdownController {
         item.put("archived", task.archived);
         item.put("archivedAt", task.archivedAt != null ? instantToText(task.archivedAt) : "");
         item.put("manualCollection", task.manualCollection);
+        item.put("taskCostSummary", task.taskCostSummary != null ? task.taskCostSummary : "");
+        if (task.taskCost != null && !task.taskCost.isEmpty()) {
+            item.put("taskCost", new LinkedHashMap<>(task.taskCost));
+        }
         taskStatusPresentationService.appendRecoveryFields(item, task.status, task.recoveryPayload);
+        appendFallbackRepairFields(item, task.runtimeTask);
         if (!compactView) {
             item.put("completedAt", instantToText(task.completedAt));
             item.put("resultPath", task.resultPath != null ? task.resultPath : "");
@@ -2596,6 +2733,27 @@ public class MobileMarkdownController {
             item.put("totalEpisodes", task.totalEpisodes);
         }
         return item;
+    }
+
+    private void appendFallbackRepairFields(Map<String, Object> response, TaskEntry task) {
+        if (response == null || task == null || taskRuntimeRecoveryService == null) {
+            return;
+        }
+        try {
+            Optional<TaskRuntimeRecoveryService.FallbackRepairDirective> directiveOpt =
+                    taskRuntimeRecoveryService.resolveFallbackRepairDirective(task);
+            if (directiveOpt.isEmpty()) {
+                return;
+            }
+            Map<String, Object> payload = new LinkedHashMap<>(directiveOpt.get().toPayload());
+            response.put("fallbackRepairAvailable", true);
+            response.put("fallbackRepair", payload);
+            response.put("repairMode", String.valueOf(payload.getOrDefault("repairMode", "")));
+            response.put("repairStage", String.valueOf(payload.getOrDefault("repairStage", "")));
+            response.put("repairScopeCount", payload.getOrDefault("repairScopeCount", 0));
+        } catch (Exception error) {
+            logger.debug("Append fallback repair fields skipped: taskId={} err={}", task.taskId, error.getMessage());
+        }
     }
 
     private Map<String, CollectionRepository.EpisodeTaskBinding> findCollectionBindingByTaskId(List<TaskView> tasks) {
@@ -2723,6 +2881,17 @@ public class MobileMarkdownController {
             return "task/" + TaskManualCollectionRepository.normalizeTaskPath(task.taskId);
         }
         return "";
+    }
+
+    private void attachTaskCostSummary(TaskView task) {
+        if (task == null || task.taskRootDir == null || taskCostSummaryService == null) {
+            return;
+        }
+        taskCostSummaryService.readSummary(task.taskRootDir).ifPresent(summary -> {
+            task.taskCost = new LinkedHashMap<>(summary.toPayload());
+            task.taskCostSummary = summary.displayText();
+            task.costUpdatedAt = summary.updatedAtInstant();
+        });
     }
 
     private String lastPathSegment(String normalizedPath) {
@@ -2941,8 +3110,11 @@ public class MobileMarkdownController {
         view.resultPath = task.resultPath;
         view.progress = task.progress;
         view.statusMessage = task.statusMessage;
+        view.userMessage = trimToNullSafe(task.userMessage);
+        view.errorMessage = trimToNullSafe(task.errorMessage);
         view.recoveryPayload = taskStatusPresentationService.sanitizeRecoveryPayload(task.recoveryPayload);
         view.runtimeTask = task;
+        view.taskRootDir = resolveRuntimeTaskRootDir(task);
         applyRuntimeBookLeafIdentity(view, task);
 
         try {
@@ -2989,6 +3161,8 @@ public class MobileMarkdownController {
         view.videoUrl = cached.videoUrl;
         view.status = cached.status;
         view.statusMessage = cached.statusMessage;
+        view.userMessage = trimToNullSafe(cached.userMessage);
+        view.errorMessage = trimToNullSafe(cached.errorMessage);
         view.createdAt = cached.createdAt;
         view.completedAt = cached.completedAt;
         view.resultPath = cached.resultPath;
@@ -3003,6 +3177,35 @@ public class MobileMarkdownController {
         
         applyTaskTitleFromMeta(view);
         return view;
+    }
+
+    private Path resolveRuntimeTaskRootDir(TaskEntry task) {
+        if (task == null) {
+            return null;
+        }
+        Path fromOutputDir = toDirectoryPath(task.outputDir);
+        if (fromOutputDir != null) {
+            return fromOutputDir;
+        }
+        return toDirectoryPath(task.resultPath);
+    }
+
+    private Path toDirectoryPath(String rawPath) {
+        String normalized = trimToNullSafe(rawPath);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            Path path = Paths.get(normalized).toAbsolutePath().normalize();
+            if (Files.isDirectory(path)) {
+                return path;
+            }
+            if (Files.isRegularFile(path)) {
+                return path.getParent();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private void applyRuntimeBookLeafIdentity(TaskView view, TaskEntry task) {
@@ -3215,6 +3418,69 @@ public class MobileMarkdownController {
             logger.warn("read task metadata failed: {} err={}", metaPath, ex.getMessage());
             return fallback;
         }
+    }
+
+    private Map<String, Object> readRuntimeAuditLedger(
+            Path taskRoot,
+            String key,
+            String label,
+            String fileName
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("key", key);
+        payload.put("label", label);
+        payload.put("fileName", fileName);
+        payload.put("exists", false);
+        payload.put("path", "");
+        payload.put("rawText", "");
+        payload.put("lineCount", 0L);
+        payload.put("recordCount", 0L);
+        payload.put("sizeBytes", 0L);
+        payload.put("lastModifiedAt", "");
+        payload.put("message", "");
+        if (taskRoot == null) {
+            payload.put("message", "task root is unavailable");
+            return payload;
+        }
+
+        Path ledgerPath = taskRoot.resolve(TASK_RUNTIME_AUDIT_DIR).resolve(fileName).normalize();
+        payload.put("path", ledgerPath.toString());
+        if (!ledgerPath.startsWith(taskRoot)) {
+            payload.put("message", "runtime audit ledger escaped task root");
+            return payload;
+        }
+        if (!Files.isRegularFile(ledgerPath)) {
+            payload.put("message", "runtime audit ledger not found");
+            return payload;
+        }
+
+        try {
+            String rawText = Files.readString(ledgerPath, StandardCharsets.UTF_8);
+            payload.put("exists", true);
+            payload.put("rawText", rawText);
+            payload.put("lineCount", countTextLines(rawText));
+            payload.put("recordCount", countJsonlRecords(rawText));
+            payload.put("sizeBytes", Files.size(ledgerPath));
+            payload.put("lastModifiedAt", Files.getLastModifiedTime(ledgerPath).toInstant().toString());
+        } catch (IOException ex) {
+            logger.warn("read runtime audit ledger failed: path={} err={}", ledgerPath, ex.getMessage());
+            payload.put("message", "read runtime audit ledger failed: " + ex.getMessage());
+        }
+        return payload;
+    }
+
+    private long countTextLines(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return 0L;
+        }
+        return rawText.lines().count();
+    }
+
+    private long countJsonlRecords(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return 0L;
+        }
+        return rawText.lines().filter(StringUtils::hasText).count();
     }
 
     private boolean writeTaskMeta(Path taskRoot, TaskMetaFile meta) {
@@ -3852,6 +4118,18 @@ public class MobileMarkdownController {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private void clearTaskCleanupIndexQuietly(String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null || taskCleanupIndexService == null) {
+            return;
+        }
+        try {
+            taskCleanupIndexService.removeTaskFromCleanupIndex(normalizedTaskId);
+        } catch (Exception ex) {
+            logger.warn("clear task cleanup index skipped: taskId={} err={}", normalizedTaskId, ex.getMessage());
+        }
     }
 
     private StorageDeleteResult deleteStorageTaskByTaskId(String taskId) {
@@ -5582,6 +5860,8 @@ public class MobileMarkdownController {
         private String storageKey;
         private Path taskRootDir;
         private String statusMessage;
+        private String userMessage;
+        private String errorMessage;
         private String domain;
         private String mainTopic;
         private double progress;
@@ -5594,6 +5874,9 @@ public class MobileMarkdownController {
         private String collectionPath;
         private String categoryPath;
         private String taskPath;
+        private Map<String, Object> taskCost;
+        private String taskCostSummary;
+        private Instant costUpdatedAt;
         private boolean archived;
         private Instant archivedAt;
         private boolean manualCollection;

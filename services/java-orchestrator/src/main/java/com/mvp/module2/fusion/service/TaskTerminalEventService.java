@@ -39,7 +39,6 @@ public class TaskTerminalEventService {
         if (normalizedUserId.isEmpty()) {
             return List.of();
         }
-        acknowledge(normalizedUserId, lastAckedEventId);
         List<TaskTerminalEventRepository.TerminalEventRecord> records =
                 repository.listEventsAfter(normalizedUserId, Math.max(0L, lastAckedEventId), MAX_REPLAY_EVENTS);
         if (records.isEmpty()) {

@@ -382,7 +382,8 @@ def test_build_messages_skip_dashscope_upload_for_qianfan(monkeypatch, tmp_path:
 
     call_counter = {"upload_calls": 0}
 
-    async def _fake_upload(_video_path: str):
+    async def _fake_upload(_video_path: str, **kwargs):
+        _ = kwargs
         call_counter["upload_calls"] += 1
         return "https://example.com/fake.mp4"
 
@@ -416,8 +417,8 @@ def test_build_messages_dashscope_upload_requires_temp_url_before_vl_analysis(mo
         }
     )
 
-    async def _fake_upload(_video_path: str, raise_on_failure: bool = False):
-        _ = raise_on_failure
+    async def _fake_upload(_video_path: str, raise_on_failure: bool = False, **kwargs):
+        _ = (raise_on_failure, kwargs)
         return None
 
     async def _fail_if_keyframes_called(_video_path: str, max_frames: int = 6):

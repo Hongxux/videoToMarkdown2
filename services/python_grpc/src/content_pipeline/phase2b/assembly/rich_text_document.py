@@ -39,6 +39,7 @@ class MaterialSet:
     
     # V7.4: LLM 三要素分类结果
     action_classifications: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -198,7 +199,8 @@ class RichTextDocument:
                                 "screenshots": s.materials.screenshot_paths,
                                 "labels": s.materials.screenshot_labels,
                                 "screenshot_items": s.materials.screenshot_items,
-                                "action_classifications": s.materials.action_classifications
+                                "action_classifications": s.materials.action_classifications,
+                                "metadata": s.materials.metadata,
                             },
                             "instructional_steps": s.instructional_steps,
                             "mult_steps": s.mult_steps,

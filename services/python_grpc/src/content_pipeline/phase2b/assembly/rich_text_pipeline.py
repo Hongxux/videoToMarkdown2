@@ -30,6 +30,7 @@ from services.python_grpc.src.content_pipeline.shared.semantic_payload import (
     build_grouped_semantic_units_payload,
     normalize_semantic_units_payload,
 )
+from services.python_grpc.src.common.utils.runtime_llm_context import activate_runtime_llm_context
 from services.python_grpc.src.content_pipeline.infra.runtime.resource_manager import get_io_executor
 from services.python_grpc.src.content_pipeline.phase2b.assembly.pipeline_asset_utils import (
     slugify_text,
@@ -69,6 +70,23 @@ from services.python_grpc.src.content_pipeline.phase2b.assembly.material_flow im
 )
 from services.python_grpc.src.common.utils.video import get_video_duration
 from services.python_grpc.src.common.utils.path import sanitize_filename_component
+from services.python_grpc.src.common.utils.stage_artifact_paths import (
+    phase2a_semantic_units_legacy_paths,
+    phase2a_semantic_units_path,
+    phase2a_vl_analysis_candidates,
+    phase2a_vl_analysis_output_candidates,
+)
+from services.python_grpc.src.common.utils.runtime_recovery_store import (
+    RuntimeRecoveryStore,
+    STATUS_ERROR,
+    STATUS_FAILED,
+    STATUS_MANUAL_NEEDED,
+    STATUS_PLANNED,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+    build_runtime_payload_fingerprint,
+    classify_runtime_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +104,13 @@ class RichTextPipeline:
         step2_path: str,
         step6_path: str,
         output_dir: str,
+        task_id: str = "",
         config: PipelineConfig = None,
         sentence_timestamps_path: str = None,
         segmenter: SemanticUnitSegmenter = None,
         step2_subtitles: Optional[List[Any]] = None,
         step6_paragraphs: Optional[List[Dict[str, Any]]] = None,
+        sentence_timestamps: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """
         执行逻辑：
@@ -116,6 +136,7 @@ class RichTextPipeline:
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.video_path = video_path
         self.output_dir = output_dir
+        self.task_id = str(task_id or "").strip()
         self.config = config or PipelineConfig()
 
         # 统一字幕仓储：解析 step2/step6/sentence_timestamps 路径并承载字幕检索能力
@@ -130,6 +151,8 @@ class RichTextPipeline:
             self.subtitle_repo.set_raw_subtitles(step2_subtitles, clear_sentence_timestamps=False)
         if step6_paragraphs is not None:
             self.subtitle_repo.set_raw_paragraphs(step6_paragraphs)
+        if sentence_timestamps is not None:
+            self.subtitle_repo.set_raw_sentence_timestamps(sentence_timestamps)
 
         self.step2_path = self.subtitle_repo.step2_path
         self.step6_path = self.subtitle_repo.step6_path
@@ -745,6 +768,7 @@ class RichTextPipeline:
         units: List[SemanticUnit],
         output_path: str,
         mirror_output_path: Optional[str] = None,
+        mirror_output_paths: Optional[List[str]] = None,
     ):
         """
         执行逻辑：
@@ -762,41 +786,20 @@ class RichTextPipeline:
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         data = self._serialize_semantic_units(units)
         self.latest_phase2a_semantic_units_payload = self._extract_semantic_units_from_payload(data)
-        
-        output_file = Path(output_path)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        async_write_enabled = str(os.getenv("PHASE2_ASYNC_PERSIST_WRITES", "1")).strip().lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
-
-        if async_write_enabled:
-            from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
-
-            enqueue_json_write(str(output_file), data, ensure_ascii=False, indent=2)
-            logger.info(f"Queued {len(units)} semantic units to async writer: {output_file}")
-        else:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"Saved {len(units)} semantic units to {output_file}")
-
-        if mirror_output_path:
-            try:
-                mirror_file = Path(mirror_output_path)
-                mirror_file.parent.mkdir(parents=True, exist_ok=True)
-                if async_write_enabled:
-                    from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
-
-                    enqueue_json_write(str(mirror_file), data, ensure_ascii=False, indent=2)
-                    logger.info(f"Queued mirrored semantic units to async writer: {mirror_file}")
-                else:
-                    with open(mirror_file, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                    logger.info(f"Mirrored semantic units to {mirror_file}")
-            except Exception as error:
-                logger.warning(f"Mirror semantic units failed: {error}")
+        try:
+            store = RuntimeRecoveryStore(
+                output_dir=self.output_dir,
+                task_id=self.task_id or Path(self.output_dir).name,
+                storage_key=Path(self.output_dir).name,
+            )
+            store.commit_projection_payload(
+                stage="phase2a",
+                projection_name="semantic_units",
+                payload=data,
+            )
+            logger.info(f"Saved {len(units)} semantic units into task-local SQLite chunk projection")
+        except Exception as error:
+            logger.warning(f"Persist semantic units projection failed: {error}")
     
     def _load_semantic_units(
         self, 
@@ -812,8 +815,27 @@ class RichTextPipeline:
         - json_path: 文件路径（类型：str）。
         输出参数：
         - List[SemanticUnit], Dict[str, MaterialRequests] 列表（与输入或处理结果一一对应）。"""
-        with open(json_path, 'r', encoding='utf-8') as f:
-            raw_payload = json.load(f)
+        raw_payload: Any = None
+        normalized_json_path = str(json_path or "").strip()
+        if normalized_json_path and os.path.exists(normalized_json_path):
+            with open(normalized_json_path, 'r', encoding='utf-8') as f:
+                raw_payload = json.load(f)
+        else:
+            try:
+                store = RuntimeRecoveryStore(
+                    output_dir=self.output_dir,
+                    task_id=self.task_id or Path(self.output_dir).name,
+                    storage_key=Path(self.output_dir).name if self.output_dir else "",
+                )
+                raw_payload = store.load_projection_payload(
+                    stage="phase2a",
+                    projection_name="semantic_units",
+                )
+            except Exception as error:
+                logger.warning(f"Load phase2a semantic_units projection failed: {error}")
+                raw_payload = None
+        if raw_payload in (None, ""):
+            raise FileNotFoundError(f"semantic_units payload unavailable: {json_path}")
 
         data = self._extract_semantic_units_from_payload(raw_payload)
         
@@ -889,7 +911,8 @@ class RichTextPipeline:
             material_requests_map[unit.unit_id] = MaterialRequests(
                 screenshot_requests=screenshot_requests,
                 clip_requests=clip_requests,
-                action_classifications=[]
+                action_classifications=[],
+                metadata=dict(mr_data.get("metadata", {}) or {}) if isinstance(mr_data.get("metadata", {}), dict) else None,
             )
             
             units.append(unit)
@@ -936,16 +959,13 @@ class RichTextPipeline:
                 ordered_dirs.append(directory)
 
         candidate_paths: List[Path] = []
+        for candidate in phase2a_vl_analysis_candidates(self.output_dir):
+            candidate_paths.append(Path(candidate))
+        candidate_paths.extend(list(phase2a_vl_analysis_output_candidates(self.output_dir)))
         for directory in ordered_dirs:
             candidate_paths.append(directory / "vl_analysis_cache.json")
             candidate_paths.append(directory / "vl_analysis_output_latest.json")
-            latest_outputs = sorted(
-                directory.glob("vl_analysis_output_*.json"),
-                key=lambda path_item: path_item.stat().st_mtime,
-                reverse=True,
-            )
-            if latest_outputs:
-                candidate_paths.append(latest_outputs[0])
+            candidate_paths.append(directory / "vl_last_error.json")
 
         existing_sources: List[Path] = []
         seen_source_keys: set[str] = set()
@@ -960,9 +980,6 @@ class RichTextPipeline:
             if candidate.exists() and candidate.is_file():
                 existing_sources.append(candidate)
 
-        if not existing_sources:
-            return
-
         source_payloads: List[Tuple[Path, Dict[str, Any]]] = []
         for source_path in existing_sources:
             try:
@@ -975,7 +992,112 @@ class RichTextPipeline:
                 source_payloads.append((source_path, source_data))
 
         if not source_payloads:
+            try:
+                store = RuntimeRecoveryStore(
+                    output_dir=self.output_dir,
+                    task_id=self.task_id or Path(self.output_dir).name,
+                    storage_key=Path(self.output_dir).name if self.output_dir else "",
+                )
+                artifact_payload = store.load_projection_payload(
+                    stage="phase2a",
+                    projection_name="vl_analysis_cache",
+                )
+                if isinstance(artifact_payload, dict):
+                    source_payloads.append((Path(phase2a_vl_analysis_candidates(self.output_dir)[0]), artifact_payload))
+            except Exception as error:
+                logger.warning(f"[Phase2B] failed to load VL artifact for material backfill: err={error}")
+
+        if not source_payloads:
             return
+
+        vl_fallback_by_unit: Dict[str, Dict[str, Any]] = {}
+
+        def _append_vl_fallback(
+            unit_id: str,
+            reason: str,
+            *,
+            source_path: Path,
+            analysis_mode: str = "",
+        ) -> None:
+            normalized_unit_id = str(unit_id or "").strip()
+            if not normalized_unit_id or normalized_unit_id not in material_requests_map:
+                return
+            normalized_reason = str(reason or "").strip() or "vl analysis failed"
+            payload = vl_fallback_by_unit.setdefault(
+                normalized_unit_id,
+                {
+                    "is_fallback": True,
+                    "fallback_kind": "vl_analysis_failed",
+                    "fallback_label": "phase2a_vl_analysis_failed",
+                    "fallback_reason": normalized_reason,
+                    "repair_stage": "phase2a",
+                    "events": [],
+                },
+            )
+            payload["fallback_reason"] = str(payload.get("fallback_reason") or normalized_reason).strip() or normalized_reason
+            events = payload.get("events")
+            if not isinstance(events, list):
+                events = []
+                payload["events"] = events
+            event_payload: Dict[str, Any] = {
+                "kind": "vl_analysis_failed",
+                "reason": normalized_reason,
+                "unit_id": normalized_unit_id,
+                "source_path": str(source_path),
+            }
+            normalized_mode = str(analysis_mode or "").strip().lower()
+            if normalized_mode:
+                event_payload["analysis_mode"] = normalized_mode
+            events.append(event_payload)
+
+        for source_path, source_data in source_payloads:
+            failure_snapshot = (
+                source_data.get("failure_snapshot", {})
+                if isinstance(source_data.get("failure_snapshot", {}), dict)
+                else {}
+            )
+            used_vl_fallback = bool(
+                source_data.get("used_fallback", False)
+                or failure_snapshot.get("used_fallback", False)
+            )
+            if not used_vl_fallback:
+                continue
+
+            source_unit_failures: List[Dict[str, Any]] = []
+            raw_unit_failures = source_data.get("unit_failures", [])
+            if isinstance(raw_unit_failures, list):
+                source_unit_failures.extend([item for item in raw_unit_failures if isinstance(item, dict)])
+            snapshot_unit_failures = failure_snapshot.get("unit_failures", [])
+            if isinstance(snapshot_unit_failures, list):
+                source_unit_failures.extend([item for item in snapshot_unit_failures if isinstance(item, dict)])
+
+            if source_unit_failures:
+                for failure_item in source_unit_failures:
+                    _append_vl_fallback(
+                        str(failure_item.get("unit_id", "") or "").strip(),
+                        str(
+                            failure_item.get("error_msg")
+                            or failure_item.get("last_llm_error")
+                            or source_data.get("error_msg")
+                            or failure_snapshot.get("error_msg")
+                            or "vl analysis failed"
+                        ).strip(),
+                        source_path=source_path,
+                        analysis_mode=str(failure_item.get("analysis_mode", "") or "").strip(),
+                    )
+                continue
+
+            global_reason = str(
+                source_data.get("error_msg")
+                or failure_snapshot.get("error_msg")
+                or "vl analysis failed"
+            ).strip() or "vl analysis failed"
+            for fallback_unit_id in list(material_requests_map.keys()):
+                _append_vl_fallback(
+                    fallback_unit_id,
+                    global_reason,
+                    source_path=source_path,
+                )
 
         screenshot_payloads: List[Dict[str, Any]] = []
         clip_payloads: List[Dict[str, Any]] = []
@@ -1104,6 +1226,12 @@ class RichTextPipeline:
             if requests is None:
                 continue
 
+            request_metadata = dict(requests.metadata or {}) if isinstance(requests.metadata, dict) else {}
+            unit_vl_fallback = vl_fallback_by_unit.get(unit_id)
+            if isinstance(unit_vl_fallback, dict) and unit_vl_fallback:
+                request_metadata["fallback"] = dict(unit_vl_fallback)
+            requests.metadata = request_metadata or None
+
             filled_ss = False
             filled_clip = False
             cached_ss = by_unit_screenshots.get(unit_id, [])
@@ -1191,28 +1319,30 @@ class RichTextPipeline:
     async def analyze_only(self) -> Tuple[List[ScreenshotRequest], List[ClipRequest], str]:
         """仅执行 Phase2A：语义切分 + 模态分析 + 素材请求生成。"""
         logger.info("[Phase2A] analyze_only start")
-        semantic_units_path = os.path.join(self.output_dir, "semantic_units_phase2a.json")
+        semantic_units_path = str(phase2a_semantic_units_path(self.output_dir))
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        semantic_units_intermediate_path = os.path.join(
-            self.output_dir,
-            "intermediates",
-            "semantic_units_phase2a.json",
-        )
+        semantic_units_legacy_mirrors = [str(path_item) for path_item in phase2a_semantic_units_legacy_paths(self.output_dir)]
 
         if not self.paragraphs:
             logger.warning("[Phase2A] step6 paragraphs is empty, saving empty semantic units")
             self._save_semantic_units(
                 [],
                 semantic_units_path,
-                mirror_output_path=semantic_units_intermediate_path,
+                mirror_output_paths=semantic_units_legacy_mirrors,
             )
             return [], [], semantic_units_path
 
         sentence_timestamps = self._build_sentence_timestamps()
-        segmentation_result = await self.segmenter.segment(
-            paragraphs=self.paragraphs,
-            sentence_timestamps=sentence_timestamps,
-        )
+        with activate_runtime_llm_context(
+            stage="phase2a",
+            output_dir=self.output_dir,
+            task_id=self.task_id,
+            storage_key=Path(self.output_dir).name,
+        ):
+            segmentation_result = await self.segmenter.segment(
+                paragraphs=self.paragraphs,
+                sentence_timestamps=sentence_timestamps,
+            )
         units = list(getattr(segmentation_result, "semantic_units", []) or [])
 
         if not units:
@@ -1220,14 +1350,14 @@ class RichTextPipeline:
             self._save_semantic_units(
                 [],
                 semantic_units_path,
-                mirror_output_path=semantic_units_intermediate_path,
+                mirror_output_paths=semantic_units_legacy_mirrors,
             )
             return [], [], semantic_units_path
 
         self._save_semantic_units(
             units,
             semantic_units_path,
-            mirror_output_path=semantic_units_intermediate_path,
+            mirror_output_paths=semantic_units_legacy_mirrors,
         )
         logger.info(
             "[Phase2A] checkpoint saved after segmentation: "
@@ -1293,13 +1423,13 @@ class RichTextPipeline:
                 self._save_semantic_units(
                     units,
                     semantic_units_path,
-                    mirror_output_path=semantic_units_intermediate_path,
+                    mirror_output_paths=semantic_units_legacy_mirrors,
                 )
 
         self._save_semantic_units(
             units,
             semantic_units_path,
-            mirror_output_path=semantic_units_intermediate_path,
+            mirror_output_paths=semantic_units_legacy_mirrors,
         )
         logger.info(
             f"[Phase2A] analyze_only done: units={len(units)}, screenshots={len(screenshot_requests)}, clips={len(clip_requests)}"
@@ -1309,28 +1439,30 @@ class RichTextPipeline:
     async def analyze_segmentation_only(self) -> str:
         """仅执行 Phase2A 语义切分并落盘，不生成任何素材请求。"""
         logger.info("[Phase2A] analyze_segmentation_only start")
-        semantic_units_path = os.path.join(self.output_dir, "semantic_units_phase2a.json")
+        semantic_units_path = str(phase2a_semantic_units_path(self.output_dir))
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        semantic_units_intermediate_path = os.path.join(
-            self.output_dir,
-            "intermediates",
-            "semantic_units_phase2a.json",
-        )
+        semantic_units_legacy_mirrors = [str(path_item) for path_item in phase2a_semantic_units_legacy_paths(self.output_dir)]
 
         if not self.paragraphs:
             logger.warning("[Phase2A] step6 paragraphs is empty, saving empty semantic units")
             self._save_semantic_units(
                 [],
                 semantic_units_path,
-                mirror_output_path=semantic_units_intermediate_path,
+                mirror_output_paths=semantic_units_legacy_mirrors,
             )
             return semantic_units_path
 
         sentence_timestamps = self._build_sentence_timestamps()
-        segmentation_result = await self.segmenter.segment(
-            paragraphs=self.paragraphs,
-            sentence_timestamps=sentence_timestamps,
-        )
+        with activate_runtime_llm_context(
+            stage="phase2a",
+            output_dir=self.output_dir,
+            task_id=self.task_id,
+            storage_key=Path(self.output_dir).name,
+        ):
+            segmentation_result = await self.segmenter.segment(
+                paragraphs=self.paragraphs,
+                sentence_timestamps=sentence_timestamps,
+            )
         units = list(getattr(segmentation_result, "semantic_units", []) or [])
 
         if not units:
@@ -1338,14 +1470,14 @@ class RichTextPipeline:
             self._save_semantic_units(
                 [],
                 semantic_units_path,
-                mirror_output_path=semantic_units_intermediate_path,
+                mirror_output_paths=semantic_units_legacy_mirrors,
             )
             return semantic_units_path
 
         self._save_semantic_units(
             units,
             semantic_units_path,
-            mirror_output_path=semantic_units_intermediate_path,
+            mirror_output_paths=semantic_units_legacy_mirrors,
         )
         logger.info(
             "[Phase2A] checkpoint saved after segmentation: "
@@ -1366,7 +1498,7 @@ class RichTextPipeline:
 
         logger.info("[Phase2B] assemble_only start")
 
-        if not semantic_units_json_path or not os.path.exists(semantic_units_json_path):
+        if not semantic_units_json_path:
             raise FileNotFoundError(f"semantic_units_json not found: {semantic_units_json_path}")
 
         self._refresh_subtitle_context_from_semantic_units(semantic_units_json_path)
@@ -1386,29 +1518,175 @@ class RichTextPipeline:
 
         self._flush_image_match_audit()
 
+        store = RuntimeRecoveryStore(
+            output_dir=self.output_dir,
+            task_id=self.task_id or Path(self.output_dir).name,
+            storage_key=Path(self.output_dir).name,
+        )
+        document_assemble_input_fingerprint = build_runtime_payload_fingerprint(
+            {
+                "semantic_units_json_path": semantic_units_json_path,
+                "screenshots_dir": screenshots_dir,
+                "clips_dir": clips_dir,
+                "title": title,
+                "stage": "phase2b.document_assemble",
+            }
+        )
+        document_assemble_scope_ref = store.build_substage_scope_ref(
+            stage="phase2b",
+            substage_name="document_assemble",
+            wave_id="wave_0001",
+        )
+        document_assemble_scope_id = store.build_substage_scope_id(
+            substage_name="document_assemble",
+            wave_id="wave_0001",
+        )
+        document_assemble_chunk_id = "phase2b.document_assemble.wave_0001"
+        document_assemble_metadata = {
+            "storage_backend": "sqlite",
+            "scope_variant": "document_assemble",
+            "stage_step": "phase2b.document_assemble",
+            "substage_scope_ref": document_assemble_scope_ref,
+            "substage_name": "document_assemble",
+            "wave_id": "wave_0001",
+            "semantic_units_json_path": semantic_units_json_path,
+            "screenshots_dir": screenshots_dir,
+            "clips_dir": clips_dir,
+            "title": title,
+        }
+        store.plan_substage_scope(
+            stage="phase2b",
+            substage_name="document_assemble",
+            wave_id="wave_0001",
+            input_fingerprint=document_assemble_input_fingerprint,
+            plan_context={
+                "semantic_units_json_path": semantic_units_json_path,
+                "title": title,
+                "work_units": [
+                    {
+                        "scope_type": "chunk",
+                        "chunk_id": document_assemble_chunk_id,
+                        "kind": "document_assemble",
+                    }
+                ],
+            },
+        )
+        store.record_chunk_state(
+            stage="phase2b",
+            chunk_id=document_assemble_chunk_id,
+            input_fingerprint=document_assemble_input_fingerprint,
+            status=STATUS_PLANNED,
+            metadata=document_assemble_metadata,
+        )
+        store.transition_scope_node(
+            scope_ref=document_assemble_scope_ref,
+            stage="phase2b",
+            scope_type="substage",
+            scope_id=document_assemble_scope_id,
+            status=STATUS_RUNNING,
+            input_fingerprint=document_assemble_input_fingerprint,
+            stage_step="document_assemble",
+            plan_context={"semantic_units_json_path": semantic_units_json_path, "title": title},
+        )
+        store.record_chunk_state(
+            stage="phase2b",
+            chunk_id=document_assemble_chunk_id,
+            input_fingerprint=document_assemble_input_fingerprint,
+            status=STATUS_RUNNING,
+            metadata=document_assemble_metadata,
+        )
+
         document_title = str(title or "视频内容").strip() or "视频内容"
-        document = self._assemble_document(units, document_title)
-
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        markdown_filename = self._build_enhanced_markdown_filename(document_title)
-        markdown_path = os.path.join(self.output_dir, markdown_filename)
-        json_path = os.path.join(self.output_dir, "result.json")
-
-        document.to_json(json_path)
-        enhancer = MarkdownEnhancer()
-        if not enhancer.enabled:
-            logger.warning("[Phase2B] MarkdownEnhancer disabled (DEEPSEEK_API_KEY not set), using rule-based flow")
         try:
-            enhanced_markdown = await enhancer.enhance(
-                json_path,
-                subject="数据结构与算法",
-                markdown_dir=self.output_dir,
+            document = self._assemble_document(units, document_title)
+
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+            markdown_filename = self._build_enhanced_markdown_filename(document_title)
+            markdown_path = os.path.join(self.output_dir, markdown_filename)
+            json_path = os.path.join(self.output_dir, "result.json")
+            document_payload = document.to_dict()
+            store.commit_projection_payload(
+                stage="phase2b",
+                projection_name="result_document",
+                payload=document_payload,
             )
-            with open(markdown_path, "w", encoding="utf-8") as file_obj:
-                file_obj.write(str(enhanced_markdown or ""))
+            enhancer = MarkdownEnhancer()
+            if not enhancer.enabled:
+                logger.warning("[Phase2B] MarkdownEnhancer disabled (DEEPSEEK_API_KEY not set), using rule-based flow")
+            try:
+                enhanced_markdown = await enhancer.enhance(
+                    json_path,
+                    subject="数据结构与算法",
+                    markdown_dir=self.output_dir,
+                    task_id=self.task_id,
+                    storage_key=Path(self.output_dir).name,
+                )
+                with open(markdown_path, "w", encoding="utf-8") as file_obj:
+                    file_obj.write(str(enhanced_markdown or ""))
+            except Exception as error:
+                logger.error(f"[Phase2B] Markdown enhancement failed, fallback to base markdown: {error}")
+                document.to_markdown(markdown_path, assets_relative_dir=self.config.assets_subdir)
+            store.commit_chunk_payload(
+                stage="phase2b",
+                chunk_id=document_assemble_chunk_id,
+                input_fingerprint=document_assemble_input_fingerprint,
+                result_payload={
+                    "markdown_path": markdown_path,
+                    "json_path": json_path,
+                    "title": document_title,
+                    "section_count": len(list(getattr(document, "sections", []) or [])),
+                },
+                metadata=document_assemble_metadata,
+            )
+            store.transition_scope_node(
+                scope_ref=document_assemble_scope_ref,
+                stage="phase2b",
+                scope_type="substage",
+                scope_id=document_assemble_scope_id,
+                status=STATUS_SUCCESS,
+                input_fingerprint=document_assemble_input_fingerprint,
+                stage_step="document_assemble",
+                plan_context={"semantic_units_json_path": semantic_units_json_path, "title": title},
+                result_hash=build_runtime_payload_fingerprint(
+                    {
+                        "markdown_path": markdown_path,
+                        "json_path": json_path,
+                        "title": document_title,
+                    }
+                ),
+            )
         except Exception as error:
-            logger.error(f"[Phase2B] Markdown enhancement failed, fallback to base markdown: {error}")
-            document.to_markdown(markdown_path, assets_relative_dir=self.config.assets_subdir)
+            error_info = classify_runtime_error(error)
+            if error_info["error_class"] == "AUTO_RETRYABLE":
+                failure_status = STATUS_ERROR
+            elif error_info["error_class"] == "FATAL_NON_RETRYABLE":
+                failure_status = STATUS_FAILED
+            else:
+                failure_status = STATUS_MANUAL_NEEDED
+            store.fail_chunk_payload(
+                stage="phase2b",
+                chunk_id=document_assemble_chunk_id,
+                input_fingerprint=document_assemble_input_fingerprint,
+                error=error,
+                metadata=document_assemble_metadata,
+            )
+            store.transition_scope_node(
+                scope_ref=document_assemble_scope_ref,
+                stage="phase2b",
+                scope_type="substage",
+                scope_id=document_assemble_scope_id,
+                status=failure_status,
+                input_fingerprint=document_assemble_input_fingerprint,
+                stage_step="document_assemble",
+                plan_context={"semantic_units_json_path": semantic_units_json_path, "title": title},
+                resource_snapshot={"error": str(error)},
+                retry_mode="auto" if failure_status == STATUS_ERROR else "manual",
+                required_action=str(error_info.get("action_hint", "") or ""),
+                error_class=error_info["error_class"],
+                error_code=error_info["error_code"],
+                error_message=error_info["error_message"],
+            )
+            raise
 
         groups = list(getattr(document, "knowledge_groups", []) or [])
         if hasattr(document, "total_sections"):

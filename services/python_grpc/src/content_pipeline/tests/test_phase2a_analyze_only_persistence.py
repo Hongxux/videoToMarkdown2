@@ -1,8 +1,8 @@
 import asyncio
-import json
 import types
 from pathlib import Path
 
+from services.python_grpc.src.common.utils.runtime_recovery_store import RuntimeRecoveryStore
 from services.python_grpc.src.content_pipeline.phase2a.segmentation.semantic_unit_segmenter import SemanticUnit
 from services.python_grpc.src.content_pipeline.phase2b.assembly.rich_text_pipeline import RichTextPipeline
 
@@ -58,16 +58,18 @@ def test_analyze_only_persists_semantic_units_when_unit_processing_fails(tmp_pat
 
     assert screenshot_requests == []
     assert clip_requests == []
-    assert Path(semantic_units_path).exists()
+    assert not Path(semantic_units_path).exists()
 
     mirror_path = output_dir / "intermediates" / "semantic_units_phase2a.json"
-    assert mirror_path.exists()
+    assert not mirror_path.exists()
 
-    payload = json.loads(Path(semantic_units_path).read_text(encoding="utf-8"))
+    store = RuntimeRecoveryStore(
+        output_dir=str(output_dir),
+        task_id=output_dir.name,
+        storage_key=output_dir.name,
+    )
+    payload = store.load_projection_payload(stage="phase2a", projection_name="semantic_units")
     assert isinstance(payload, dict)
     assert isinstance(payload.get("knowledge_groups"), list)
     assert len(payload["knowledge_groups"]) == 1
     assert payload["knowledge_groups"][0]["units"][0]["unit_id"] == "SUX01"
-
-    mirrored_payload = json.loads(mirror_path.read_text(encoding="utf-8"))
-    assert mirrored_payload == payload

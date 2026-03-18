@@ -279,9 +279,11 @@ def append_deepseek_call_record(
     metadata_payload = _metadata_to_dict(metadata)
     usage_source = metadata_payload.get("usage_details") or metadata_payload
     token_usage = normalize_usage_payload(usage_source)
+    requested_model = str(model or "")
+    actual_model = str(metadata_payload.get("model") or requested_model)
     cost_estimate = build_token_cost_estimate(
         usage=token_usage,
-        model=model or metadata_payload.get("model", ""),
+        model=actual_model,
         timestamp_utc=record_timestamp,
         local_cache_hit=bool(metadata_payload.get("cache_hit", False)),
     )
@@ -291,7 +293,7 @@ def append_deepseek_call_record(
         "scene": context.scene,
         "step_name": "img_desc_augment" if _is_img_desc_augment_call(prompt, system_message) else "deepseek_complete_text",
         "input": {
-            "model": str(model or ""),
+            "model": actual_model,
             "temperature": float(temperature or 0.0),
             "need_logprobs": bool(need_logprobs),
             "system_message": system_text,
@@ -306,6 +308,8 @@ def append_deepseek_call_record(
         "token_usage": token_usage,
         "cost_estimate": cost_estimate,
     }
+    if requested_model and requested_model != actual_model:
+        record["input"]["requested_model"] = requested_model
     if extra:
         record["extra"] = dict(extra)
 

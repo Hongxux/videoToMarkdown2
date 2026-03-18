@@ -1,6 +1,6 @@
-import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -17,7 +17,8 @@ def _make_repo_tmp_dir(test_name: str) -> Path:
     base = repo_root / "var" / "tmp_runtime_stage_state_tests"
     base.mkdir(parents=True, exist_ok=True)
     safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in test_name)
-    path = base / safe_name
+    unique_suffix = f"{time.time_ns() % 1_000_000:06d}"
+    path = base / f"{safe_name[:24]}_{unique_suffix}"
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True, exist_ok=True)
@@ -25,9 +26,14 @@ def _make_repo_tmp_dir(test_name: str) -> Path:
 
 
 def _load_stage_state(output_dir: Path, stage: str) -> dict:
-    stage_state_path = output_dir / "intermediates" / "rt" / "s" / stage / "stage_state.json"
-    assert stage_state_path.exists()
-    return json.loads(stage_state_path.read_text(encoding="utf-8"))
+    store = RuntimeRecoveryStore(output_dir=str(output_dir), task_id="task-stage-loader")
+    assert store._sqlite_index is not None
+    payload = store._sqlite_index.load_stage_snapshot(
+        output_dir=str(output_dir.resolve()),
+        stage=stage,
+    )
+    assert payload is not None
+    return payload
 
 
 def test_record_runtime_stage_checkpoint_writes_completed_state():
@@ -188,5 +194,30 @@ def test_runtime_stage_session_bridges_event_emitter_and_failure_state():
     assert "磁盘" in state["required_action"]
     assert len(hard_events) == 2
     assert hard_events[0]["checkpoint"] == "pipeline_prepare"
+    assert hard_events[0]["signal_type"] == "hard"
     assert hard_events[1]["checkpoint"] == "stage1_failed"
+    assert hard_events[1]["signal_type"] == "hard"
     assert event_bridge[0]["checkpoint"] == "step2_correction"
+
+
+def test_runtime_stage_checkpoint_only_writes_stage_file_mirror_when_enabled(monkeypatch):
+    monkeypatch.setenv("TASK_RUNTIME_WRITE_STAGE_FILE_MIRRORS", "1")
+    output_dir = _make_repo_tmp_dir("test_runtime_stage_file_mirror_enabled") / "task"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    store = RuntimeRecoveryStore(output_dir=str(output_dir), task_id="task-stage-file-mirror")
+    record_runtime_stage_checkpoint(
+        store=store,
+        output_dir=str(output_dir),
+        stage="phase2b",
+        status="failed",
+        checkpoint="phase2b_failed",
+        completed=1,
+        pending=2,
+        error=RuntimeError("insufficient credits"),
+    )
+
+    stage_state_path = output_dir / "intermediates" / "rt" / "stage" / "phase2b" / "stage_state.json"
+    resume_index_path = output_dir / "intermediates" / "rt" / "resume_index.json"
+    assert stage_state_path.exists()
+    assert resume_index_path.exists()

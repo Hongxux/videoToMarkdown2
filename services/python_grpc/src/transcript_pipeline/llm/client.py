@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import hashlib
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -12,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from services.python_grpc.src.config_paths import load_yaml_dict, resolve_video_config_path
+from services.python_grpc.src.common.utils.hash_policy import fast_digest_text
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 
 logger = logging.getLogger(__name__)
@@ -132,7 +132,7 @@ def _build_deepseek_client_cache_key(
     key_raw = "|".join(
         [
             loop_id,
-            hashlib.sha256((api_key or "").encode("utf-8")).hexdigest(),
+            fast_digest_text(api_key or ""),
             str(base_url or ""),
             str(model or ""),
             f"{float(temperature):.4f}",
@@ -140,7 +140,7 @@ def _build_deepseek_client_cache_key(
             f"{float(timeout):.2f}",
         ]
     )
-    return hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    return fast_digest_text(key_raw)
 
 
 def create_llm_client(

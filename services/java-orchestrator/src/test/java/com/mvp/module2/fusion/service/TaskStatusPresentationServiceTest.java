@@ -2,9 +2,11 @@ package com.mvp.module2.fusion.service;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -12,6 +14,26 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskStatusPresentationServiceTest {
+
+    @Test
+    void retentionServiceConstructorShouldTreatMissingBooleanConfigAsDisabled() throws Exception {
+        TaskRuntimeRedisRetentionService service = assertDoesNotThrow(
+                () -> new TaskRuntimeRedisRetentionService(null, null, null, null)
+        );
+
+        assertFalse(readBooleanField(service, "enabled"));
+        assertEquals("rt", readStringField(service, "redisPrefix"));
+        assertEquals(168L * 3600_000L, readLongField(service, "terminalRetentionMs"));
+    }
+
+    @Test
+    void retentionServiceConstructorShouldFallBackWhenRetentionHoursIsInvalid() throws Exception {
+        TaskRuntimeRedisRetentionService service = assertDoesNotThrow(
+                () -> new TaskRuntimeRedisRetentionService("true", "redis://127.0.0.1:6379", "", "not-a-number")
+        );
+
+        assertEquals(168L * 3600_000L, readLongField(service, "terminalRetentionMs"));
+    }
 
     @Test
     void appendRecoveryFieldsShouldExposeBlockedProjection() {
@@ -72,5 +94,23 @@ class TaskStatusPresentationServiceTest {
         assertEquals("completed", presentationService.resolveStatusCategory("completed"));
         assertEquals("cancelled", presentationService.resolveStatusCategory("cancelled"));
         assertEquals("unknown", presentationService.resolveStatusCategory("mystery"));
+    }
+
+    private static boolean readBooleanField(Object target, String fieldName) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.getBoolean(target);
+    }
+
+    private static long readLongField(Object target, String fieldName) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.getLong(target);
+    }
+
+    private static String readStringField(Object target, String fieldName) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return (String) field.get(target);
     }
 }

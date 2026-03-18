@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from services.python_grpc.src.common.utils.numbers import safe_float
+from services.python_grpc.src.common.utils.stage_artifact_paths import phase2a_vl_subset_path
 from services.python_grpc.src.content_pipeline.common.utils.path_utils import find_repo_root
 
 logger = logging.getLogger(__name__)
@@ -205,7 +206,9 @@ async def split_video_by_semantic_units(
     clips_dir = Path(output_dir) / "semantic_unit_clips_vl"
     intermediates_dir = Path(output_dir) / "intermediates"
     intermediates_dir.mkdir(parents=True, exist_ok=True)
-    semantic_units_json = intermediates_dir / "semantic_units_vl_subset.json"
+    semantic_units_json = phase2a_vl_subset_path(output_dir)
+    semantic_units_json.parent.mkdir(parents=True, exist_ok=True)
+    legacy_semantic_units_json = intermediates_dir / "semantic_units_vl_subset.json"
 
     valid_units: List[Dict[str, Any]] = []
     seen_unit_ids = set()
@@ -333,6 +336,9 @@ async def split_video_by_semantic_units(
 
     with open(semantic_units_json, "w", encoding="utf-8") as manifest_fp:
         json.dump(units_to_split, manifest_fp, ensure_ascii=False, indent=2)
+    if legacy_semantic_units_json != semantic_units_json:
+        with open(legacy_semantic_units_json, "w", encoding="utf-8") as manifest_fp:
+            json.dump(units_to_split, manifest_fp, ensure_ascii=False, indent=2)
 
     cmd = [
         "python",
@@ -552,6 +558,11 @@ async def optimize_screenshots_batch_mode(
             time_window_before=time_window_before,
             time_window_after=time_window_after,
         )
+        generator.prime_phase2a_chunk_stage_dispatch(
+            video_path=video_path,
+            chunks=chunks,
+            modes=["streaming", "batch"],
+        )
 
         logger.info(
             f"📦 [Batch Mode] Config: workers={max_workers}, inflight={max_inflight}, "
@@ -598,6 +609,12 @@ async def optimize_screenshots_batch_mode(
                     chunk=chunk,
                 ):
                     continue
+                generator._mark_screenshot_chunk_runtime_running(
+                    video_path=video_path,
+                    mode="batch",
+                    chunk_index=chunk_id,
+                    chunk=chunk,
+                )
                 chunk_t0 = time.perf_counter()
 
                 chunk_profile = str(chunk.get("prefetch_profile", "default") or "default")
@@ -839,6 +856,11 @@ async def optimize_screenshots_streaming_pipeline(
             time_window_before=time_window_before,
             time_window_after=time_window_after,
         )
+        generator.prime_phase2a_chunk_stage_dispatch(
+            video_path=video_path,
+            chunks=chunks,
+            modes=["streaming"],
+        )
 
         logger.info(
             f"📦 [Streaming Pipeline] Config: workers={max_workers}, inflight={max_inflight}, "
@@ -934,6 +956,13 @@ async def optimize_screenshots_streaming_pipeline(
                 await cleanup_finished_chunks()
 
             for chunk_id, chunk in enumerate(chunks):
+                if generator._restore_screenshot_chunk_if_committed(
+                    video_path=video_path,
+                    mode="streaming",
+                    chunk_index=chunk_id,
+                    chunk=chunk,
+                ):
+                    continue
                 # overlap buffer 控制：最多保留 overlap_buffers 个 chunk 的 SHM
                 while len(active_chunks) >= overlap_buffers:
                     if not pending:
@@ -967,6 +996,12 @@ async def optimize_screenshots_streaming_pipeline(
                 chunk_profile = str(chunk.get("prefetch_profile", "default") or "default")
                 chunk_sample_rate = max(1, int(chunk.get("prefetch_sample_rate", sample_rate) or sample_rate))
                 chunk_target_height = max(0, int(chunk.get("prefetch_target_height", target_height) or target_height))
+                generator._mark_screenshot_chunk_runtime_running(
+                    video_path=video_path,
+                    mode="streaming",
+                    chunk_index=chunk_id,
+                    chunk=chunk,
+                )
                 try:
                     registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
                         generator._prefetch_union_frames_to_registry_sync,

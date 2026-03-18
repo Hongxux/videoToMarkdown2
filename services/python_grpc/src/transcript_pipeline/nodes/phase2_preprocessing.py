@@ -19,6 +19,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
+from services.python_grpc.src.common.utils.stage_artifact_paths import stage1_sentence_timestamps_path
+
 from ..state import PipelineState
 from ..llm.client import create_llm_client
 from ..tools.storage import LocalStorage
@@ -129,6 +131,53 @@ def _resolve_step_max_inflight(step_env_prefix: str, default: int = 10) -> int:
     if value <= 0:
         return 0
     return value
+
+
+def _build_stage1_runtime_call_kwargs(
+    *,
+    stage_step: str,
+    unit_id: str,
+    scope_variant: str = "",
+) -> Dict[str, Any]:
+    normalized_stage_step = str(stage_step or "").strip() or "stage1_unknown"
+    normalized_unit_id = str(unit_id or "").strip() or "unit_0001"
+    normalized_scope_variant = str(scope_variant or "").strip() or normalized_unit_id
+    return {
+        "__runtime_identity__": {
+            "step_name": normalized_stage_step,
+            "request_name": "complete_json",
+            "unit_id": normalized_unit_id,
+            "llm_call_id": f"{normalized_stage_step}.{normalized_unit_id}",
+        },
+        "__runtime_metadata__": {
+            "stage_step": normalized_stage_step.removeprefix("stage1_"),
+            "scope_variant": normalized_scope_variant,
+            "unit_id": normalized_unit_id,
+        },
+    }
+
+
+async def _complete_json_with_runtime_identity(
+    llm: Any,
+    prompt: str,
+    *,
+    system_prompt: str,
+    runtime_kwargs: Dict[str, Any],
+):
+    try:
+        return await llm.complete_json(
+            prompt,
+            system_prompt=system_prompt,
+            **runtime_kwargs,
+        )
+    except TypeError as error:
+        error_text = str(error)
+        if "__runtime_" not in error_text:
+            raise
+        return await llm.complete_json(
+            prompt,
+            system_prompt=system_prompt,
+        )
 
 
 async def _run_bounded_producer_consumer(
@@ -379,9 +428,15 @@ async def step2_node(state: PipelineState) -> Dict[str, Any]:
             
             llm_started_at = time.perf_counter()
             try:
-                result, response = await llm.complete_json(
+                result, response = await _complete_json_with_runtime_identity(
+                    llm,
                     prompt,
                     system_prompt=CORRECTION_SYSTEM_PROMPT,
+                    runtime_kwargs=_build_stage1_runtime_call_kwargs(
+                        stage_step="stage1_step2_correction",
+                        unit_id=f"batch_{idx + 1:04d}",
+                        scope_variant=f"batch_{idx + 1:04d}",
+                    ),
                 )
                 llm_latency_ms = (time.perf_counter() - llm_started_at) * 1000
                 
@@ -695,9 +750,15 @@ async def step3_node(state: PipelineState) -> Dict[str, Any]:
             prompt = MERGE_PROMPT.format(subtitles=subtitles_text)
             llm_started_at = time.perf_counter()
             try:
-                result, response = await llm.complete_json(
+                result, response = await _complete_json_with_runtime_identity(
+                    llm,
                     prompt,
                     system_prompt=MERGE_SYSTEM_PROMPT,
+                    runtime_kwargs=_build_stage1_runtime_call_kwargs(
+                        stage_step="stage1_step3_merge",
+                        unit_id=f"window_{idx + 1:04d}",
+                        scope_variant=f"window_{idx + 1:04d}",
+                    ),
                 )
                 valid_subtitle_ids = {
                     str(item.get("subtitle_id", "")).strip()
@@ -937,9 +998,15 @@ async def step3_5_node(state: PipelineState) -> Dict[str, Any]:
             prompt = TRANSLATION_PROMPT.format(sentences=sentences_text)
             llm_started_at = time.perf_counter()
             try:
-                result, response = await llm.complete_json(
+                result, response = await _complete_json_with_runtime_identity(
+                    llm,
                     prompt,
                     system_prompt=TRANSLATION_SYSTEM_PROMPT,
+                    runtime_kwargs=_build_stage1_runtime_call_kwargs(
+                        stage_step="stage1_step3_5_translate",
+                        unit_id=f"window_{idx + 1:04d}",
+                        scope_variant=f"window_{idx + 1:04d}",
+                    ),
                 )
                 translated_by_id, parse_metrics = _parse_step35_translated_sentences_impl(
                     result,
@@ -1194,7 +1261,6 @@ async def step4_node(state: PipelineState) -> Dict[str, Any]:
                     }
                 )
 
-            storage = LocalStorage(state.get("output_dir", "output") + "/local_storage")
             timestamps = {
                 str(s.get("sentence_id", "")): {
                     "start_sec": s.get("start_sec", 0),
@@ -1203,19 +1269,28 @@ async def step4_node(state: PipelineState) -> Dict[str, Any]:
                 for s in merged
                 if isinstance(s, dict) and str(s.get("sentence_id", "")).strip()
             }
-            storage.save_sentence_timestamps(timestamps)
-            logger.info(f"Saved {len(timestamps)} sentence timestamps to local storage")
+            persist_stage1_artifacts = not bool(state.get("_disable_stage1_artifact_persistence", False))
+            if persist_stage1_artifacts:
+                storage = LocalStorage(state.get("output_dir", "output") + "/local_storage")
+                storage.save_sentence_timestamps(timestamps)
+                logger.info(f"Saved {len(timestamps)} sentence timestamps to local storage")
 
-            try:
+            if persist_stage1_artifacts:
+                output_dir = str(state.get("output_dir", "output"))
                 # 兼容下游读取路径：继续写入 intermediates/sentence_timestamps.json。
-                intermediates_dir = Path(state.get("output_dir", "output")) / "intermediates"
+                output_dir = str(state.get("output_dir", "output"))
+                canonical_path = stage1_sentence_timestamps_path(output_dir)
+                canonical_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(canonical_path, "w", encoding="utf-8") as output_stream:
+                    json.dump(timestamps, output_stream, ensure_ascii=False, indent=2)
+                intermediates_dir = Path(output_dir) / "intermediates"
                 intermediates_dir.mkdir(parents=True, exist_ok=True)
                 sentence_timestamps_path = intermediates_dir / "sentence_timestamps.json"
                 with open(sentence_timestamps_path, "w", encoding="utf-8") as output_stream:
                     json.dump(timestamps, output_stream, ensure_ascii=False, indent=2)
-                logger.info(f"Saved {len(timestamps)} sentence timestamps to intermediates")
-            except Exception as error:
-                logger.warning(f"Save sentence_timestamps to intermediates failed: {error}")
+                logger.info(f"Saved {len(timestamps)} sentence timestamps to canonical+legacy intermediates")
+                if False:
+                    logger.warning(f"Save sentence_timestamps to intermediates failed: {error}")
 
             output = {
                 "cleaned_sentences": all_cleaned,
@@ -1255,9 +1330,15 @@ async def step4_node(state: PipelineState) -> Dict[str, Any]:
             prompt = CLEAN_LOCAL_PROMPT.format(sentences=sentences_text)
             llm_started_at = time.perf_counter()
             try:
-                result, response = await llm.complete_json(
+                result, response = await _complete_json_with_runtime_identity(
+                    llm,
                     prompt,
                     system_prompt=CLEAN_LOCAL_SYSTEM_PROMPT,
+                    runtime_kwargs=_build_stage1_runtime_call_kwargs(
+                        stage_step="stage1_step4_clean_local",
+                        unit_id=f"batch_{idx + 1:04d}",
+                        scope_variant=f"batch_{idx + 1:04d}",
+                    ),
                 )
                 valid_sentence_ids = {
                     str(item.get("sentence_id", "")).strip()
@@ -1365,20 +1446,28 @@ async def step4_node(state: PipelineState) -> Dict[str, Any]:
             }
             for s in merged
         }
-        storage.save_sentence_timestamps(timestamps)
-        logger.info(f"Saved {len(timestamps)} sentence timestamps to local storage")
+        persist_stage1_artifacts = not bool(state.get("_disable_stage1_artifact_persistence", False))
+        if persist_stage1_artifacts:
+            storage.save_sentence_timestamps(timestamps)
+            logger.info(f"Saved {len(timestamps)} sentence timestamps to local storage")
 
-        try:
+        if persist_stage1_artifacts:
+            output_dir = str(state.get("output_dir", "output"))
             # 同步输出到 intermediates：统一下游读取路径，避免服务层复制缺失时出现找不到文件。
-            intermediates_dir = Path(state.get("output_dir", "output")) / "intermediates"
+            output_dir = str(state.get("output_dir", "output"))
+            canonical_path = stage1_sentence_timestamps_path(output_dir)
+            canonical_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(canonical_path, "w", encoding="utf-8") as output_stream:
+                json.dump(timestamps, output_stream, ensure_ascii=False, indent=2)
+            intermediates_dir = Path(output_dir) / "intermediates"
             intermediates_dir.mkdir(parents=True, exist_ok=True)
             sentence_timestamps_path = intermediates_dir / "sentence_timestamps.json"
             with open(sentence_timestamps_path, "w", encoding="utf-8") as output_stream:
                 json.dump(timestamps, output_stream, ensure_ascii=False, indent=2)
-            logger.info(f"Saved {len(timestamps)} sentence timestamps to intermediates")
-        except Exception as error:
+            logger.info(f"Saved {len(timestamps)} sentence timestamps to canonical+legacy intermediates")
+            if False:
             # 不中断主流程：本地缓存已写入，intermediates 写入失败交由上层回退处理。
-            logger.warning(f"Save sentence_timestamps to intermediates failed: {error}")
+                logger.warning(f"Save sentence_timestamps to intermediates failed: {error}")
         
         output = {
             "cleaned_sentences": all_cleaned,
@@ -1555,9 +1644,15 @@ async def step5_6_node(state: PipelineState) -> Dict[str, Any]:
 
             llm_started_at = time.perf_counter()
             try:
-                result, response = await llm.complete_json(
+                result, response = await _complete_json_with_runtime_identity(
+                    llm,
                     prompt,
                     system_prompt=STEP56_DEDUP_MERGE_SYSTEM_PROMPT,
+                    runtime_kwargs=_build_stage1_runtime_call_kwargs(
+                        stage_step="stage1_step5_6_dedup_merge",
+                        unit_id=f"window_{idx + 1:04d}",
+                        scope_variant=f"window_{idx + 1:04d}",
+                    ),
                 )
                 keep_ids, paragraphs, parse_metrics = _parse_step56_dedup_merge_payload_impl(
                     result,

@@ -808,6 +808,11 @@
             text-overflow: clip;
             word-break: break-all;
         }
+        .task-collection-chip.task-cost-chip {
+            border-color: rgba(22, 101, 52, 0.26);
+            background: rgba(220, 252, 231, 0.78);
+            color: #166534;
+        }
         .task-list-context-menu {
             position: fixed;
             z-index: 1400;
@@ -2385,6 +2390,177 @@
             font-size: 12px;
             color: #334155;
         }
+        .audit-ledger-sheet {
+            position: fixed;
+            inset: 0;
+            z-index: 930;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            padding: 16px;
+            background: rgba(2, 6, 23, 0.58);
+        }
+        .audit-ledger-sheet[hidden] {
+            display: none;
+        }
+        .audit-ledger-card {
+            width: min(1120px, calc(100vw - 32px));
+            max-height: min(92vh, 980px);
+            display: grid;
+            grid-template-rows: auto auto 1fr auto;
+            gap: 12px;
+            border-radius: 18px;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            box-shadow: 0 26px 54px rgba(15, 23, 42, 0.34);
+            background: #f8fafc;
+            padding: 14px 14px 12px;
+        }
+        .audit-ledger-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .audit-ledger-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #0f172a;
+            line-height: 1.35;
+        }
+        .audit-ledger-subtitle {
+            font-size: 12px;
+            color: #475569;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+        .audit-ledger-head-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        .audit-ledger-tabs {
+            display: flex;
+            align-items: stretch;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .audit-ledger-tab {
+            min-width: 140px;
+            display: inline-flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 3px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            background: #ffffff;
+            color: #0f172a;
+            cursor: pointer;
+            transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+        }
+        .audit-ledger-tab:hover {
+            border-color: rgba(59, 130, 246, 0.55);
+            transform: translateY(-1px);
+        }
+        .audit-ledger-tab.is-active {
+            border-color: rgba(37, 99, 235, 0.78);
+            box-shadow: 0 10px 24px rgba(37, 99, 235, 0.16);
+            background: linear-gradient(180deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.98));
+        }
+        .audit-ledger-tab-title {
+            font-size: 13px;
+            font-weight: 700;
+            line-height: 1.3;
+        }
+        .audit-ledger-tab-meta {
+            font-size: 11px;
+            color: #64748b;
+            line-height: 1.3;
+        }
+        .audit-ledger-body {
+            min-height: 0;
+            display: grid;
+            grid-template-rows: auto auto 1fr;
+            gap: 10px;
+        }
+        .audit-ledger-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .audit-ledger-meta-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: rgba(226, 232, 240, 0.92);
+            color: #334155;
+            font-size: 11px;
+            line-height: 1.3;
+            max-width: 100%;
+            word-break: break-all;
+        }
+        .audit-ledger-status {
+            display: flex;
+            align-items: center;
+            min-height: 22px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            line-height: 1.45;
+            background: rgba(226, 232, 240, 0.72);
+            color: #334155;
+        }
+        .audit-ledger-status[data-state="loading"] {
+            background: rgba(219, 234, 254, 0.92);
+            color: #1d4ed8;
+        }
+        .audit-ledger-status[data-state="error"] {
+            background: rgba(254, 226, 226, 0.94);
+            color: #991b1b;
+        }
+        .audit-ledger-status[data-state="empty"] {
+            background: rgba(226, 232, 240, 0.82);
+            color: #475569;
+        }
+        .audit-ledger-status[data-state="ready"] {
+            background: rgba(220, 252, 231, 0.9);
+            color: #166534;
+        }
+        .audit-ledger-viewer {
+            min-height: 260px;
+            max-height: calc(min(92vh, 980px) - 280px);
+            overflow: auto;
+            margin: 0;
+            padding: 14px;
+            border-radius: 14px;
+            border: 1px solid rgba(15, 23, 42, 0.12);
+            background: #0f172a;
+            color: #e2e8f0;
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        }
+        .audit-ledger-viewer.is-empty {
+            background: #f8fafc;
+            color: #64748b;
+        }
+        .audit-ledger-foot {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .audit-ledger-foot-note {
+            font-size: 12px;
+            color: #475569;
+            line-height: 1.45;
+        }
         @media (max-width: 860px) {
             .book-probe-sheet {
                 padding: 10px;
@@ -2405,6 +2581,28 @@
             .book-probe-preview {
                 max-height: none;
                 min-height: 260px;
+            }
+            .audit-ledger-sheet {
+                padding: 10px;
+            }
+            .audit-ledger-card {
+                width: min(100vw - 20px, 1120px);
+                border-radius: 14px;
+                padding: 12px 12px 10px;
+            }
+            .audit-ledger-head {
+                flex-direction: column;
+            }
+            .audit-ledger-head-actions {
+                width: 100%;
+                justify-content: flex-end;
+            }
+            .audit-ledger-tab {
+                flex: 1 1 100%;
+                min-width: 0;
+            }
+            .audit-ledger-viewer {
+                max-height: calc(min(92vh, 980px) - 320px);
             }
         }
         /* --- Obsidian-style Mount Panel Additions --- */
@@ -3018,6 +3216,34 @@
         </div>
     </section>
 </div>
+<div class="audit-ledger-sheet" id="taskAuditSheet" hidden aria-hidden="true">
+    <section class="audit-ledger-card" role="dialog" aria-modal="true" aria-labelledby="taskAuditTitle">
+        <div class="audit-ledger-head">
+            <div>
+                <div class="audit-ledger-title" id="taskAuditTitle">&#x5ba1;&#x6838;&#x8d26;&#x672c;</div>
+                <div class="audit-ledger-subtitle" id="taskAuditSubtitle">&#x67e5;&#x770b;&#x5f53;&#x524d;&#x4efb;&#x52a1; intermediates/rt/ &#x4e0b;&#x7684;&#x8ffd;&#x52a0;&#x5ba1;&#x8ba1; JSONL &#x8d26;&#x672c;</div>
+            </div>
+            <div class="audit-ledger-head-actions">
+                <button class="btn" id="taskAuditRefreshBtn" type="button">&#x5237;&#x65b0;</button>
+                <button class="btn" id="taskAuditCopyBtn" type="button">&#x590d;&#x5236;&#x5f53;&#x524d;&#x8d26;&#x672c;</button>
+                <button class="btn btn-ghost-icon" id="taskAuditCloseBtn" type="button" aria-label="&#x5173;&#x95ed;&#x5ba1;&#x6838;&#x8d26;&#x672c;" title="&#x5173;&#x95ed;">
+                    <svg class="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="m6 6 12 12M18 6 6 18"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <div class="audit-ledger-tabs" id="taskAuditTabList" role="tablist" aria-label="&#x5ba1;&#x6838;&#x8d26;&#x672c;&#x5207;&#x6362;"></div>
+        <div class="audit-ledger-body">
+            <div class="audit-ledger-meta" id="taskAuditMeta"></div>
+            <div class="audit-ledger-status" id="taskAuditStatus" data-state="empty">&#x5f53;&#x524d;&#x672a;&#x52a0;&#x8f7d;&#x5ba1;&#x8ba1;&#x8d26;&#x672c;</div>
+            <pre class="audit-ledger-viewer is-empty" id="taskAuditViewer">&#x8bf7;&#x4ece;&#x4efb;&#x52a1;&#x4e0a;&#x4e0b;&#x6587;&#x83dc;&#x5355;&#x6253;&#x5f00;&#x300c;&#x5ba1;&#x6838;&#x300d;&#x3002;</pre>
+        </div>
+        <div class="audit-ledger-foot">
+            <span class="audit-ledger-foot-note" id="taskAuditFootNote">&#x8d26;&#x672c;&#x91c7;&#x7528;&#x8ffd;&#x52a0;&#x5199;&#x5165;&#xff0c;&#x6700;&#x65b0;&#x8bb0;&#x5f55;&#x5728;&#x5e95;&#x90e8;&#x3002;</span>
+        </div>
+    </section>
+</div>
 <div class="image-lightbox" id="imageLightbox" role="dialog" aria-modal="true" aria-label="图片预览" aria-hidden="true" hidden>
     <img class="image-lightbox-content" id="imageLightboxImg" alt="">
     <div class="image-lightbox-hint" id="imageLightboxHint">双指捏合或上甩关闭</div>
@@ -3603,6 +3829,15 @@
     const BV_PATTERN = /BV[0-9A-Za-z]{10}/i;
     const WINDOWS_PATH_PATTERN = /^[A-Za-z]:[\\/].*/;
     const PRESS_FEEDBACK_SELECTOR = 'button, .task-item, .outline-item';
+    const TASK_AUDIT_LEDGER_DEFS = Object.freeze([
+        { key: 'fallback', label: 'Fallback', fileName: 'fallback_records.jsonl' },
+        { key: 'error', label: 'Error', fileName: 'error_records.jsonl' },
+        { key: 'manual_retry_required', label: '\u4eba\u5de5\u91cd\u8bd5', fileName: 'manual_retry_required_records.jsonl' },
+    ]);
+    const TASK_AUDIT_LEDGER_DEF_MAP = TASK_AUDIT_LEDGER_DEFS.reduce((map, item) => {
+        map[item.key] = item;
+        return map;
+    }, {});
     const EDGE_BACK_TRANSITION = 'transform var(--motion-duration-edge) cubic-bezier(0.2, 0.86, 0.16, 1.1), opacity var(--motion-duration-edge) cubic-bezier(0.2, 0.8, 0.2, 1), filter var(--motion-duration-edge) cubic-bezier(0.2, 0.8, 0.2, 1)';
     // 侧滑返回手感配置：集中控制位移、阈值、明暗与视差，便于统一调校。
     // 取舍：参数过大容易“厚重”，参数过小会缺少确认感，当前偏向轻薄玻璃感。
@@ -3805,6 +4040,13 @@
         imageLightboxSourceNode: null,
         imageLightboxGesture: null,
         imageLightboxHideHintTimer: 0,
+        taskAuditOpen: false,
+        taskAuditTaskId: '',
+        taskAuditTaskTitle: '',
+        taskAuditLoading: false,
+        taskAuditActiveLedger: 'fallback',
+        taskAuditPayload: null,
+        taskAuditLastError: '',
         pinchStartDistance: 0,
         pinchTriggered: false,
         outlineHeadings: [],
@@ -3858,8 +4100,10 @@
         taskUpdatesHeartbeatTimerId: 0,
         taskUpdatesHeartbeatTimeoutTimerId: 0,
         taskUpdatesLastPingAt: 0,
+        taskUpdatesLastInboundAt: 0,
         taskUpdatesLastPongAt: 0,
         taskUpdatesLastProcessedMessageId: TASK_UPDATES_WS_INITIAL_MESSAGE_ID,
+        taskUpdatesPendingAckMessageId: 0,
         taskListSelectionMode: false,
         taskListSelectedIds: new Set(),
         taskListSelectionPivotId: '',
@@ -4255,6 +4499,7 @@
         if (lower === 'completed') return 'badge-completed';
         if (lower === 'failed') return 'badge-failed';
         if (lower === 'cancelled') return 'badge-cancelled';
+        if (lower === 'unknown') return 'badge-unknown';
         return 'badge-queued';
     }
 
@@ -5964,20 +6209,41 @@
             throw new Error(`获取故事库失败: HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        const previousByTaskId = new Map();
+        (Array.isArray(state.tasks) ? state.tasks : []).forEach((task) => {
+            const taskId = normalizeTaskId(task && task.taskId);
+            if (!taskId) {
+                return;
+            }
+            previousByTaskId.set(taskId, task);
+        });
         state.taskListSyncVersion = Number(data && data.snapshotVersion) > 0
             ? Number(data.snapshotVersion)
             : inferTaskListSyncVersion((data && data.tasks) || []);
+        let incomingTasks = [];
         if (Array.isArray(data)) {
-            state.tasks = data;
+            incomingTasks = data;
         } else if (data && Array.isArray(data.tasks)) {
-            state.tasks = data.tasks;
+            incomingTasks = data.tasks;
         } else if (data && Array.isArray(data.data)) {
-            state.tasks = data.data;
+            incomingTasks = data.data;
         } else {
             console.warn('获取故事列表格式异常', data);
-        state.tasks = [];
         }
-        state.tasks = dedupeTasksByVideoUrl(state.tasks, { separateArchived: false });
+        state.taskListSyncVersion = Math.max(
+            Number(state.taskListSyncVersion) || 0,
+            inferTaskListSyncVersion(incomingTasks)
+        );
+        state.tasks = dedupeTasksByVideoUrl(incomingTasks.map((task) => {
+            const taskId = normalizeTaskId(task && task.taskId);
+            if (!taskId) {
+                return task;
+            }
+            return mergeTaskRecordSnapshot(previousByTaskId.get(taskId), {
+                ...task,
+                taskId,
+            });
+        }), { separateArchived: false }).sort(compareTaskCreatedOrder);
         hydrateTaskManualCollectionsFromTaskPaths(state.tasks || []);
         applyTaskManualCollectionsToStateTasks();
         return state.tasks;
@@ -5988,12 +6254,69 @@
         return list.reduce((maxVersion, task) => {
             const createdAt = Date.parse(String(task && task.createdAt || '').trim());
             const lastOpenedAt = Date.parse(String(task && task.lastOpenedAt || '').trim());
+            const costUpdatedAt = Date.parse(String(
+                task && task.taskCost && task.taskCost.updatedAt
+                    ? task.taskCost.updatedAt
+                    : (task && task.costUpdatedAt || '')
+            ).trim());
             const nextVersion = Math.max(
                 Number.isFinite(createdAt) ? createdAt : 0,
-                Number.isFinite(lastOpenedAt) ? lastOpenedAt : 0
+                Number.isFinite(lastOpenedAt) ? lastOpenedAt : 0,
+                Number.isFinite(costUpdatedAt) ? costUpdatedAt : 0
             );
             return Math.max(maxVersion, nextVersion);
         }, 0);
+    }
+
+    function resolveTaskCostPayload(task) {
+        const cost = task && task.taskCost && typeof task.taskCost === 'object' ? task.taskCost : null;
+        if (!cost) {
+            return null;
+        }
+        const totalCost = Number(cost.totalCost);
+        const currency = String(cost.currency || '').trim().toUpperCase();
+        const updatedAt = String(cost.updatedAt || '').trim();
+        const displayText = String(
+            task && task.taskCostSummary
+                ? task.taskCostSummary
+                : (cost.displayText || '')
+        ).trim();
+        if (!displayText && !(Number.isFinite(totalCost) && totalCost >= 0)) {
+            return null;
+        }
+        let normalizedDisplayText = displayText;
+        if (!normalizedDisplayText && Number.isFinite(totalCost) && totalCost >= 0) {
+            const decimals = totalCost < 0.01 ? 4 : 2;
+            const amountText = totalCost.toFixed(decimals);
+            if (currency === 'CNY') {
+                normalizedDisplayText = `¥${amountText}`;
+            } else if (currency === 'USD') {
+                normalizedDisplayText = `$${amountText}`;
+            } else if (currency) {
+                normalizedDisplayText = `${currency} ${amountText}`;
+            } else {
+                normalizedDisplayText = amountText;
+            }
+        }
+        return {
+            currency,
+            totalCost,
+            updatedAt,
+            displayText: normalizedDisplayText,
+        };
+    }
+
+    function buildTaskCostChipHtml(task) {
+        const cost = resolveTaskCostPayload(task);
+        if (!cost || !cost.displayText) {
+            return '';
+        }
+        const statusVisual = getTaskStatusVisual(task && task.status);
+        const label = statusVisual === 'completed' || statusVisual === 'failed' || statusVisual === 'cancelled'
+            ? '花费'
+            : '累计';
+        const title = `${label} ${cost.displayText}`;
+        return `<span class="task-collection-chip task-cost-chip" title="${escapeHtml(title)}">${escapeHtml(label)}·${escapeHtml(cost.displayText)}</span>`;
     }
 
     function resolveTaskCreatedOrderValue(task) {
@@ -6017,6 +6340,68 @@
         const leftTitle = String(left && (left.title || left.taskId) || '').trim();
         const rightTitle = String(right && (right.title || right.taskId) || '').trim();
         return leftTitle.localeCompare(rightTitle, 'zh-Hans-CN');
+    }
+
+    function shouldPreserveCompletedTaskState(previousTask, incomingTask) {
+        if (!previousTask || !incomingTask) {
+            return false;
+        }
+        const previousStatus = normalizeTaskLifecycleStatus(previousTask.status);
+        if (previousStatus !== 'completed') {
+            return false;
+        }
+        const incomingStatus = normalizeTaskLifecycleStatus(incomingTask.status);
+        if (incomingStatus === 'completed') {
+            return false;
+        }
+        const incomingCompletedAt = String(incomingTask.completedAt || '').trim();
+        if (incomingCompletedAt) {
+            return false;
+        }
+        return true;
+    }
+
+    function applyCompletedTaskState(previousTask, nextTask) {
+        if (!previousTask || !nextTask) {
+            return nextTask;
+        }
+        nextTask.status = previousTask.status;
+        if (Object.prototype.hasOwnProperty.call(previousTask, 'progress')) {
+            nextTask.progress = previousTask.progress;
+        }
+        if (Object.prototype.hasOwnProperty.call(previousTask, 'statusMessage')) {
+            nextTask.statusMessage = previousTask.statusMessage;
+        }
+        if (Object.prototype.hasOwnProperty.call(previousTask, 'userMessage')) {
+            nextTask.userMessage = previousTask.userMessage;
+        }
+        if (Object.prototype.hasOwnProperty.call(previousTask, 'errorMessage')) {
+            nextTask.errorMessage = previousTask.errorMessage;
+        }
+        if (previousTask.resultPath && !nextTask.resultPath) {
+            nextTask.resultPath = previousTask.resultPath;
+        }
+        if (previousTask.completedAt && !nextTask.completedAt) {
+            nextTask.completedAt = previousTask.completedAt;
+        }
+        if (previousTask.markdownAvailable) {
+            nextTask.markdownAvailable = true;
+        }
+        return nextTask;
+    }
+
+    function mergeTaskRecordSnapshot(previousTask, incomingTask) {
+        const previous = previousTask && typeof previousTask === 'object' ? previousTask : {};
+        const incoming = incomingTask && typeof incomingTask === 'object' ? incomingTask : {};
+        const merged = {
+            ...previous,
+            ...incoming,
+            taskId: normalizeTaskId(incoming.taskId || previous.taskId),
+        };
+        if (shouldPreserveCompletedTaskState(previous, incoming)) {
+            return applyCompletedTaskState(previous, merged);
+        }
+        return merged;
     }
 
     function resolveTaskBookLeafIdentity(task) {
@@ -6177,11 +6562,10 @@
                 return;
             }
             const previous = byTaskId.get(taskId) || {};
-            byTaskId.set(taskId, {
-                ...previous,
+            byTaskId.set(taskId, mergeTaskRecordSnapshot(previous, {
                 ...task,
                 taskId,
-            });
+            }));
         });
         const merged = Array.from(byTaskId.values());
         const deduped = dedupeTasksByVideoUrl(merged, { separateArchived: false });
@@ -6237,9 +6621,10 @@
     function getTaskStatusVisual(status) {
         const normalized = normalizeTaskLifecycleStatus(status);
         if (normalized === 'completed') return 'completed';
-        if (normalized === 'processing' || normalized === 'probing') return 'processing';
-        if (normalized === 'failed') return 'failed';
+        if (normalized === 'processing' || normalized === 'probing' || normalized === 'running' || normalized === 'in_progress') return 'processing';
+        if (normalized === 'failed' || normalized === 'manual_retry_required' || normalized === 'fatal') return 'failed';
         if (normalized === 'cancelled') return 'cancelled';
+        if (normalized === 'unknown') return 'unknown';
         return 'queued';
     }
 
@@ -6253,6 +6638,7 @@
         if (visual === 'completed') return 100;
         if (visual === 'processing') return 62;
         if (visual === 'failed' || visual === 'cancelled') return 100;
+        if (visual === 'unknown') return 0;
         return 12;
     }
 
@@ -7186,6 +7572,32 @@
         return /^https?:\/\//i.test(normalizedVideoUrl);
     }
 
+    function canTaskRetryAfterManualRepair(task) {
+        if (!task || typeof task !== 'object') {
+            return false;
+        }
+        const status = normalizeTaskLifecycleStatus(task.status);
+        const statusCategory = String(task.statusCategory || '').trim().toLowerCase();
+        const retryMode = String(task.retryMode || '').trim().toLowerCase();
+        return !!task.blocked
+            || status === 'manual_retry_required'
+            || status === 'fatal'
+            || statusCategory === 'blocked'
+            || retryMode === 'manual';
+    }
+
+    function canTaskFallbackRepair(task) {
+        if (!task || typeof task !== 'object') {
+            return false;
+        }
+        const repairMode = String(task.repairMode || '').trim().toLowerCase();
+        const repairScopeCount = Number(task.repairScopeCount || 0);
+        return canTaskRetryAfterManualRepair(task)
+            && !!task.fallbackRepairAvailable
+            && repairMode === 'fallback_propagation'
+            && repairScopeCount > 0;
+    }
+
     function resolveSingleSelectedTaskForResubmit(payload = {}) {
         let selectionKey = normalizeTaskListSelectionKey(payload && payload.selectionKey);
         if (!selectionKey) {
@@ -7206,6 +7618,9 @@
         const task = resolveSingleSelectedTaskForResubmit(payload);
         if (!task) {
             throw new Error('\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u4efb\u52a1');
+        }
+        if (canTaskRetryAfterManualRepair(task)) {
+            throw new Error('当前任务处于人工修复待重试状态，请使用“人工修复后重试”');
         }
         if (!canTaskBeResubmitted(task)) {
             throw new Error('\u53ea\u6709\u539f\u94fe\u63a5\u4efb\u52a1\u624d\u652f\u6301\u91cd\u65b0\u63d0\u4ea4');
@@ -7251,6 +7666,375 @@
             throw error;
         }
     }
+
+    async function retryTaskAfterManualRepair(payload = {}) {
+        const task = resolveSingleSelectedTaskForResubmit(payload);
+        if (!task) {
+            throw new Error('请先选择一个任务');
+        }
+        if (!canTaskRetryAfterManualRepair(task)) {
+            throw new Error('当前任务不处于“人工修复后重试”状态');
+        }
+        const taskId = normalizeTaskId(task.taskId);
+        if (!taskId) {
+            throw new Error('taskId is empty');
+        }
+        const displayTitle = normalizeTaskTitleText(resolveTaskCardTitle(task)) || compactTaskId(taskId);
+        const actionHint = normalizeTaskTitleText(task.actionHint);
+        const retryEntryPoint = normalizeTaskTitleText(task.retryEntryPoint);
+        const confirmLines = [
+            `确认已完成人工修复，并将「${displayTitle}」重新入队继续处理？`,
+        ];
+        if (actionHint) {
+            confirmLines.push(`建议操作：${actionHint}`);
+        }
+        if (retryEntryPoint) {
+            confirmLines.push(`恢复入口：${retryEntryPoint}`);
+        }
+        const confirmed = window.confirm(confirmLines.join('\n\n'));
+        if (!confirmed) {
+            return { cancelled: true };
+        }
+        const collectionId = normalizeCollectionId(task.collectionId);
+        setTaskSummary(`正在将「${displayTitle}」按人工修复结果重新入队...`);
+        const response = await fetch(`${TASK_API_BASE}/tasks/${encodeURIComponent(taskId)}/retry`, {
+            method: 'POST',
+        });
+        const result = await parseSubmitResponse(response);
+        await reloadTaskList({ showLoading: false });
+        pushView('tasks');
+        revealSubmittedTaskCard(taskId, { collectionId });
+        const refreshedTask = findTaskById(taskId);
+        const refreshedMessage = normalizeTaskTitleText(refreshedTask && refreshedTask.statusMessage);
+        setTaskSummary(refreshedMessage || `已确认人工修复完成，「${displayTitle}」已重新入队`, 'success');
+        return result;
+    }
+
+    async function repairTaskFallback(payload = {}) {
+        const task = resolveSingleSelectedTaskForResubmit(payload);
+        if (!task) {
+            throw new Error('请先选择一个任务');
+        }
+        if (!canTaskFallbackRepair(task)) {
+            throw new Error('当前任务没有可执行的 fallback 定点修复计划');
+        }
+        const taskId = normalizeTaskId(task.taskId);
+        if (!taskId) {
+            throw new Error('taskId is empty');
+        }
+        const displayTitle = normalizeTaskTitleText(resolveTaskCardTitle(task)) || compactTaskId(taskId);
+        const repairReason = normalizeTaskTitleText(task.repairReason);
+        const repairStage = normalizeTaskTitleText(task.repairStage);
+        const repairScopeCount = Number(task.repairScopeCount || 0);
+        const confirmLines = [
+            `确认已完成 fallback 根因修复，并仅重跑受传播影响的路径：${displayTitle}？`,
+        ];
+        if (repairReason) {
+            confirmLines.push(`修复原因：${repairReason}`);
+        }
+        if (repairStage) {
+            confirmLines.push(`修复阶段：${repairStage}`);
+        }
+        if (repairScopeCount > 0) {
+            confirmLines.push(`定点修复 scope 数：${repairScopeCount}`);
+        }
+        const confirmed = window.confirm(confirmLines.join('\n\n'));
+        if (!confirmed) {
+            return { cancelled: true };
+        }
+        const collectionId = normalizeCollectionId(task.collectionId);
+        setTaskSummary(`正在按 fallback 修复计划重新入队：${displayTitle}`);
+        const response = await fetch(`${TASK_API_BASE}/tasks/${encodeURIComponent(taskId)}/repair-fallback`, {
+            method: 'POST',
+        });
+        const result = await parseSubmitResponse(response);
+        await reloadTaskList({ showLoading: false });
+        pushView('tasks');
+        revealSubmittedTaskCard(taskId, { collectionId });
+        setTaskSummary(`已开始按 fallback 修复计划恢复：${displayTitle}`, 'success');
+        return result;
+    }
+
+    function normalizeTaskAuditLedgerKey(rawKey) {
+        const key = String(rawKey || '').trim().toLowerCase();
+        if (key && TASK_AUDIT_LEDGER_DEF_MAP[key]) {
+            return key;
+        }
+        return TASK_AUDIT_LEDGER_DEFS[0].key;
+    }
+
+    function createEmptyTaskAuditLedgerEntry(rawKey) {
+        const key = normalizeTaskAuditLedgerKey(rawKey);
+        const definition = TASK_AUDIT_LEDGER_DEF_MAP[key] || TASK_AUDIT_LEDGER_DEFS[0];
+        return {
+            key,
+            label: definition.label,
+            fileName: definition.fileName,
+            exists: false,
+            path: '',
+            rawText: '',
+            lineCount: 0,
+            recordCount: 0,
+            sizeBytes: 0,
+            lastModifiedAt: '',
+            message: '',
+        };
+    }
+
+    function normalizeTaskAuditLedgerEntry(rawEntry, rawKey) {
+        const definition = TASK_AUDIT_LEDGER_DEF_MAP[normalizeTaskAuditLedgerKey(rawKey)] || TASK_AUDIT_LEDGER_DEFS[0];
+        const entry = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+        const normalizeCount = (value) => {
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric) || numeric <= 0) {
+                return 0;
+            }
+            return Math.floor(numeric);
+        };
+        return {
+            key: definition.key,
+            label: String(entry.label || definition.label || '').trim() || definition.label,
+            fileName: String(entry.fileName || definition.fileName || '').trim() || definition.fileName,
+            exists: !!entry.exists,
+            path: String(entry.path || '').trim(),
+            rawText: typeof entry.rawText === 'string' ? entry.rawText : '',
+            lineCount: normalizeCount(entry.lineCount),
+            recordCount: normalizeCount(entry.recordCount),
+            sizeBytes: normalizeCount(entry.sizeBytes),
+            lastModifiedAt: String(entry.lastModifiedAt || '').trim(),
+            message: String(entry.message || entry.readError || '').trim(),
+        };
+    }
+
+    function normalizeTaskAuditPayload(rawPayload) {
+        const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+        const rawLedgers = payload.ledgers && typeof payload.ledgers === 'object' ? payload.ledgers : {};
+        const ledgers = {};
+        TASK_AUDIT_LEDGER_DEFS.forEach((definition) => {
+            ledgers[definition.key] = normalizeTaskAuditLedgerEntry(rawLedgers[definition.key], definition.key);
+        });
+        return {
+            taskId: normalizeTaskId(payload.taskId),
+            taskTitle: normalizeTaskTitleText(payload.taskTitle),
+            auditRoot: String(payload.auditRoot || '').trim(),
+            status: String(payload.status || '').trim(),
+            ledgers,
+        };
+    }
+
+    function getCurrentTaskAuditLedgerEntry() {
+        const payload = normalizeTaskAuditPayload(state.taskAuditPayload);
+        const activeKey = normalizeTaskAuditLedgerKey(state.taskAuditActiveLedger);
+        return payload.ledgers[activeKey] || createEmptyTaskAuditLedgerEntry(activeKey);
+    }
+
+    function buildTaskAuditLedgerTabsHtml(payload) {
+        const normalized = normalizeTaskAuditPayload(payload);
+        const activeKey = normalizeTaskAuditLedgerKey(state.taskAuditActiveLedger);
+        return TASK_AUDIT_LEDGER_DEFS.map((definition) => {
+            const entry = normalized.ledgers[definition.key] || createEmptyTaskAuditLedgerEntry(definition.key);
+            const summary = entry.exists
+                ? `\u8bb0\u5f55 ${entry.recordCount} \u6761`
+                : '\u672a\u751f\u6210';
+            const active = definition.key === activeKey;
+            return `
+                <button
+                    class="audit-ledger-tab${active ? ' is-active' : ''}"
+                    type="button"
+                    role="tab"
+                    aria-selected="${active ? 'true' : 'false'}"
+                    data-task-audit-ledger="${escapeHtml(definition.key)}">
+                    <span class="audit-ledger-tab-title">${escapeHtml(entry.label || definition.label)}</span>
+                    <span class="audit-ledger-tab-meta">${escapeHtml(summary)}</span>
+                </button>
+            `;
+        }).join('');
+    }
+
+    function buildTaskAuditLedgerMetaHtml(payload, entry) {
+        const parts = [];
+        if (entry.fileName) {
+            parts.push(`\u6587\u4ef6 ${entry.fileName}`);
+        }
+        if (entry.exists) {
+            parts.push(`\u8bb0\u5f55 ${entry.recordCount} \u6761`);
+            parts.push(`\u884c\u6570 ${entry.lineCount}`);
+            parts.push(`\u5927\u5c0f ${formatBytes(entry.sizeBytes)}`);
+        } else {
+            parts.push('\u5f53\u524d\u8d26\u672c\u5c1a\u672a\u751f\u6210');
+        }
+        if (entry.lastModifiedAt) {
+            parts.push(`\u66f4\u65b0 ${formatTime(entry.lastModifiedAt)}`);
+        }
+        const pathText = entry.path || (
+            payload.auditRoot && entry.fileName
+                ? `${payload.auditRoot.replace(/[\\\\/]+$/, '')}/${entry.fileName}`
+                : ''
+        );
+        if (pathText) {
+            parts.push(`\u8def\u5f84 ${pathText}`);
+        }
+        return parts.map((part) => (
+            `<span class="audit-ledger-meta-chip" title="${escapeHtml(part)}">${escapeHtml(part)}</span>`
+        )).join('');
+    }
+
+    function renderTaskAuditLedgerSheet() {
+        const sheet = document.getElementById('taskAuditSheet');
+        const subtitle = document.getElementById('taskAuditSubtitle');
+        const tabs = document.getElementById('taskAuditTabList');
+        const meta = document.getElementById('taskAuditMeta');
+        const status = document.getElementById('taskAuditStatus');
+        const viewer = document.getElementById('taskAuditViewer');
+        const refreshBtn = document.getElementById('taskAuditRefreshBtn');
+        const copyBtn = document.getElementById('taskAuditCopyBtn');
+        if (!sheet || !subtitle || !tabs || !meta || !status || !viewer || !refreshBtn || !copyBtn) {
+            return;
+        }
+        if (!state.taskAuditOpen) {
+            sheet.hidden = true;
+            sheet.setAttribute('aria-hidden', 'true');
+            return;
+        }
+
+        const payload = normalizeTaskAuditPayload(state.taskAuditPayload);
+        const activeKey = normalizeTaskAuditLedgerKey(state.taskAuditActiveLedger);
+        const entry = payload.ledgers[activeKey] || createEmptyTaskAuditLedgerEntry(activeKey);
+        state.taskAuditActiveLedger = activeKey;
+        sheet.hidden = false;
+        sheet.setAttribute('aria-hidden', 'false');
+        const taskLabel = state.taskAuditTaskTitle || payload.taskTitle || compactTaskId(state.taskAuditTaskId) || '\u672a\u77e5\u4efb\u52a1';
+        subtitle.textContent = `${taskLabel} | intermediates/rt`;
+        tabs.innerHTML = buildTaskAuditLedgerTabsHtml(payload);
+        meta.innerHTML = buildTaskAuditLedgerMetaHtml(payload, entry);
+
+        let statusText = '';
+        let statusState = 'empty';
+        if (state.taskAuditLoading) {
+            statusText = '\u6b63\u5728\u8bfb\u53d6\u8ffd\u52a0\u5ba1\u8ba1\u8d26\u672c...';
+            statusState = 'loading';
+        } else if (state.taskAuditLastError) {
+            statusText = `\u52a0\u8f7d\u5931\u8d25\uff1a${state.taskAuditLastError}`;
+            statusState = 'error';
+        } else if (!entry.exists) {
+            statusText = entry.message || '\u5f53\u524d\u4efb\u52a1\u8fd8\u6ca1\u6709\u8fd9\u7c7b\u8bb0\u5f55';
+            statusState = 'empty';
+        } else if (!entry.rawText) {
+            statusText = '\u8d26\u672c\u5df2\u521b\u5efa\uff0c\u4f46\u6682\u65e0\u8bb0\u5f55';
+            statusState = 'empty';
+        } else if (entry.message) {
+            statusText = entry.message;
+            statusState = 'error';
+        } else {
+            statusText = '\u8d26\u672c\u91c7\u7528 JSONL \u8ffd\u52a0\u5199\u5165\uff0c\u6700\u65b0\u8bb0\u5f55\u5728\u5e95\u90e8';
+            statusState = 'ready';
+        }
+        status.textContent = statusText;
+        status.setAttribute('data-state', statusState);
+
+        const fallbackText = state.taskAuditLoading
+            ? '\u6b63\u5728\u52a0\u8f7d...'
+            : (entry.exists ? '\u8d26\u672c\u6682\u65e0\u8bb0\u5f55' : '\u5f53\u524d\u8d26\u672c\u5c1a\u672a\u751f\u6210');
+        viewer.textContent = entry.rawText || fallbackText;
+        viewer.classList.toggle('is-empty', !entry.rawText);
+        if (entry.rawText && !state.taskAuditLoading) {
+            viewer.scrollTop = viewer.scrollHeight;
+        } else {
+            viewer.scrollTop = 0;
+        }
+        refreshBtn.disabled = !!state.taskAuditLoading;
+        copyBtn.disabled = !entry.rawText;
+    }
+
+    function openTaskAuditLedgerSheet(options = {}) {
+        const taskId = normalizeTaskId(options.taskId || state.taskAuditTaskId);
+        if (!taskId) {
+            return;
+        }
+        state.taskAuditOpen = true;
+        state.taskAuditTaskId = taskId;
+        state.taskAuditTaskTitle = normalizeTaskTitleText(options.taskTitle) || state.taskAuditTaskTitle || compactTaskId(taskId);
+        state.taskAuditActiveLedger = normalizeTaskAuditLedgerKey(options.ledgerKey || state.taskAuditActiveLedger);
+        if (options.reset !== false) {
+            state.taskAuditPayload = normalizeTaskAuditPayload({
+                taskId,
+                taskTitle: state.taskAuditTaskTitle,
+            });
+            state.taskAuditLastError = '';
+        }
+        renderTaskAuditLedgerSheet();
+    }
+
+    function closeTaskAuditLedgerSheet() {
+        state.taskAuditOpen = false;
+        state.taskAuditLoading = false;
+        renderTaskAuditLedgerSheet();
+    }
+
+    async function fetchTaskAuditLedgerPayload(taskId) {
+        const response = await fetch(`${TASK_API_BASE}/tasks/${encodeURIComponent(taskId)}/audit-ledgers`);
+        const { payload, rawText } = await parseJsonPayload(response);
+        if (!response.ok || payload.success === false) {
+            throw new Error(payload.message || rawText || `HTTP ${response.status}`);
+        }
+        return normalizeTaskAuditPayload(payload);
+    }
+
+    async function refreshTaskAuditLedgerSheet(options = {}) {
+        const taskId = normalizeTaskId(options.taskId || state.taskAuditTaskId);
+        if (!taskId) {
+            throw new Error('taskId is empty');
+        }
+        state.taskAuditLoading = true;
+        state.taskAuditLastError = '';
+        state.taskAuditActiveLedger = normalizeTaskAuditLedgerKey(options.ledgerKey || state.taskAuditActiveLedger);
+        renderTaskAuditLedgerSheet();
+        try {
+            const payload = await fetchTaskAuditLedgerPayload(taskId);
+            state.taskAuditPayload = payload;
+            if (payload.taskTitle) {
+                state.taskAuditTaskTitle = payload.taskTitle;
+            }
+            return payload;
+        } catch (error) {
+            state.taskAuditLastError = normalizeErrorMessage(error, { fallback: '\u8bf7\u7a0d\u540e\u91cd\u8bd5' });
+            throw error;
+        } finally {
+            state.taskAuditLoading = false;
+            renderTaskAuditLedgerSheet();
+        }
+    }
+
+    async function reviewTaskAuditLedgers(payload = {}) {
+        const task = resolveSingleSelectedTaskForResubmit(payload);
+        if (!task) {
+            throw new Error('\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u4efb\u52a1');
+        }
+        const taskId = normalizeTaskId(task.taskId);
+        if (!taskId) {
+            throw new Error('taskId is empty');
+        }
+        const displayTitle = normalizeTaskTitleText(resolveTaskCardTitle(task)) || compactTaskId(taskId);
+        openTaskAuditLedgerSheet({
+            taskId,
+            taskTitle: displayTitle,
+            ledgerKey: payload && payload.ledgerKey,
+            reset: true,
+        });
+        setTaskSummary(`\u6b63\u5728\u52a0\u8f7d\u300c${displayTitle}\u300d\u7684\u5ba1\u8ba1\u8d26\u672c...`);
+        try {
+            await refreshTaskAuditLedgerSheet({
+                taskId,
+                taskTitle: displayTitle,
+                ledgerKey: payload && payload.ledgerKey,
+            });
+            setTaskSummary(`\u5df2\u6253\u5f00\u300c${displayTitle}\u300d\u7684\u5ba1\u6838\u8d26\u672c`, 'success');
+        } catch (error) {
+            setTaskSummary(`\u52a0\u8f7d\u5ba1\u6838\u8d26\u672c\u5931\u8d25\uff1a${normalizeErrorMessage(error, { fallback: '\u8bf7\u7a0d\u540e\u91cd\u8bd5' })}`, 'error');
+            throw error;
+        }
+    }
+
     async function deleteSelectedTasksWithStrictConfirm() {
         const selected = resolveOrderedSelectedTaskIds();
         if (!selected.length) {
@@ -7375,6 +8159,18 @@
             await resubmitSelectedTask(payload);
             return;
         }
+        if (action === 'retry_after_manual_repair') {
+            await retryTaskAfterManualRepair(payload);
+            return;
+        }
+        if (action === 'repair_fallback_propagation') {
+            await repairTaskFallback(payload);
+            return;
+        }
+        if (action === 'review_task_audit_ledgers') {
+            await reviewTaskAuditLedgers(payload);
+            return;
+        }
         if (action === 'rename_selected_item') {
             const selected = resolveSelectedTaskListEntities();
             let selectionKey = normalizeTaskListSelectionKey(payload && payload.selectionKey);
@@ -7442,6 +8238,7 @@
             ws
             && ws.readyState === WebSocket.OPEN
             && !state.taskUpdatesSocketRecoveryPending
+            && !isTaskUpdatesSocketStale()
         );
     }
 
@@ -7608,6 +8405,7 @@
     }
 
     function getTaskStatusLabel(statusVisual) {
+        if (statusVisual === 'unknown') return '异常残留';
         if (statusVisual === 'completed') return '已成稿';
         if (statusVisual === 'processing') return '创作中';
         if (statusVisual === 'failed') return '需要帮助';
@@ -7616,8 +8414,30 @@
     }
 
 
+    function shouldUseTaskErrorHint(statusVisual, statusMessage) {
+        const normalizedStatusMessage = normalizeTaskTitleText(statusMessage);
+        if (statusVisual === 'unknown') {
+            return true;
+        }
+        if (statusVisual !== 'failed') {
+            return false;
+        }
+        return (
+            !normalizedStatusMessage
+            || normalizedStatusMessage === '任务失败'
+            || normalizedStatusMessage === '系统繁忙，请稍后重试'
+        );
+    }
+
     function resolveTaskPhaseText(task, statusVisual, progressPercent) {
         const statusMessage = normalizeTaskTitleText(task && task.statusMessage);
+        const errorMessage = normalizeTaskTitleText(task && task.errorMessage);
+        if (shouldUseTaskErrorHint(statusVisual, statusMessage) && errorMessage) {
+            return errorMessage;
+        }
+        if (statusVisual === 'unknown' && !statusMessage) {
+            return '异常残留/未完成产物';
+        }
         if (statusMessage) {
             return statusMessage;
         }
@@ -7999,6 +8819,7 @@
         const collectionChip = collectionTitleRaw
             ? `<span class="task-collection-chip" title="${escapeHtml(collectionTitleRaw)}">${escapeHtml(collectionTitleRaw)}</span>`
             : '';
+        const costChip = buildTaskCostChipHtml(task);
 
         const classes = resolveTaskItemMotionClasses(taskIdRaw, statusVisual, options);
         if (!options.exiting && state.taskListSelectedIds && state.taskListSelectedIds.has(taskIdRaw)) {
@@ -8021,6 +8842,7 @@
                     <span class="task-source-chip source-${sourceKind}" aria-hidden="true">${sourceIcon}</span>
                     ${bookLeafChip}
                     ${collectionChip}
+                    ${costChip}
                     <span class="task-progress-hint">${escapeHtml(statusHint)}</span>
                 </div>
             </button>
@@ -8430,6 +9252,17 @@
         writeTaskUpdatesSocketOffset(normalized);
     }
 
+    function noteTaskUpdatesPendingAck(messageId) {
+        const normalized = Math.max(0, Math.floor(Number(messageId) || 0));
+        if (!normalized) {
+            return 0;
+        }
+        if (normalized > (Number(state.taskUpdatesPendingAckMessageId) || 0)) {
+            state.taskUpdatesPendingAckMessageId = normalized;
+        }
+        return normalized;
+    }
+
     function clearTaskUpdatesSocketHeartbeat() {
         if (state.taskUpdatesHeartbeatTimerId) {
             clearInterval(state.taskUpdatesHeartbeatTimerId);
@@ -8441,21 +9274,75 @@
         }
     }
 
-    function acknowledgeTaskUpdatesSocketMessage(messageId) {
-        const normalized = Math.max(0, Math.floor(Number(messageId) || 0));
+    function getTaskUpdatesSocketLastActivityAt() {
+        return Math.max(
+            Number(state.taskUpdatesLastInboundAt) || 0,
+            Number(state.taskUpdatesLastPongAt) || 0
+        );
+    }
+
+    function isTaskUpdatesSocketStale(now = Date.now()) {
+        const lastActivityAt = getTaskUpdatesSocketLastActivityAt();
+        if (!lastActivityAt) {
+            return false;
+        }
+        return (Number(now) || Date.now()) - lastActivityAt > TASK_UPDATES_WS_HEARTBEAT_TIMEOUT_MS;
+    }
+
+    function markTaskUpdatesSocketInboundSignal(receivedAt = Date.now()) {
+        const normalized = Math.max(0, Math.floor(Number(receivedAt) || 0));
         if (!normalized) {
             return;
         }
-        syncTaskUpdatesSocketOffset(normalized);
-        const ws = state.taskUpdatesSocket;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
+        state.taskUpdatesLastInboundAt = normalized;
+        if (state.taskUpdatesHeartbeatTimeoutTimerId) {
+            clearTimeout(state.taskUpdatesHeartbeatTimeoutTimerId);
+            state.taskUpdatesHeartbeatTimeoutTimerId = 0;
+        }
+    }
+
+    function acknowledgeTaskUpdatesSocketMessage(messageId) {
+        const normalized = noteTaskUpdatesPendingAck(messageId);
+        if (!normalized) {
             return;
         }
+        flushTaskUpdatesSocketAck();
+    }
+
+    function flushTaskUpdatesSocketAck() {
+        const pendingAckMessageId = Math.max(0, Math.floor(Number(state.taskUpdatesPendingAckMessageId) || 0));
+        const confirmedAckMessageId = Math.max(0, Math.floor(Number(state.taskUpdatesLastProcessedMessageId) || 0));
+        if (!pendingAckMessageId || pendingAckMessageId <= confirmedAckMessageId) {
+            return false;
+        }
+        const ws = state.taskUpdatesSocket;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            return false;
+        }
         try {
-            ws.send(JSON.stringify({ action: 'ack', messageId: normalized }));
+            ws.send(JSON.stringify({ action: 'ack', messageId: pendingAckMessageId }));
+            return true;
         } catch (error) {
             console.warn('ack task status websocket message failed', error);
+            return false;
         }
+    }
+
+    function handleTaskUpdatesSocketAckConfirmed(payload) {
+        const confirmedMessageId = Math.max(
+            0,
+            Number(payload && payload.ackedThrough) || 0,
+            Number(payload && payload.messageId) || 0
+        );
+        if (!confirmedMessageId) {
+            return;
+        }
+        syncTaskUpdatesSocketOffset(confirmedMessageId);
+        if (confirmedMessageId >= (Number(state.taskUpdatesPendingAckMessageId) || 0)) {
+            state.taskUpdatesPendingAckMessageId = 0;
+            return;
+        }
+        flushTaskUpdatesSocketAck();
     }
 
     function forceTaskUpdatesSocketReconnect(reason) {
@@ -8475,20 +9362,77 @@
         scheduleTaskUpdatesSocketReconnect();
     }
 
-    function armTaskUpdatesSocketPongTimeout() {
+    function armTaskUpdatesSocketPongTimeout(expectedSocket, pingAt) {
         if (state.taskUpdatesHeartbeatTimeoutTimerId) {
             clearTimeout(state.taskUpdatesHeartbeatTimeoutTimerId);
             state.taskUpdatesHeartbeatTimeoutTimerId = 0;
         }
+        state.taskUpdatesHeartbeatTimeoutTimerId = window.setTimeout(() => {
+            state.taskUpdatesHeartbeatTimeoutTimerId = 0;
+            const activeSocket = state.taskUpdatesSocket;
+            if (!activeSocket || activeSocket !== expectedSocket || activeSocket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            const lastActivityAt = getTaskUpdatesSocketLastActivityAt();
+            if (lastActivityAt >= pingAt) {
+                return;
+            }
+            forceTaskUpdatesSocketReconnect('heartbeat timeout');
+        }, TASK_UPDATES_WS_HEARTBEAT_TIMEOUT_MS);
     }
 
     function sendTaskUpdatesSocketPing() {
-        state.taskUpdatesLastPingAt = Date.now();
+        const ws = state.taskUpdatesSocket;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            return false;
+        }
+        const now = Date.now();
+        try {
+            ws.send(JSON.stringify({
+                action: 'ping',
+                clientTime: now,
+            }));
+            state.taskUpdatesLastPingAt = now;
+            armTaskUpdatesSocketPongTimeout(ws, now);
+            return true;
+        } catch (error) {
+            console.warn('task status websocket ping failed', error);
+            return false;
+        }
     }
 
     function startTaskUpdatesSocketHeartbeat() {
         clearTaskUpdatesSocketHeartbeat();
-        state.taskUpdatesLastPongAt = Date.now();
+        const ws = state.taskUpdatesSocket;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        const now = Date.now();
+        state.taskUpdatesLastInboundAt = now;
+        state.taskUpdatesLastPongAt = now;
+        state.taskUpdatesHeartbeatTimerId = window.setInterval(() => {
+            const activeSocket = state.taskUpdatesSocket;
+            if (!activeSocket || activeSocket !== ws) {
+                clearTaskUpdatesSocketHeartbeat();
+                return;
+            }
+            if (activeSocket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            if (document.hidden) {
+                return;
+            }
+            if (state.taskUpdatesHeartbeatTimeoutTimerId) {
+                return;
+            }
+            if (isTaskUpdatesSocketStale()) {
+                forceTaskUpdatesSocketReconnect('stale websocket');
+                return;
+            }
+            if (!sendTaskUpdatesSocketPing()) {
+                forceTaskUpdatesSocketReconnect('heartbeat ping send failed');
+            }
+        }, TASK_UPDATES_WS_HEARTBEAT_INTERVAL_MS);
     }
 
     function handleTaskUpdatesSocketPong(payload) {
@@ -8796,6 +9740,9 @@
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'message')) {
             nextTask.statusMessage = String(payload.message || '');
         }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'userMessage')) {
+            nextTask.userMessage = String(payload.userMessage || '');
+        }
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'errorMessage')) {
             nextTask.errorMessage = String(payload.errorMessage || '');
         }
@@ -8820,11 +9767,44 @@
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'collectionId')) {
             nextTask.collectionId = String(payload.collectionId || '');
         }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'taskPath')) {
+            const taskPath = String(payload.taskPath || '').trim();
+            if (taskPath) {
+                nextTask.taskPath = taskPath;
+            }
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'categoryPath')) {
+            const categoryPath = String(payload.categoryPath || '').trim();
+            if (categoryPath) {
+                nextTask.categoryPath = categoryPath;
+            }
+        }
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'markdownAvailable')) {
             nextTask.markdownAvailable = !!payload.markdownAvailable;
         }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'taskCostSummary')) {
+            nextTask.taskCostSummary = String(payload.taskCostSummary || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'taskCost')) {
+            const taskCost = payload.taskCost && typeof payload.taskCost === 'object'
+                ? { ...payload.taskCost }
+                : null;
+            if (taskCost) {
+                nextTask.taskCost = taskCost;
+                const costUpdatedAt = String(taskCost.updatedAt || '').trim();
+                if (costUpdatedAt) {
+                    nextTask.costUpdatedAt = costUpdatedAt;
+                }
+            }
+        }
         if (payload && payload.resultPath) {
             nextTask.resultPath = String(payload.resultPath);
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'completedAt')) {
+            const completedAt = String(payload.completedAt || '').trim();
+            if (completedAt) {
+                nextTask.completedAt = completedAt;
+            }
         }
         if (!nextTask.title) {
             nextTask.title = taskId;
@@ -8832,22 +9812,23 @@
         if (getTaskStatusVisual(nextTask.status) === 'completed' && nextTask.resultPath) {
             nextTask.markdownAvailable = true;
         }
+        const mergedTask = mergeTaskRecordSnapshot(previousTask, nextTask);
         const nextTasks = previousTasks.slice();
         if (taskIndex >= 0) {
-            nextTasks.splice(taskIndex, 1, nextTask);
+            nextTasks.splice(taskIndex, 1, mergedTask);
         } else {
-            nextTasks.push(nextTask);
+            nextTasks.push(mergedTask);
         }
         const deduped = dedupeTasksByVideoUrl(nextTasks, { separateArchived: false });
         state.tasks = deduped.sort(compareTaskCreatedOrder);
-        const affectsCurrentTask = taskMatchesIdentity(nextTask, state.currentTaskId, state.currentTaskStorageKey);
+        const affectsCurrentTask = taskMatchesIdentity(mergedTask, state.currentTaskId, state.currentTaskStorageKey);
         const shouldRenderLiveUpdate = !document.hidden
             && (state.currentView === 'tasks' || affectsCurrentTask);
         if (shouldRenderLiveUpdate) {
             applyTaskListMotionDiff(previousTasks, state.tasks || []);
             renderTaskList();
         }
-        if (affectsCurrentTask && getTaskStatusVisual(nextTask.status) === 'completed') {
+        if (affectsCurrentTask && getTaskStatusVisual(mergedTask.status) === 'completed') {
             setContentNeedsReload(true);
         }
         if (affectsCurrentTask) {
@@ -8857,7 +9838,7 @@
         }
         return {
             previousTask,
-            nextTask,
+            nextTask: mergedTask,
         };
     }
 
@@ -8959,6 +9940,10 @@
             handleTaskUpdatesSocketPong(payload);
             return;
         }
+        if (type === 'ackConfirmed') {
+            handleTaskUpdatesSocketAckConfirmed(payload);
+            return;
+        }
         if (type === 'taskUpdate') {
             mergeLiveTaskUpdateIntoState(payload);
             return;
@@ -9053,10 +10038,15 @@
         }
         const current = state.taskUpdatesSocket;
         if (current && current.readyState === WebSocket.OPEN) {
-            if (!state.taskUpdatesHeartbeatTimerId) {
-                startTaskUpdatesSocketHeartbeat();
+            if (isTaskUpdatesSocketStale()) {
+                console.warn('task status websocket is stale, recreating connection');
+                closeTaskUpdatesWebSocket({ manual: true });
+            } else {
+                if (!state.taskUpdatesHeartbeatTimerId) {
+                    startTaskUpdatesSocketHeartbeat();
+                }
+                return Promise.resolve(true);
             }
-            return Promise.resolve(true);
         }
         if (state.taskUpdatesSocketConnectPromise) {
             return state.taskUpdatesSocketConnectPromise;
@@ -9097,8 +10087,12 @@
                 clearTimeout(openTimer);
                 state.taskUpdatesSocketReconnectAttempt = 0;
                 state.taskUpdatesSocketRecoveryPending = false;
+                state.taskUpdatesLastPingAt = 0;
+                state.taskUpdatesLastInboundAt = Date.now();
+                state.taskUpdatesLastPongAt = state.taskUpdatesLastInboundAt;
                 startTaskUpdatesSocketHeartbeat();
                 syncTaskUpdatesSocketTaskSubscription(state.currentTaskId, '');
+                flushTaskUpdatesSocketAck();
                 if (recoveryConnect) {
                     refreshTaskListIncrementally({
                         showLoading: false,
@@ -9110,6 +10104,7 @@
                 finish(true);
             }, { once: true });
             ws.addEventListener('message', (event) => {
+                markTaskUpdatesSocketInboundSignal(Date.now());
                 let payload = null;
                 try {
                     payload = JSON.parse(String(event && event.data || ''));
@@ -9123,16 +10118,21 @@
             });
             ws.addEventListener('error', () => {
                 clearTimeout(openTimer);
+                if (state.taskUpdatesSocket !== ws) {
+                    finish(false);
+                    return;
+                }
                 clearTaskUpdatesSocketHeartbeat();
                 finish(false);
                 scheduleTaskUpdatesSocketReconnect();
             }, { once: true });
             ws.addEventListener('close', () => {
                 clearTimeout(openTimer);
-                clearTaskUpdatesSocketHeartbeat();
-                if (state.taskUpdatesSocket === ws) {
-                    state.taskUpdatesSocket = null;
+                if (state.taskUpdatesSocket !== ws) {
+                    return;
                 }
+                clearTaskUpdatesSocketHeartbeat();
+                state.taskUpdatesSocket = null;
                 state.taskUpdatesSocketConnectPromise = null;
                 if (!state.taskUpdatesSocketManualClose) {
                     scheduleTaskUpdatesSocketReconnect();
@@ -11831,10 +12831,29 @@
         ];
         if (singleTask) {
             items.push({
-                id: 'resubmit_selected_task',
-                label: '\u91cd\u65b0\u63d0\u4ea4',
-                disabled: !canTaskBeResubmitted(singleTask),
+                id: 'review_task_audit_ledgers',
+                label: '\u5ba1\u6838',
+                disabled: false,
             });
+            if (canTaskFallbackRepair(singleTask)) {
+                items.push({
+                    id: 'repair_fallback_propagation',
+                    label: '修复 fallback 路径',
+                    disabled: false,
+                });
+            }
+            items.push({
+                id: 'retry_after_manual_repair',
+                label: '人工修复后重试',
+                disabled: !canTaskRetryAfterManualRepair(singleTask),
+            });
+            if (!canTaskRetryAfterManualRepair(singleTask)) {
+                items.push({
+                    id: 'resubmit_selected_task',
+                    label: '\u91cd\u65b0\u63d0\u4ea4',
+                    disabled: !canTaskBeResubmitted(singleTask),
+                });
+            }
             items.push({
                 id: 'rename_selected_item',
                 label: '\u91cd\u547d\u540d',
@@ -12697,6 +13716,7 @@
         const categoryChip = showCollectionChip && !collectionChip && suggestedCategorySegments.length
             ? `<span class="task-collection-chip task-category-chip" title="${escapeHtml(suggestedCategoryPath)}">待归档·${escapeHtml(suggestedCategoryPath)}</span>`
             : '';
+        const costChip = buildTaskCostChipHtml(task);
 
         const classes = resolveTaskItemMotionClasses(taskIdRaw, statusVisual, options);
         classes.push('task-drop-target');
@@ -12730,6 +13750,7 @@
                     ${bookLeafChip}
                     ${collectionChip}
                     ${categoryChip}
+                    ${costChip}
                     <span class="task-progress-hint">${escapeHtml(statusHint)}</span>
                 </div>
             </button>
@@ -19511,6 +20532,11 @@
                 flushCurrentReadingPositionNow();
             }
         });
+        window.addEventListener('pageshow', () => {
+            ensureTaskUpdatesWebSocketConnected().catch((error) => {
+                console.warn('reconnect task status websocket on pageshow failed', error);
+            });
+        });
 
         const mobileVideoFileInput = document.getElementById('mobileVideoFile');
         const mobileSourceSurface = document.getElementById('mobileSourceSurface');
@@ -19629,6 +20655,67 @@
             closeTaskComposer();
         }, { passive: true });
         updateTaskComposerVisibility();
+        const taskAuditSheet = document.getElementById('taskAuditSheet');
+        if (taskAuditSheet) {
+            taskAuditSheet.addEventListener('click', (event) => {
+                if (event.target === taskAuditSheet) {
+                    closeTaskAuditLedgerSheet();
+                }
+            });
+        }
+        const taskAuditCloseBtn = document.getElementById('taskAuditCloseBtn');
+        if (taskAuditCloseBtn) {
+            taskAuditCloseBtn.addEventListener('click', () => {
+                closeTaskAuditLedgerSheet();
+            });
+        }
+        const taskAuditTabList = document.getElementById('taskAuditTabList');
+        if (taskAuditTabList) {
+            taskAuditTabList.addEventListener('click', (event) => {
+                const button = event.target && event.target.closest
+                    ? event.target.closest('[data-task-audit-ledger]')
+                    : null;
+                if (!button) {
+                    return;
+                }
+                const nextKey = normalizeTaskAuditLedgerKey(button.getAttribute('data-task-audit-ledger'));
+                if (nextKey === state.taskAuditActiveLedger) {
+                    return;
+                }
+                state.taskAuditActiveLedger = nextKey;
+                renderTaskAuditLedgerSheet();
+            });
+        }
+        const taskAuditRefreshBtn = document.getElementById('taskAuditRefreshBtn');
+        if (taskAuditRefreshBtn) {
+            taskAuditRefreshBtn.addEventListener('click', async () => {
+                if (!state.taskAuditTaskId || state.taskAuditLoading) {
+                    return;
+                }
+                try {
+                    await refreshTaskAuditLedgerSheet();
+                    setTaskSummary('\u5df2\u5237\u65b0\u5f53\u524d\u5ba1\u8ba1\u8d26\u672c', 'success');
+                } catch (error) {
+                    setTaskSummary(`\u5237\u65b0\u5ba1\u8ba1\u8d26\u672c\u5931\u8d25\uff1a${normalizeErrorMessage(error, { fallback: '\u8bf7\u7a0d\u540e\u91cd\u8bd5' })}`, 'error');
+                }
+            });
+        }
+        const taskAuditCopyBtn = document.getElementById('taskAuditCopyBtn');
+        if (taskAuditCopyBtn) {
+            taskAuditCopyBtn.addEventListener('click', async () => {
+                const entry = getCurrentTaskAuditLedgerEntry();
+                if (!entry.rawText) {
+                    setTaskSummary('\u5f53\u524d\u8d26\u672c\u4e3a\u7a7a\uff0c\u65e0\u53ef\u590d\u5236\u5185\u5bb9', 'error');
+                    return;
+                }
+                try {
+                    await writeClipboardWithFallback(entry.rawText);
+                    setTaskSummary(`\u5df2\u590d\u5236 ${entry.fileName}`, 'success');
+                } catch (error) {
+                    setTaskSummary(`\u590d\u5236\u5931\u8d25\uff1a${normalizeErrorMessage(error, { fallback: '\u8bf7\u7a0d\u540e\u91cd\u8bd5' })}`, 'error');
+                }
+            });
+        }
 
         setContentToolsOpen(false);
 
@@ -21108,6 +22195,11 @@
                 return;
             }
             if (event.key !== 'Escape') {
+                return;
+            }
+            if (state.taskAuditOpen) {
+                event.preventDefault();
+                closeTaskAuditLedgerSheet();
                 return;
             }
             if (state.inlineStickyVisible) {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib.util
 import json
 import logging
@@ -19,6 +18,12 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TypeVar
 import httpx
 
 from .client import LLMClient, LLMConfig, LLMResponse
+from services.python_grpc.src.common.utils.hash_policy import fast_hasher
+from services.python_grpc.src.common.utils.runtime_llm_context import (
+    build_runtime_llm_request_payload,
+    current_runtime_llm_context,
+    dump_runtime_json_text,
+)
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 from services.python_grpc.src.content_pipeline.common.utils import json_payload_repair
 
@@ -290,7 +295,7 @@ class DeepSeekClient(LLMClient):
         temperature: float,
         kwargs: Dict[str, Any],
     ) -> str:
-        hasher = hashlib.sha256()
+        hasher = fast_hasher()
         hasher.update(str(kind).encode("utf-8"))
         hasher.update(b"\0")
         hasher.update(str(self.config.base_url).encode("utf-8"))
@@ -324,9 +329,45 @@ class DeepSeekClient(LLMClient):
         temperature: Optional[float] = None,
         **kwargs,
     ) -> LLMResponse:
+        skip_runtime_capture = bool(kwargs.pop("__runtime_skip_capture__", False))
+        runtime_identity_override = kwargs.pop("__runtime_identity__", None)
+        runtime_metadata = kwargs.pop("__runtime_metadata__", None)
         effective_temperature = (
             float(temperature) if temperature is not None else float(self.config.temperature)
         )
+        runtime_context = None if skip_runtime_capture else current_runtime_llm_context()
+        request_payload = build_runtime_llm_request_payload(
+            model=self.config.model,
+            prompt=prompt,
+            system_prompt=system_prompt or "",
+            kwargs={
+                "temperature": effective_temperature,
+                "max_tokens": self.config.max_tokens,
+                **kwargs,
+            },
+        )
+        runtime_identity = {"step_name": "complete_text", "request_name": "complete_text"}
+        if isinstance(runtime_identity_override, dict):
+            runtime_identity.update(runtime_identity_override)
+        restored = None
+        if runtime_context is not None:
+            restored = runtime_context.load_committed_call(
+                provider="deepseek",
+                request_name="complete_text",
+                request_payload=request_payload,
+                runtime_identity=runtime_identity,
+            )
+        if restored is not None:
+            restored_metadata = dict(restored.get("response_metadata", {}) or {})
+            return LLMResponse(
+                content=str(restored.get("response_text", "") or ""),
+                prompt_tokens=int(restored_metadata.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(restored_metadata.get("completion_tokens", 0) or 0),
+                total_tokens=int(restored_metadata.get("total_tokens", 0) or 0),
+                model=str(restored_metadata.get("model", self.config.model) or self.config.model),
+                latency_ms=float(restored_metadata.get("latency_ms", 0.0) or 0.0),
+                raw_response=restored_metadata.get("raw_response"),
+            )
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -408,11 +449,52 @@ class DeepSeekClient(LLMClient):
                             expires_at=now + float(self._cache.ttl_seconds()),
                         ),
                     )
+                if runtime_context is not None:
+                    runtime_context.persist_success(
+                        provider="deepseek",
+                        request_name="complete_text",
+                        request_payload=request_payload,
+                        response_text=content,
+                        response_metadata={
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": total_tokens,
+                            "model": model,
+                            "latency_ms": latency_ms,
+                            "raw_response": data,
+                        },
+                        runtime_identity=runtime_identity,
+                        metadata=runtime_metadata if isinstance(runtime_metadata, dict) else None,
+                    )
                 return response_obj
 
         if cache_key and _INFLIGHT_DEDUP_ENABLED:
-            return await self._deduper.run(cache_key, _do_request)
-        return await _do_request()
+            try:
+                return await self._deduper.run(cache_key, _do_request)
+            except Exception as error:
+                if runtime_context is not None:
+                    runtime_context.persist_failure(
+                        provider="deepseek",
+                        request_name="complete_text",
+                        request_payload=request_payload,
+                        error=error,
+                        runtime_identity=runtime_identity,
+                        metadata=runtime_metadata if isinstance(runtime_metadata, dict) else None,
+                    )
+                raise
+        try:
+            return await _do_request()
+        except Exception as error:
+            if runtime_context is not None:
+                runtime_context.persist_failure(
+                    provider="deepseek",
+                    request_name="complete_text",
+                    request_payload=request_payload,
+                    error=error,
+                    runtime_identity=runtime_identity,
+                    metadata=runtime_metadata if isinstance(runtime_metadata, dict) else None,
+                )
+            raise
 
     async def complete_json(
         self,
@@ -422,7 +504,50 @@ class DeepSeekClient(LLMClient):
     ) -> Tuple[Dict, LLMResponse]:
         json_system = (system_prompt or "") + "\n\n请确保输出为有效的 JSON 格式。"
         call_kwargs = dict(kwargs)
+        runtime_identity_override = call_kwargs.pop("__runtime_identity__", None)
+        runtime_metadata = call_kwargs.pop("__runtime_metadata__", None)
         call_kwargs.setdefault("response_format", {"type": "json_object"})
+        call_kwargs["__runtime_skip_capture__"] = True
+        runtime_context = current_runtime_llm_context()
+        request_payload = build_runtime_llm_request_payload(
+            model=self.config.model,
+            prompt=prompt,
+            system_prompt=json_system,
+            kwargs=call_kwargs,
+        )
+        runtime_identity = {"step_name": "complete_json", "request_name": "complete_json"}
+        if isinstance(runtime_identity_override, dict):
+            runtime_identity.update(runtime_identity_override)
+        if runtime_context is not None:
+            restored = runtime_context.load_committed_call(
+                provider="deepseek",
+                request_name="complete_json",
+                request_payload=request_payload,
+                runtime_identity=runtime_identity,
+            )
+            if restored is not None:
+                response_text = str(restored.get("response_text", "") or "")
+                parsed = self._load_json_with_repair(response_text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("restored JSON root must be an object")
+                restored_metadata = dict(restored.get("response_metadata", {}) or {})
+                response = LLMResponse(
+                    content=response_text,
+                    prompt_tokens=int(restored_metadata.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(restored_metadata.get("completion_tokens", 0) or 0),
+                    total_tokens=int(restored_metadata.get("total_tokens", 0) or 0),
+                    model=str(restored_metadata.get("model", self.config.model) or self.config.model),
+                    latency_ms=float(restored_metadata.get("latency_ms", 0.0) or 0.0),
+                    raw_response=restored_metadata.get("raw_response"),
+                )
+                runtime_context.emit_llm_call_event(
+                    provider="deepseek",
+                    request_name="complete_json",
+                    runtime_identity=runtime_identity,
+                    metadata=runtime_metadata if isinstance(runtime_metadata, dict) else None,
+                    runtime_restored=True,
+                )
+                return parsed, response
 
         prompt_to_send = prompt
         last_decode_error: Optional[json.JSONDecodeError] = None
@@ -441,6 +566,30 @@ class DeepSeekClient(LLMClient):
                 parsed = self._load_json_with_repair(content)
                 if not isinstance(parsed, dict):
                     raise ValueError("JSON root must be an object")
+                if runtime_context is not None:
+                    runtime_context.persist_success(
+                        provider="deepseek",
+                        request_name="complete_json",
+                        request_payload=request_payload,
+                        response_text=dump_runtime_json_text(parsed),
+                        response_metadata={
+                            "prompt_tokens": response.prompt_tokens,
+                            "completion_tokens": response.completion_tokens,
+                            "total_tokens": response.total_tokens,
+                            "model": response.model,
+                            "latency_ms": response.latency_ms,
+                            "raw_response": response.raw_response,
+                        },
+                        runtime_identity=runtime_identity,
+                        metadata=runtime_metadata if isinstance(runtime_metadata, dict) else None,
+                    )
+                    runtime_context.emit_llm_call_event(
+                        provider="deepseek",
+                        request_name="complete_json",
+                        runtime_identity=runtime_identity,
+                        metadata=runtime_metadata if isinstance(runtime_metadata, dict) else None,
+                        runtime_restored=False,
+                    )
                 return parsed, response
             except json.JSONDecodeError as error:
                 last_decode_error = error
@@ -452,7 +601,17 @@ class DeepSeekClient(LLMClient):
                     )
 
         error_text = str(last_decode_error) if last_decode_error else "unknown parse error"
-        raise ValueError(f"Failed to parse JSON response: {error_text}\nContent: {last_content[:500]}")
+        parse_error = ValueError(f"Failed to parse JSON response: {error_text}\nContent: {last_content[:500]}")
+        if runtime_context is not None:
+            runtime_context.persist_failure(
+                provider="deepseek",
+                request_name="complete_json",
+                request_payload=request_payload,
+                error=parse_error,
+                runtime_identity=runtime_identity,
+                metadata=runtime_metadata if isinstance(runtime_metadata, dict) else None,
+            )
+        raise parse_error
 
     async def _complete_for_json(
         self,

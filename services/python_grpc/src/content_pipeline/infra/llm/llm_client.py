@@ -14,7 +14,6 @@ import os
 import json
 import time
 import math
-import hashlib
 import asyncio
 import logging
 import importlib.util
@@ -31,6 +30,7 @@ from tenacity import (
 from services.python_grpc.src.content_pipeline.infra.llm.token_costing import normalize_usage_payload
 import httpx
 import psutil
+from services.python_grpc.src.common.utils.hash_policy import fast_hasher
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 
@@ -930,7 +930,7 @@ class LLMClient:
         权衡：key 生成有轻微 CPU 开销，但远小于一次网络调用。
         """
         resolved_model = resolve_deepseek_model(model or self.model, default_model=self.model)
-        h = hashlib.sha256()
+        h = fast_hasher()
         h.update(str(kind).encode("utf-8"))
         h.update(b"\0")
         h.update(str(self.base_url).encode("utf-8"))

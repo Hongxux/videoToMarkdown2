@@ -383,6 +383,14 @@
     background: #d97706;
 }
 
+.task-state-pill.status-unknown {
+    color: #475569;
+}
+
+.task-state-pill.status-unknown::before {
+    background: #64748b;
+}
+
 .task-state-pill.status-processing {
     color: #1d4ed8;
 }
@@ -499,6 +507,7 @@
 }
 
 .badge-queued { background: var(--warning); }
+.badge-unknown { background: var(--text-secondary); }
 .badge-processing { background: var(--primary); }
 .badge-completed { background: var(--success); }
 .badge-failed,

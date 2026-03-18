@@ -103,6 +103,11 @@
             <artifactId>jsoup</artifactId>
             <version>1.17.2</version>
         </dependency>
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>5.1.3</version>
+        </dependency>
         
         <!-- JavaCV - FFmpeg JNI Bindings (常驻进程，避免每次spawn) -->
         <dependency>

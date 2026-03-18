@@ -25,6 +25,7 @@ from services.python_grpc.src.content_pipeline.common.utils.json_payload_repair 
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt, render_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
+from services.python_grpc.src.common.utils.runtime_recovery_store import RuntimeRecoveryStore
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,24 @@ def _utc_now_iso() -> str:
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    if path.name == "result.json":
+        try:
+            store = RuntimeRecoveryStore(
+                output_dir=str(path.parent),
+                task_id=path.parent.name,
+                storage_key=path.parent.name,
+            )
+            payload = store.load_projection_payload(
+                stage="phase2b",
+                projection_name="result_document",
+            )
+            if isinstance(payload, dict):
+                return payload
+        except Exception as error:
+            logger.warning("[Phase2B-Category] load result artifact failed: path=%s err=%s", path, error)
+    raise FileNotFoundError(str(path))
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -753,10 +771,6 @@ async def classify_phase2b_output(
 
     try:
         task_dir = _task_dir_from_output_dir(output_dir)
-        if not Path(result_json_path).exists():
-            logger.warning("[Phase2B-Category] skip: result.json missing, path=%s", result_json_path)
-            return None
-
         storage_root = _storage_root_from_task_dir(task_dir)
         library_path = storage_root / _CATEGORY_LIBRARY_FILE
         summary_json_path = _summary_json_path(storage_root)

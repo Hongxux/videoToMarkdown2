@@ -2,6 +2,7 @@ param(
     [string]$PythonExe = "D:\New_ANACONDA\envs\whisper_env\python.exe",
     [string]$RepoRoot = "D:\videoToMarkdownTest2",
     [switch]$CheckDeps,
+    [switch]$EnableRedis,
     [switch]$SkipRedis,
     [string]$RedisComposeFile = "docker-compose.yml",
     [string]$RedisService = "redis",
@@ -27,8 +28,13 @@ if (-not (Test-Path $RepoRoot)) {
 
 Set-Location $RepoRoot
 
+$RedisRuntimeRequested = $EnableRedis -and -not $SkipRedis
+if ($EnableRedis -and $SkipRedis) {
+    throw "EnableRedis and SkipRedis cannot be used together"
+}
+
 $RedisComposeFilePath = Join-Path $RepoRoot $RedisComposeFile
-if (-not $SkipRedis -and -not (Test-Path $RedisComposeFilePath)) {
+if ($RedisRuntimeRequested -and -not (Test-Path $RedisComposeFilePath)) {
     throw "Redis compose file not found: $RedisComposeFilePath"
 }
 
@@ -36,10 +42,10 @@ if (-not $SkipRedis -and -not (Test-Path $RedisComposeFilePath)) {
 $env:PYTHONNOUSERSITE = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
-if (-not $PSBoundParameters.ContainsKey("RedisUrl") -and -not [string]::IsNullOrWhiteSpace($env:TASK_RUNTIME_REDIS_URL)) {
+if ($RedisRuntimeRequested -and -not $PSBoundParameters.ContainsKey("RedisUrl") -and -not [string]::IsNullOrWhiteSpace($env:TASK_RUNTIME_REDIS_URL)) {
     $RedisUrl = $env:TASK_RUNTIME_REDIS_URL
 }
-if (-not $PSBoundParameters.ContainsKey("RedisPrefix") -and -not [string]::IsNullOrWhiteSpace($env:TASK_RUNTIME_REDIS_PREFIX)) {
+if ($RedisRuntimeRequested -and -not $PSBoundParameters.ContainsKey("RedisPrefix") -and -not [string]::IsNullOrWhiteSpace($env:TASK_RUNTIME_REDIS_PREFIX)) {
     $RedisPrefix = $env:TASK_RUNTIME_REDIS_PREFIX
 }
 
@@ -164,11 +170,14 @@ Write-Host "Using Python:" $PythonExe
 Write-Host "Repo root:" $RepoRoot
 Write-Host "PYTHONNOUSERSITE=" $env:PYTHONNOUSERSITE
 
-if ($SkipRedis) {
-    $env:TASK_RUNTIME_REDIS_ENABLED = "0"
-    Write-Host "TASK_RUNTIME_REDIS_ENABLED=" $env:TASK_RUNTIME_REDIS_ENABLED
-} else {
+if ($RedisRuntimeRequested) {
     Start-RedisForRuntimeRecovery
+} else {
+    $env:TASK_RUNTIME_REDIS_ENABLED = "0"
+    Remove-Item Env:TASK_RUNTIME_REDIS_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:TASK_RUNTIME_REDIS_PREFIX -ErrorAction SilentlyContinue
+    Write-Host "TASK_RUNTIME_REDIS_ENABLED=" $env:TASK_RUNTIME_REDIS_ENABLED
+    Write-Host "Redis runtime mirror is disabled by default. Pass -EnableRedis to opt in."
 }
 
 if ($CheckDeps) {

@@ -6,6 +6,7 @@ import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.service.TaskDeduplicationService;
 import com.mvp.module2.fusion.service.TaskProbeService;
 import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
+import com.mvp.module2.fusion.service.TaskRuntimeStageStore;
 import com.mvp.module2.fusion.service.TaskStateRepository;
 import com.mvp.module2.fusion.service.VideoProcessingOrchestrator;
 import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
@@ -58,7 +59,12 @@ class TaskProcessingWorkerRecoveryStatusTest {
 
         TaskProcessingWorker worker = new TaskProcessingWorker();
         TaskQueueManager queueManager = newQueueManager();
-        injectField(queueManager, "taskRuntimeRecoveryService", new TaskRuntimeRecoveryService(new ObjectMapper()));
+        ObjectMapper objectMapper = new ObjectMapper();
+        injectField(
+                queueManager,
+                "taskRuntimeRecoveryService",
+                new TaskRuntimeRecoveryService(objectMapper, new TaskRuntimeStageStore(objectMapper))
+        );
         VideoProcessingOrchestrator orchestrator = mock(VideoProcessingOrchestrator.class);
         TaskProbeService taskProbeService = mock(TaskProbeService.class);
         TaskWebSocketHandler webSocketHandler = mock(TaskWebSocketHandler.class);
@@ -108,6 +114,59 @@ class TaskProcessingWorkerRecoveryStatusTest {
         verify(webSocketHandler, never()).broadcastTaskUpdate(eq(task.taskId), eq("FAILED"), anyDouble(), anyString(), isNull());
     }
 
+
+    @Test
+    void buildRecoveredIoPhaseResultShouldReadPhase2aSemanticUnitsAliasFromResumePayload() throws Exception {
+        TaskProcessingWorker worker = new TaskProcessingWorker();
+        TaskEntry task = new TaskEntry();
+        task.taskId = "task-resume-payload";
+        task.videoUrl = "https://example.com/video";
+        task.outputDir = Files.createTempDirectory("worker-recovery-alias").toString();
+
+        String semanticUnitsPath = Path.of(task.outputDir)
+                .resolve("semantic_units_phase2a.json")
+                .toAbsolutePath()
+                .normalize()
+                .toString();
+        Map<String, Object> assetExtractPayload = new java.util.LinkedHashMap<>();
+        assetExtractPayload.put("output_dir", task.outputDir);
+        assetExtractPayload.put("video_path", Path.of(task.outputDir).resolve("video.mp4").toString());
+        assetExtractPayload.put("phase2a_semantic_units_path", semanticUnitsPath);
+
+        TaskRuntimeRecoveryService.StageSnapshot assetExtractSnapshot =
+                new TaskRuntimeRecoveryService.StageSnapshot(
+                        "asset_extract_java",
+                        "java",
+                        "EXECUTING",
+                        "asset_extract_prepare",
+                        1773650189541L,
+                        task.outputDir,
+                        Path.of(task.outputDir)
+                                .resolve("intermediates")
+                                .resolve("rt")
+                                .resolve("stage")
+                                .resolve("asset_extract_java")
+                                .resolve("stage_state.json")
+                                .toString(),
+                        Map.copyOf(assetExtractPayload)
+                );
+        TaskRuntimeRecoveryService.ResumeDecision resumeDecision =
+                new TaskRuntimeRecoveryService.ResumeDecision(
+                        Path.of(task.outputDir),
+                        "asset_extract_java",
+                        "java",
+                        assetExtractSnapshot,
+                        assetExtractSnapshot,
+                        assetExtractSnapshot,
+                        Map.of("asset_extract_java", assetExtractSnapshot),
+                        "test_alias_payload"
+                );
+
+        VideoProcessingOrchestrator.IOPhaseResult ioResult =
+                invokeBuildRecoveredIoPhaseResult(worker, task, task.outputDir, resumeDecision);
+
+        assertEquals(semanticUnitsPath, ioResult.phase2aSemanticUnitsPath);
+    }
     private static TaskQueueManager newQueueManager() throws Exception {
         TaskQueueManager queueManager = new TaskQueueManager(1);
         TaskStateRepository repository = mock(TaskStateRepository.class);
@@ -177,6 +236,22 @@ class TaskProcessingWorkerRecoveryStatusTest {
         }
     }
 
+
+    private static VideoProcessingOrchestrator.IOPhaseResult invokeBuildRecoveredIoPhaseResult(
+            TaskProcessingWorker worker,
+            TaskEntry task,
+            String outputDir,
+            TaskRuntimeRecoveryService.ResumeDecision resumeDecision
+    ) throws Exception {
+        Method method = TaskProcessingWorker.class.getDeclaredMethod(
+                "buildRecoveredIoPhaseResult",
+                TaskEntry.class,
+                String.class,
+                TaskRuntimeRecoveryService.ResumeDecision.class
+        );
+        method.setAccessible(true);
+        return (VideoProcessingOrchestrator.IOPhaseResult) method.invoke(worker, task, outputDir, resumeDecision);
+    }
     private static void setField(Object target, String fieldName, Object value) throws Exception {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);

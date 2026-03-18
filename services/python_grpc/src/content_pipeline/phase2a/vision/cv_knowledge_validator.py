@@ -33,12 +33,12 @@ import numpy as np
 import logging
 import os
 import time
-import hashlib
 import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
+from services.python_grpc.src.common.utils.hash_policy import md5_short_text_compat
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
 from services.python_grpc.src.content_pipeline.infra.runtime.resource_manager import get_resource_manager
 from services.python_grpc.src.content_pipeline.infra.runtime.fast_metrics import fast_ssim, fast_diff_ratio
@@ -179,7 +179,7 @@ class CVKnowledgeValidator:
             fingerprint = f"{source.resolve()}::{stat.st_size}::{int(stat.st_mtime)}"
         except Exception:
             fingerprint = f"{source}::{time.time_ns()}"
-        digest = hashlib.md5(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        digest = md5_short_text_compat(fingerprint)
         cache_dir = source.parent / "_opencv_decode_fallback"
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir / f"{source.stem}_{digest}_h264.mp4"

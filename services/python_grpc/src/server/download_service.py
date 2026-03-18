@@ -5,12 +5,12 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from services.python_grpc.src.common.utils.hash_policy import md5_text_compat
 
 from .platform_rules import (
     extract_bilibili_episode_index as _extract_bilibili_episode_index_from_rules,
@@ -258,7 +258,7 @@ async def run_download_flow(
                 or video_url
             )
         task_dir_source = build_task_dir_encoding_source(task_dir_source_input)
-        url_hash = hashlib.md5(task_dir_source.encode("utf-8")).hexdigest()
+        url_hash = md5_text_compat(task_dir_source)
         if task_dir_source != str(video_url or ""):
             logger.info(f"[{task_id}] Bilibili task-dir key: {task_dir_source}")
 

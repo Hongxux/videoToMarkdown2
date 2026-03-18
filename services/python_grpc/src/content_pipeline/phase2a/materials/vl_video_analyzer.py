@@ -26,8 +26,8 @@ import logging
 import io
 import math
 import random
+import traceback
 import httpx
-import hashlib
 import subprocess
 import threading
 import time
@@ -37,7 +37,13 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from openai import AsyncOpenAI
+from services.python_grpc.src.common.utils.hash_policy import (
+    fast_digest_text,
+    md5_short_text_compat,
+    sha256_text,
+)
 from services.python_grpc.src.common.utils.numbers import safe_int, safe_float
+from services.python_grpc.src.common.utils.runtime_llm_context import current_runtime_llm_context
 from services.python_grpc.src.common.utils.opencv_decode import (
     get_video_basic_metadata,
     open_video_capture_with_fallback,
@@ -45,6 +51,8 @@ from services.python_grpc.src.common.utils.opencv_decode import (
 )
 # 统一 LLM 调用入口
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
+from services.python_grpc.src.content_pipeline.infra.llm.fallback_audit import append_llm_fallback_event
+from services.python_grpc.src.content_pipeline.infra.llm.token_costing import normalize_usage_payload
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
 from services.python_grpc.src.content_pipeline.common.utils.id_utils import build_unit_relative_asset_id
@@ -306,7 +314,7 @@ class VLVideoAnalyzer:
             if appid_env:
                 self.appid = str(os.environ.get(appid_env, "") or "").strip()
 
-        self.max_retries = max(0, safe_int(api_config.get("max_retries", 4), 4))
+        self.max_retries = max(0, safe_int(api_config.get("max_retries", 6), 6))
         self.vl_retry_initial_backoff_sec = max(
             0.0,
             safe_float(api_config.get("retry_initial_backoff_sec", 2.0), 2.0),
@@ -399,6 +407,10 @@ class VLVideoAnalyzer:
         self.dashscope_upload_retry_jitter_sec = max(
             0.0,
             safe_float(api_config.get("upload_retry_jitter_sec", 0.0), 0.0),
+        )
+        self.temp_url_reuse_ttl_sec = max(
+            60,
+            safe_int(api_config.get("temp_url_reuse_ttl_sec", 900), 900),
         )
         self.vl_offline_task_enabled = bool(api_config.get("offline_task_enabled", False))
         self.vl_offline_poll_interval_sec = max(
@@ -776,7 +788,7 @@ class VLVideoAnalyzer:
                 f"{self.long_video_upload_preset}::{self.long_video_upload_target_fps}::"
                 f"{self.long_video_upload_drop_audio}"
             )
-        digest = hashlib.md5(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        digest = md5_short_text_compat(fingerprint)
         cache_dir = source.parent / "_vl_upload_cache"
         return cache_dir / f"{source.stem}_{digest}_{int(self.long_video_upload_target_height)}p.mp4"
 
@@ -1077,30 +1089,8 @@ class VLVideoAnalyzer:
                     return reason
         return None
 
-    def _normalize_dashscope_usage(self, usage_payload: Any) -> Dict[str, int]:
-        usage = self._to_plain_value(usage_payload)
-        if not isinstance(usage, dict):
-            usage = {}
-
-        prompt_tokens = safe_int(
-            usage.get("prompt_tokens", usage.get("input_tokens", usage.get("inputTokens", 0))),
-            0,
-        )
-        completion_tokens = safe_int(
-            usage.get("completion_tokens", usage.get("output_tokens", usage.get("outputTokens", 0))),
-            0,
-        )
-        total_tokens = safe_int(
-            usage.get("total_tokens", usage.get("totalTokens", prompt_tokens + completion_tokens)),
-            prompt_tokens + completion_tokens,
-        )
-        if total_tokens <= 0:
-            total_tokens = max(0, prompt_tokens + completion_tokens)
-        return {
-            "prompt_tokens": max(0, int(prompt_tokens)),
-            "completion_tokens": max(0, int(completion_tokens)),
-            "total_tokens": max(0, int(total_tokens)),
-        }
+    def _normalize_dashscope_usage(self, usage_payload: Any) -> Dict[str, Any]:
+        return normalize_usage_payload(self._to_plain_value(usage_payload))
 
     def _extract_batch_id(self, batch_payload: Any) -> str:
         payload = self._to_plain_value(batch_payload)
@@ -1631,7 +1621,8 @@ class VLVideoAnalyzer:
         semantic_unit_start_sec: float,
         semantic_unit_id: str,
         extra_prompt: Optional[str] = None,
-        analysis_mode: str = "default"
+        analysis_mode: str = "default",
+        wave_id: str = "",
     ) -> VLClipAnalysisResponse:
         """
         分析单个视频片段。
@@ -1654,8 +1645,10 @@ class VLVideoAnalyzer:
             # 调用 VL API
             api_call_result = await self._call_vl_api(
                 clip_path,
+                semantic_unit_id=semantic_unit_id,
                 extra_prompt=extra_prompt,
                 analysis_mode=normalized_mode,
+                wave_id=wave_id,
             )
             if isinstance(api_call_result, tuple) and len(api_call_result) == 4:
                 analysis_results, token_usage, raw_json, raw_interactions = api_call_result
@@ -1903,6 +1896,7 @@ class VLVideoAnalyzer:
                         semantic_unit_id=str(task.get("semantic_unit_id", "") or ""),
                         extra_prompt=task.get("extra_prompt"),
                         analysis_mode=str(task.get("analysis_mode", "default") or "default"),
+                        wave_id=str(task.get("wave_id", "") or ""),
                     )
                 except Exception as exc:
                     if return_exceptions:
@@ -1948,7 +1942,7 @@ class VLVideoAnalyzer:
             finalized_results.append(item)
         return finalized_results
 
-    def _extract_token_usage(self, response: Any) -> Dict[str, int]:
+    def _extract_token_usage(self, response: Any) -> Dict[str, Any]:
         """
         从 OpenAI 兼容响应中提取 token 使用量。
 
@@ -1957,34 +1951,7 @@ class VLVideoAnalyzer:
         usage = getattr(response, "usage", None)
         if usage is None and isinstance(response, dict):
             usage = response.get("usage")
-
-        def _as_int(value: Any) -> int:
-            try:
-                return int(value)
-            except Exception:
-                return 0
-
-        if usage is None:
-            return {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            }
-
-        if isinstance(usage, dict):
-            prompt_tokens = _as_int(usage.get("prompt_tokens", 0))
-            completion_tokens = _as_int(usage.get("completion_tokens", 0))
-            total_tokens = _as_int(usage.get("total_tokens", prompt_tokens + completion_tokens))
-        else:
-            prompt_tokens = _as_int(getattr(usage, "prompt_tokens", 0))
-            completion_tokens = _as_int(getattr(usage, "completion_tokens", 0))
-            total_tokens = _as_int(getattr(usage, "total_tokens", prompt_tokens + completion_tokens))
-
-        return {
-            "prompt_tokens": max(0, prompt_tokens),
-            "completion_tokens": max(0, completion_tokens),
-            "total_tokens": max(0, total_tokens),
-        }
+        return normalize_usage_payload(usage)
 
     def _build_vl_cache_key(
         self,
@@ -2010,7 +1977,7 @@ class VLVideoAnalyzer:
             file_size = 0
             file_mtime = 0
 
-        prompt_hash = hashlib.sha256((self.prompt_template or "").encode("utf-8")).hexdigest()
+        prompt_hash = fast_digest_text(self.prompt_template or "")
         response_format_text = ""
         if response_format:
             try:
@@ -2065,7 +2032,7 @@ class VLVideoAnalyzer:
         }
 
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-        return "vl:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return "vl:" + fast_digest_text(raw)
 
     @staticmethod
     def _sanitize_media_url_for_audit(url: str) -> Dict[str, Any]:
@@ -2074,7 +2041,7 @@ class VLVideoAnalyzer:
         if not raw:
             return {"kind": "empty", "value": ""}
         if raw.startswith("data:"):
-            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            digest = sha256_text(raw)
             prefix = raw[:64]
             return {
                 "kind": "data_uri",
@@ -2147,6 +2114,240 @@ class VLVideoAnalyzer:
         return sanitized
 
     @staticmethod
+    def _build_runtime_video_signature(video_path: str) -> Dict[str, Any]:
+        safe_path = str(video_path or "").strip()
+        if not safe_path:
+            return {"path": "", "exists": False}
+        path = Path(safe_path)
+        try:
+            stat_result = path.stat()
+            return {
+                "path": str(path.resolve()),
+                "exists": True,
+                "size": int(stat_result.st_size),
+                "mtime_ns": int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+                "suffix": str(path.suffix or "").lower(),
+            }
+        except Exception:
+            return {
+                "path": safe_path,
+                "exists": False,
+                "suffix": str(path.suffix or "").lower(),
+            }
+
+    @staticmethod
+    def _sanitize_media_url_for_runtime_restore(url: str) -> Dict[str, Any]:
+        """恢复判重不能依赖临时 URL，这里只保留稳定特征。"""
+        raw = str(url or "")
+        if not raw:
+            return {"kind": "empty", "value": ""}
+        if raw.startswith("data:"):
+            header, _, _ = raw.partition(",")
+            return {
+                "kind": "data_uri",
+                "header": header[:96],
+                "length": len(raw),
+                "sha256": sha256_text(raw),
+            }
+        suffix = ""
+        try:
+            suffix = str(Path(raw.split("?", 1)[0]).suffix or "").lower()
+        except Exception:
+            suffix = ""
+        scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
+        return {
+            "kind": "remote_url",
+            "scheme": scheme,
+            "suffix": suffix,
+            "value": "omitted",
+        }
+
+    def _sanitize_messages_for_runtime_restore(self, messages: Any) -> List[Dict[str, Any]]:
+        """恢复真源只保留稳定输入，避免 temp_url 等瞬时字段污染 fingerprint。"""
+        sanitized: List[Dict[str, Any]] = []
+        if not isinstance(messages, list):
+            return sanitized
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role", "") or "").strip()
+            content = message.get("content")
+            normalized_content: Any
+            if isinstance(content, list):
+                normalized_items: List[Dict[str, Any]] = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        normalized_items.append({"type": "unknown", "value": str(item)})
+                        continue
+                    item_type = str(item.get("type", "") or "").strip().lower()
+                    if item_type == "text":
+                        normalized_items.append({"type": "text", "text": str(item.get("text", "") or "")})
+                        continue
+                    if item_type == "image_url":
+                        image_obj = item.get("image_url") if isinstance(item.get("image_url"), dict) else {}
+                        normalized_items.append(
+                            {
+                                "type": "image_url",
+                                "image_url": self._sanitize_media_url_for_runtime_restore(
+                                    str(image_obj.get("url", "") or "")
+                                ),
+                            }
+                        )
+                        continue
+                    if item_type == "video_url":
+                        video_obj = item.get("video_url") if isinstance(item.get("video_url"), dict) else {}
+                        normalized_items.append(
+                            {
+                                "type": "video_url",
+                                "video_url": self._sanitize_media_url_for_runtime_restore(
+                                    str(video_obj.get("url", "") or "")
+                                ),
+                            }
+                        )
+                        continue
+                    normalized_items.append({"type": item_type or "unknown", "value": str(item)})
+                normalized_content = normalized_items
+            elif isinstance(content, str):
+                normalized_content = content
+            elif content is None:
+                normalized_content = ""
+            else:
+                normalized_content = str(content)
+            sanitized.append({"role": role, "content": normalized_content})
+        return sanitized
+
+    def _build_vl_runtime_identity(
+        self,
+        *,
+        semantic_unit_id: str,
+        analysis_mode: str,
+        video_path: str,
+        wave_id: str = "",
+    ) -> Dict[str, Any]:
+        unit_token = re.sub(r"[^0-9A-Za-z._-]+", "_", str(semantic_unit_id or "").strip()).strip("._-") or "UNKNOWN_UNIT"
+        clip_token = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(str(video_path or "")).stem).strip("._-") or "clip"
+        clip_token = clip_token[:24]
+        normalized_mode = str(analysis_mode or "default").strip().lower() or "default"
+        identity = {
+            "step_name": f"phase2a_vl_{normalized_mode}",
+            "unit_id": unit_token,
+            "chunk_id": f"unit_{unit_token}_vl_{clip_token}",
+            "request_scope_ids": [unit_token],
+        }
+        if str(wave_id or "").strip():
+            identity["wave_id"] = str(wave_id).strip()
+        return identity
+
+    def _build_vl_media_prepare_runtime_identity(
+        self,
+        *,
+        semantic_unit_id: str,
+        video_path: str,
+        wave_id: str = "",
+    ) -> Dict[str, Any]:
+        unit_token = re.sub(r"[^0-9A-Za-z._-]+", "_", str(semantic_unit_id or "").strip()).strip("._-") or "UNKNOWN_UNIT"
+        clip_token = re.sub(r"[^0-9A-Za-z._-]+", "_", Path(str(video_path or "")).stem).strip("._-") or "clip"
+        clip_token = clip_token[:24]
+        identity = {
+            "step_name": "phase2a_vl_media_prepare",
+            "unit_id": unit_token,
+            "chunk_id": f"unit_{unit_token}_media_{clip_token}",
+            "request_scope_ids": [unit_token],
+        }
+        if str(wave_id or "").strip():
+            identity["wave_id"] = str(wave_id).strip()
+        return identity
+
+    def _build_vl_media_prepare_request_payload(
+        self,
+        *,
+        video_path: str,
+        video_duration_sec: float,
+    ) -> Dict[str, Any]:
+        return {
+            "provider": "dashscope",
+            "base_url": str(self.base_url or "").strip(),
+            "video": self._build_runtime_video_signature(video_path),
+            "video_duration_sec": float(video_duration_sec or 0.0),
+            "video_input_mode": str(self.video_input_mode or "").strip(),
+            "long_video_upload_compress_enabled": bool(self.long_video_upload_compress_enabled),
+            "long_video_upload_target_height": int(self.long_video_upload_target_height),
+            "long_video_upload_target_bitrate": str(self.long_video_upload_target_bitrate or ""),
+            "long_video_upload_min_bitrate": str(self.long_video_upload_min_bitrate or ""),
+            "long_video_upload_max_bitrate": str(self.long_video_upload_max_bitrate or ""),
+            "long_video_upload_crf": int(self.long_video_upload_crf),
+            "long_video_upload_preset": str(self.long_video_upload_preset or ""),
+            "long_video_upload_target_fps": float(self.long_video_upload_target_fps),
+            "long_video_upload_drop_audio": bool(self.long_video_upload_drop_audio),
+            "dashscope_upload_chunk_size_bytes": int(self.dashscope_upload_chunk_size_bytes),
+            "dashscope_upload_timeout_by_video_duration": bool(self.dashscope_upload_timeout_by_video_duration),
+            "dashscope_upload_timeout_min_sec": float(self.dashscope_upload_timeout_min_sec),
+            "dashscope_upload_retry_max_attempts": int(self.dashscope_upload_retry_max_attempts),
+            "dashscope_upload_retry_initial_backoff_sec": float(self.dashscope_upload_retry_initial_backoff_sec),
+            "dashscope_upload_retry_multiplier": float(self.dashscope_upload_retry_multiplier),
+            "dashscope_upload_retry_max_backoff_sec": float(self.dashscope_upload_retry_max_backoff_sec),
+            "dashscope_upload_retry_jitter_sec": float(self.dashscope_upload_retry_jitter_sec),
+        }
+
+    def _build_vl_runtime_request_payload(
+        self,
+        *,
+        video_path: str,
+        messages: Any,
+        analysis_mode: str,
+        extra_prompt: Optional[str],
+        request_transport_meta: Dict[str, Any],
+        video_duration_sec: float,
+        use_dashscope_offline_task: bool,
+        vl_request_timeout_sec: float,
+        vl_hedge_delay_ms: int,
+    ) -> Dict[str, Any]:
+        prompt_hash = sha256_text(self.prompt_template or "")
+        return {
+            "provider": str(self.provider or "").strip().lower() or "vl",
+            "model": str(self.model or "").strip(),
+            "base_url": str(self.base_url or "").strip(),
+            "analysis_mode": str(analysis_mode or "").strip(),
+            "extra_prompt": str(extra_prompt or ""),
+            "video": self._build_runtime_video_signature(video_path),
+            "video_duration_sec": float(video_duration_sec or 0.0),
+            "prompt_template_hash": prompt_hash,
+            "temperature": float(self.temperature),
+            "max_tokens": int(self.max_tokens),
+            "video_input_mode": str(self.video_input_mode or ""),
+            "max_input_frames": int(self.max_input_frames),
+            "max_image_dim": int(self.max_image_dim),
+            "max_video_size_mb": float(self.max_video_size_mb),
+            "compression_crf": float(self.compression_crf),
+            "vl_request_timeout_sec": float(vl_request_timeout_sec),
+            "vl_hedge_delay_ms": int(vl_hedge_delay_ms or 0),
+            "vl_offline_task_enabled": bool(use_dashscope_offline_task),
+            "vl_offline_poll_interval_sec": float(self.vl_offline_poll_interval_sec),
+            "vl_offline_max_wait_sec": float(self.vl_offline_max_wait_sec),
+            "long_video_upload_compress_enabled": bool(self.long_video_upload_compress_enabled),
+            "long_video_upload_target_height": int(self.long_video_upload_target_height),
+            "long_video_upload_target_bitrate": str(self.long_video_upload_target_bitrate or ""),
+            "long_video_upload_min_bitrate": str(self.long_video_upload_min_bitrate or ""),
+            "long_video_upload_max_bitrate": str(self.long_video_upload_max_bitrate or ""),
+            "long_video_upload_timeout_sec": int(self.long_video_upload_timeout_sec),
+            "long_video_upload_crf": int(self.long_video_upload_crf),
+            "long_video_upload_preset": str(self.long_video_upload_preset or ""),
+            "long_video_upload_target_fps": float(self.long_video_upload_target_fps),
+            "long_video_upload_drop_audio": bool(self.long_video_upload_drop_audio),
+            "dashscope_upload_chunk_size_bytes": int(self.dashscope_upload_chunk_size_bytes),
+            "dashscope_upload_timeout_by_video_duration": bool(self.dashscope_upload_timeout_by_video_duration),
+            "dashscope_upload_timeout_min_sec": float(self.dashscope_upload_timeout_min_sec),
+            "dashscope_upload_retry_max_attempts": int(self.dashscope_upload_retry_max_attempts),
+            "dashscope_upload_retry_initial_backoff_sec": float(self.dashscope_upload_retry_initial_backoff_sec),
+            "dashscope_upload_retry_multiplier": float(self.dashscope_upload_retry_multiplier),
+            "dashscope_upload_retry_max_backoff_sec": float(self.dashscope_upload_retry_max_backoff_sec),
+            "dashscope_upload_retry_jitter_sec": float(self.dashscope_upload_retry_jitter_sec),
+            "message_transport_meta": dict(request_transport_meta or {}),
+            "messages": self._sanitize_messages_for_runtime_restore(messages),
+        }
+
+    @staticmethod
     def _compute_retry_backoff_sec(
         *,
         attempt_index: int,
@@ -2213,6 +2414,33 @@ class VLVideoAnalyzer:
         return summary
 
     @staticmethod
+    def _extract_temp_urls_from_messages(messages: Any) -> List[str]:
+        temp_urls: List[str] = []
+        seen: set[str] = set()
+        if not isinstance(messages, list):
+            return temp_urls
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type", "") or "").strip().lower() != "video_url":
+                    continue
+                video_obj = item.get("video_url") if isinstance(item.get("video_url"), dict) else {}
+                raw_url = str(video_obj.get("url", "") or "").strip()
+                if not raw_url or raw_url.startswith("data:"):
+                    continue
+                if raw_url in seen:
+                    continue
+                seen.add(raw_url)
+                temp_urls.append(raw_url)
+        return temp_urls
+
+    @staticmethod
     def _json_utf8_size_bytes(value: Any) -> int:
         try:
             return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
@@ -2222,8 +2450,10 @@ class VLVideoAnalyzer:
     async def _call_vl_api(
         self,
         video_path: str,
+        semantic_unit_id: str,
         extra_prompt: Optional[str] = None,
         analysis_mode: str = "default",
+        wave_id: str = "",
     ) -> tuple[List[VLAnalysisResult], Dict[str, int], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         调用 VL API 并解析结果。
@@ -2252,14 +2482,136 @@ class VLVideoAnalyzer:
                 vl_request_timeout_sec,
                 vl_hedge_delay_ms,
             )
-        messages = await self._build_messages(
+        runtime_context = current_runtime_llm_context()
+        runtime_identity = self._build_vl_runtime_identity(
+            semantic_unit_id=semantic_unit_id,
+            analysis_mode=normalized_mode,
+            video_path=video_path,
+            wave_id=wave_id,
+        )
+        messages_result = await self._build_messages(
             video_path,
             extra_prompt=extra_prompt,
             analysis_mode=normalized_mode,
+            runtime_identity=runtime_identity,
+            return_transport_detail=True,
         )
+        media_prepare_interaction: Optional[Dict[str, Any]] = None
+        if isinstance(messages_result, tuple) and len(messages_result) == 2:
+            messages, media_prepare_interaction = messages_result
+        else:
+            messages = messages_result
         request_messages_audit = self._sanitize_messages_for_audit(messages)
         request_transport_meta = self._summarize_message_transport(messages)
         raw_interactions: List[Dict[str, Any]] = []
+        if isinstance(media_prepare_interaction, dict):
+            raw_interactions.append(media_prepare_interaction)
+        else:
+            temp_urls = self._extract_temp_urls_from_messages(messages)
+            if temp_urls:
+                raw_interactions.append(
+                    {
+                        "stage": "vl_media_prepare",
+                        "attempt": 1,
+                        "success": True,
+                        "request": {
+                            "video_path": str(video_path or ""),
+                            "analysis_mode": normalized_mode,
+                            "video_duration_sec": float(video_duration_sec),
+                            "message_transport": str(request_transport_meta.get("transport", "unknown") or "unknown"),
+                            "message_transport_meta": dict(request_transport_meta or {}),
+                        },
+                        "response": {
+                            "temp_urls": list(temp_urls),
+                            "temp_url_count": len(temp_urls),
+                        },
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+        runtime_request_payload = self._build_vl_runtime_request_payload(
+            video_path=video_path,
+            messages=messages,
+            analysis_mode=normalized_mode,
+            extra_prompt=extra_prompt,
+            request_transport_meta=request_transport_meta,
+            video_duration_sec=video_duration_sec,
+            use_dashscope_offline_task=use_dashscope_offline_task,
+            vl_request_timeout_sec=vl_request_timeout_sec,
+            vl_hedge_delay_ms=vl_hedge_delay_ms,
+        )
+        runtime_scope = (
+            runtime_context.build_scope_descriptor(
+                provider="vl",
+                request_name="vl_video_analysis",
+                request_payload=runtime_request_payload,
+                runtime_identity=runtime_identity,
+            )
+            if runtime_context is not None
+            else {
+                "chunk_id": "",
+                "llm_call_id": "",
+                "scope_ref": "",
+            }
+        )
+        if runtime_context is not None:
+            restored = runtime_context.load_committed_call(
+                provider="vl",
+                request_name="vl_video_analysis",
+                request_payload=runtime_request_payload,
+                runtime_identity=runtime_identity,
+            )
+            if restored is not None:
+                restored_metadata = dict(restored.get("response_metadata", {}) or {})
+                restored_text = str(restored.get("response_text", "") or "")
+                try:
+                    parsed_results, raw_json = self._parse_response_with_payload(
+                        restored_text,
+                        finish_reason=str(restored_metadata.get("finish_reason", "") or "") or None,
+                        analysis_mode=normalized_mode,
+                    )
+                except Exception as restore_error:
+                    logger.warning(
+                        "VL runtime restore parse failed, fallback to live request: unit=%s err=%s",
+                        semantic_unit_id,
+                        restore_error,
+                    )
+                else:
+                    restored_usage = dict(restored_metadata.get("usage", {}) or {})
+                    raw_interactions.append(
+                        {
+                            "stage": "vl_video_analysis",
+                            "attempt": int(restored.get("attempt", 0) or 0),
+                            "success": True,
+                            "request": {
+                                "model": self.model,
+                                "temperature": float(self.temperature),
+                                "max_tokens": int(self.max_tokens),
+                                "analysis_mode": normalized_mode,
+                                "video_path": str(video_path or ""),
+                                "video_duration_sec": float(video_duration_sec),
+                                "offline_task_enabled": bool(use_dashscope_offline_task),
+                                "timeout_sec": float(vl_request_timeout_sec),
+                                "hedge_delay_ms": int(vl_hedge_delay_ms),
+                                "message_transport": str(request_transport_meta.get("transport", "unknown") or "unknown"),
+                                "message_transport_meta": dict(request_transport_meta or {}),
+                                "messages": request_messages_audit,
+                            },
+                            "response": {
+                                "model": str(restored_metadata.get("model", self.model) or self.model),
+                                "cache_hit": True,
+                                "runtime_restored": True,
+                                "restored_attempt": int(restored.get("attempt", 0) or 0),
+                                "attempt_dir": str(restored.get("attempt_dir", "") or ""),
+                                "finish_reason": str(restored_metadata.get("finish_reason", "") or ""),
+                                "usage": restored_usage,
+                                "offline_task_meta": dict(restored_metadata.get("offline_task_meta", {}) or {}),
+                                "content": restored_text,
+                                "parsed_payload": raw_json,
+                            },
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    return parsed_results, restored_usage, raw_json, raw_interactions
 
         # 构建稳定 cache_key（仅用于首轮尝试，避免重试阶段误用缓存）
         base_cache_key = None
@@ -2355,6 +2707,22 @@ class VLVideoAnalyzer:
                     finish_reason=finish_reason,
                     analysis_mode=normalized_mode,
                 )
+                if runtime_context is not None:
+                    runtime_context.persist_success(
+                        provider="vl",
+                        request_name="vl_video_analysis",
+                        request_payload=runtime_request_payload,
+                        response_text=str(content or ""),
+                        response_metadata={
+                            "model": str(getattr(vl_response, "model", self.model) or self.model),
+                            "cache_hit": bool(getattr(vl_response, "cache_hit", False)),
+                            "finish_reason": str(finish_reason or ""),
+                            "usage": dict(token_usage or {}),
+                            "offline_task_meta": dict(offline_task_meta or {}),
+                            "raw_json": list(raw_json or []),
+                        },
+                        runtime_identity=runtime_identity,
+                    )
                 raw_interactions.append(
                     {
                         "stage": "vl_video_analysis",
@@ -2473,6 +2841,7 @@ class VLVideoAnalyzer:
                                 "Do not output reasoning or key_evidence fields."
                             ),
                             analysis_mode=normalized_mode,
+                            runtime_identity=runtime_identity,
                         )
                     await asyncio.sleep(wait_time)
                 attempt += 1
@@ -2482,6 +2851,61 @@ class VLVideoAnalyzer:
             setattr(last_error, "_raw_llm_interactions", raw_interactions)
             if not getattr(last_error, "_display_error_detail", None):
                 setattr(last_error, "_display_error_detail", self._format_exception_detail(last_error))
+            if runtime_context is not None:
+                runtime_context.persist_failure(
+                    provider="vl",
+                    request_name="vl_video_analysis",
+                    request_payload=runtime_request_payload,
+                    error=last_error,
+                    runtime_identity=runtime_identity,
+                )
+                failure_records: List[Dict[str, Any]] = []
+                for interaction in list(raw_interactions or []):
+                    if not isinstance(interaction, dict) or bool(interaction.get("success", False)):
+                        continue
+                    failure_records.append(
+                        {
+                            "provider": "vl",
+                            "request_name": "vl_video_analysis",
+                            "attempt": int(interaction.get("attempt", len(failure_records) + 1) or (len(failure_records) + 1)),
+                            "analysis_mode": normalized_mode,
+                            "error_message": str(
+                                interaction.get("error_raw")
+                                or interaction.get("error")
+                                or getattr(last_error, "_display_error_detail", None)
+                                or str(last_error or "")
+                            ),
+                            "request_context": dict(interaction.get("request", {}) or {}),
+                            "recorded_at": str(interaction.get("timestamp_utc", "") or ""),
+                        }
+                    )
+                append_llm_fallback_event(
+                    step_name=str(runtime_identity.get("step_name", "phase2a_vl") or "phase2a_vl"),
+                    unit_id=str(runtime_identity.get("unit_id", semantic_unit_id) or semantic_unit_id),
+                    llm_call_id=str(runtime_scope.get("llm_call_id", "") or ""),
+                    chunk_id=str(runtime_scope.get("chunk_id", "") or ""),
+                    scope_ref=str(runtime_scope.get("scope_ref", "") or ""),
+                    request_payload=runtime_request_payload,
+                    fallback_payload={
+                        "is_fallback": True,
+                        "fallback_kind": "vl_analysis_failed",
+                        "fallback_label": f"phase2a_vl_{normalized_mode}_failed",
+                        "fallback_reason": str(
+                            getattr(last_error, "_display_error_detail", None)
+                            or str(last_error or "")
+                        ),
+                        "repair_stage": "phase2a",
+                        "previous_failures": failure_records,
+                    },
+                    extra={
+                        "analysis_mode": normalized_mode,
+                        "video_path": str(video_path or ""),
+                        "provider": str(self.provider or "").strip().lower() or "vl",
+                        "stack_trace": "".join(
+                            traceback.format_exception(type(last_error), last_error, last_error.__traceback__)
+                        ),
+                    },
+                )
         raise last_error
 
     def _get_tutorial_system_prompt(self) -> str:
@@ -2526,8 +2950,11 @@ class VLVideoAnalyzer:
         video_path: str,
         extra_prompt: Optional[str] = None,
         override_prompt: Optional[str] = None,
-        analysis_mode: str = "default"
-    ) -> List[Dict[str, Any]]:
+        analysis_mode: str = "default",
+        *,
+        runtime_identity: Optional[Dict[str, Any]] = None,
+        return_transport_detail: bool = False,
+    ) -> Any:
         """
         构建多模态消息。
 
@@ -2583,21 +3010,35 @@ class VLVideoAnalyzer:
                     video_path,
                     video_file_size,
                 )
-                return [
+                messages = [
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": [
                         {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_base64}"}},
                         {"type": "text", "text": user_text},
                     ]}
                 ]
+                if return_transport_detail:
+                    return messages, None
+                return messages
 
         # 2) DashScope File.upload 获取临时 URL（需要 dashscope SDK）
         dashscope_upload_error_detail = ""
+        media_prepare_interaction: Optional[Dict[str, Any]] = None
         if can_use_dashscope_inline and mode in ("auto", "dashscope_upload"):
             try:
-                temp_url = await self._try_get_dashscope_temp_url(
+                media_prepare_detail = await self._resolve_dashscope_temp_url_with_runtime_reuse(
                     video_path,
+                    semantic_unit_id=str((runtime_identity or {}).get("unit_id", "") or ""),
+                    analysis_mode=normalized_mode,
+                    video_duration_sec=self._resolve_video_duration_sec(video_path),
+                    runtime_identity=runtime_identity,
                     raise_on_failure=(mode == "dashscope_upload"),
+                )
+                temp_url = str(media_prepare_detail.get("temp_url", "") or "").strip()
+                media_prepare_interaction = (
+                    dict(media_prepare_detail.get("interaction", {}) or {})
+                    if isinstance(media_prepare_detail, dict)
+                    else None
                 )
             except Exception as upload_error:
                 if mode == "dashscope_upload":
@@ -2614,13 +3055,16 @@ class VLVideoAnalyzer:
                     video_path,
                     temp_url,
                 )
-                return [
+                messages = [
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": [
                         {"type": "video_url", "video_url": {"url": temp_url}},
                         {"type": "text", "text": user_text},
                     ]}
                 ]
+                if return_transport_detail:
+                    return messages, media_prepare_interaction
+                return messages
         if mode == "dashscope_upload":
             if not can_use_dashscope_inline:
                 raise RuntimeError(
@@ -2658,10 +3102,13 @@ class VLVideoAnalyzer:
             int(self.max_image_dim),
         )
         
-        return [
+        messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": content_items}
         ]
+        if return_transport_detail:
+            return messages, media_prepare_interaction
+        return messages
 
     async def _try_get_dashscope_temp_url(
         self,
@@ -2669,17 +3116,38 @@ class VLVideoAnalyzer:
         *,
         raise_on_failure: bool = False,
     ) -> Optional[str]:
+        detail = await self._resolve_dashscope_temp_url_with_runtime_reuse(
+            video_path,
+            semantic_unit_id="",
+            analysis_mode="default",
+            video_duration_sec=self._resolve_video_duration_sec(video_path),
+            runtime_identity=None,
+            raise_on_failure=raise_on_failure,
+        )
+        temp_url = str(detail.get("temp_url", "") or "").strip()
+        return temp_url or None
+
+    async def _resolve_dashscope_temp_url_with_runtime_reuse(
+        self,
+        video_path: str,
+        *,
+        semantic_unit_id: str,
+        analysis_mode: str,
+        video_duration_sec: float,
+        runtime_identity: Optional[Dict[str, Any]],
+        raise_on_failure: bool = False,
+    ) -> Dict[str, Any]:
         """
         使用 DashScope SDK 上传本地文件，获取临时 URL。
 
-        如果 dashscope SDK 不存在或上传失败，返回 None（由上层降级到关键帧）。
+        如果 dashscope SDK 不存在或上传失败，返回空结果（由上层降级到关键帧）。
         """
         if not self._is_dashscope_endpoint(self.base_url):
             if raise_on_failure:
                 raise RuntimeError(
                     f"DashScope Files.upload requires DashScope endpoint, current base_url={self.base_url}"
                 )
-            return None
+            return {"temp_url": "", "interaction": None}
         try:
             import dashscope  # type: ignore
         except Exception as e:
@@ -2687,23 +3155,86 @@ class VLVideoAnalyzer:
             if raise_on_failure:
                 raise RuntimeError(f"dashscope SDK unavailable: {error_detail}") from e
             logger.debug(f"dashscope SDK unavailable, skip temp URL upload: {error_detail}")
-            return None
+            return {"temp_url": "", "interaction": None}
 
         if not self._api_key:
             if raise_on_failure:
                 raise RuntimeError(
                     f"DashScope Files.upload requires api_key, env={self._api_key_env or 'DASHSCOPE_API_KEY'}"
                 )
-            return None
-        upload_video_path = await self._prepare_video_for_dashscope_upload(video_path)
-        video_duration_sec = max(0.0, self._resolve_video_duration_sec(video_path))
+            return {"temp_url": "", "interaction": None}
+        resolved_video_duration_sec = max(0.0, float(video_duration_sec or 0.0))
         if self.dashscope_upload_timeout_by_video_duration:
-            resolved_upload_timeout_sec = max(self.dashscope_upload_timeout_min_sec, video_duration_sec)
+            resolved_upload_timeout_sec = max(self.dashscope_upload_timeout_min_sec, resolved_video_duration_sec)
         else:
             resolved_upload_timeout_sec = max(
                 self.dashscope_upload_timeout_min_sec,
                 float(self.long_video_upload_timeout_sec),
             )
+        runtime_context = current_runtime_llm_context()
+        media_prepare_identity = self._build_vl_media_prepare_runtime_identity(
+            semantic_unit_id=semantic_unit_id,
+            video_path=video_path,
+            wave_id=str((runtime_identity or {}).get("wave_id", "") or ""),
+        )
+        media_prepare_request_payload = self._build_vl_media_prepare_request_payload(
+            video_path=video_path,
+            video_duration_sec=resolved_video_duration_sec,
+        )
+        scope_descriptor = (
+            runtime_context.build_scope_descriptor(
+                provider="dashscope",
+                request_name="vl_media_prepare",
+                request_payload=media_prepare_request_payload,
+                runtime_identity=media_prepare_identity,
+            )
+            if runtime_context is not None
+            else {"scope_ref": ""}
+        )
+        if runtime_context is not None:
+            restored = runtime_context.load_committed_call(
+                provider="dashscope",
+                request_name="vl_media_prepare",
+                request_payload=media_prepare_request_payload,
+                runtime_identity=media_prepare_identity,
+            )
+            if isinstance(restored, dict):
+                restored_metadata = dict(restored.get("response_metadata", {}) or {})
+                restored_temp_url = str(restored_metadata.get("temp_url") or restored.get("response_text", "") or "").strip()
+                soft_expires_at_ms = safe_int(restored_metadata.get("soft_expires_at_ms", 0), 0)
+                if restored_temp_url and (soft_expires_at_ms <= 0 or int(time.time() * 1000) < soft_expires_at_ms):
+                    return {
+                        "temp_url": restored_temp_url,
+                        "interaction": {
+                            "stage": "vl_media_prepare",
+                            "attempt": int(restored.get("attempt", 0) or 0),
+                            "success": True,
+                            "request": {
+                                "video_path": str(video_path or ""),
+                                "analysis_mode": str(analysis_mode or "default"),
+                                "video_duration_sec": float(resolved_video_duration_sec),
+                                "message_transport": "temp_url",
+                            },
+                            "response": {
+                                "temp_urls": [restored_temp_url],
+                                "temp_url_count": 1,
+                                "cache_hit": True,
+                                "runtime_restored": True,
+                                "restored_attempt": int(restored.get("attempt", 0) or 0),
+                                "soft_expires_at_ms": soft_expires_at_ms,
+                            },
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }
+                scope_ref = str(scope_descriptor.get("scope_ref", "") or "").strip()
+                if scope_ref:
+                    # temp_url 失效只影响上传阶段本身，已提交的 VL 结果仍可独立恢复。
+                    runtime_context.store.mark_scope_dirty(
+                        scope_ref,
+                        reason="temp_url_soft_ttl_expired",
+                        include_descendants=False,
+                    )
+        upload_video_path = await self._prepare_video_for_dashscope_upload(video_path)
 
         def _normalize_dashscope_media_url(raw_url: Any) -> str:
             url = str(raw_url or "").strip()
@@ -2746,7 +3277,7 @@ class VLVideoAnalyzer:
                         return meta_url, f"files.get({file_id})"
             return None, ""
 
-        def _upload() -> Optional[str]:
+        def _upload() -> Dict[str, Any]:
             dashscope.api_key = self._api_key
             # Files.upload 需要 file_path 字符串参数
             resp = dashscope.Files.upload(
@@ -2777,7 +3308,14 @@ class VLVideoAnalyzer:
                         float(resolved_upload_timeout_sec),
                         int(self.dashscope_upload_chunk_size_bytes),
                     )
-                    return temp_url
+                    return {
+                        "temp_url": temp_url,
+                        "request_id": str(request_id or ""),
+                        "url_source": str(url_source or ""),
+                        "upload_video_path": str(upload_video_path or ""),
+                        "source_video_path": str(video_path or ""),
+                        "file_size": int(file_size or 0),
+                    }
                 raise RuntimeError(
                     "DashScope Files.upload succeeded but no temporary URL was found in output: "
                     f"{self._safe_json_preview(output)}"
@@ -2802,7 +3340,14 @@ class VLVideoAnalyzer:
                         float(resolved_upload_timeout_sec),
                         int(self.dashscope_upload_chunk_size_bytes),
                     )
-                    return temp_url
+                    return {
+                        "temp_url": temp_url,
+                        "request_id": str(resp.get("request_id", "") or ""),
+                        "url_source": str(url_source or ""),
+                        "upload_video_path": str(upload_video_path or ""),
+                        "source_video_path": str(video_path or ""),
+                        "file_size": int(file_size or 0),
+                    }
                 raise RuntimeError(
                     "DashScope Files.upload(dict) succeeded but no temporary URL was found in output: "
                     f"{self._safe_json_preview(dict_output)}"
@@ -2813,10 +3358,77 @@ class VLVideoAnalyzer:
         max_attempts = max(1, int(self.dashscope_upload_retry_max_attempts))
         for attempt in range(1, max_attempts + 1):
             try:
-                return await asyncio.to_thread(_upload)
+                upload_result = await asyncio.to_thread(_upload)
+                temp_url = str(upload_result.get("temp_url", "") or "").strip()
+                committed_at_ms = int(time.time() * 1000)
+                soft_expires_at_ms = committed_at_ms + int(self.temp_url_reuse_ttl_sec) * 1000
+                if temp_url and runtime_context is not None:
+                    runtime_context.persist_success(
+                        provider="dashscope",
+                        request_name="vl_media_prepare",
+                        request_payload=media_prepare_request_payload,
+                        response_text=temp_url,
+                        response_metadata={
+                            "temp_url": temp_url,
+                            "request_id": str(upload_result.get("request_id", "") or ""),
+                            "url_source": str(upload_result.get("url_source", "") or ""),
+                            "upload_video_path": str(upload_result.get("upload_video_path", "") or ""),
+                            "upload_video_signature": self._build_runtime_video_signature(
+                                str(upload_result.get("upload_video_path", "") or "")
+                            ),
+                            "source_video_path": str(video_path or ""),
+                            "source_video_signature": self._build_runtime_video_signature(video_path),
+                            "resolved_upload_timeout_sec": float(resolved_upload_timeout_sec),
+                            "temp_url_reuse_ttl_sec": int(self.temp_url_reuse_ttl_sec),
+                            "committed_at_ms": committed_at_ms,
+                            "soft_expires_at_ms": soft_expires_at_ms,
+                            "file_size": int(upload_result.get("file_size", 0) or 0),
+                        },
+                        runtime_identity=media_prepare_identity,
+                        metadata={
+                            "stage_step": "vl_media_prepare",
+                            "analysis_mode": str(analysis_mode or "default"),
+                        },
+                    )
+                return {
+                    "temp_url": temp_url,
+                    "interaction": {
+                        "stage": "vl_media_prepare",
+                        "attempt": attempt,
+                        "success": True,
+                        "request": {
+                            "video_path": str(video_path or ""),
+                            "analysis_mode": str(analysis_mode or "default"),
+                            "video_duration_sec": float(resolved_video_duration_sec),
+                            "message_transport": "temp_url",
+                        },
+                        "response": {
+                            "temp_urls": [temp_url],
+                            "temp_url_count": 1,
+                            "cache_hit": False,
+                            "runtime_restored": False,
+                            "request_id": str(upload_result.get("request_id", "") or ""),
+                            "url_source": str(upload_result.get("url_source", "") or ""),
+                            "soft_expires_at_ms": soft_expires_at_ms,
+                        },
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    },
+                }
             except Exception as e:
                 error_detail = self._format_exception_detail(e)
                 if attempt >= max_attempts:
+                    if runtime_context is not None and raise_on_failure:
+                        runtime_context.persist_failure(
+                            provider="dashscope",
+                            request_name="vl_media_prepare",
+                            request_payload=media_prepare_request_payload,
+                            error=e,
+                            runtime_identity=media_prepare_identity,
+                            metadata={
+                                "stage_step": "vl_media_prepare",
+                                "analysis_mode": str(analysis_mode or "default"),
+                            },
+                        )
                     if raise_on_failure:
                         raise RuntimeError(
                             f"DashScope Files.upload failed after {max_attempts} attempts: {error_detail}"
@@ -2826,7 +3438,7 @@ class VLVideoAnalyzer:
                         max_attempts,
                         error_detail,
                     )
-                    return None
+                    return {"temp_url": "", "interaction": None}
 
                 backoff_sec = self._compute_retry_backoff_sec(
                     attempt_index=attempt - 1,
@@ -2845,7 +3457,7 @@ class VLVideoAnalyzer:
                 )
                 if backoff_sec > 0:
                     await asyncio.sleep(backoff_sec)
-        return None
+        return {"temp_url": "", "interaction": None}
     
     def _encode_video_base64(self, video_path: str) -> Optional[str]:
         """将视频文件编码为 base64（仅适用于小文件）"""

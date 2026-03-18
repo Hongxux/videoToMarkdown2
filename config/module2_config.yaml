@@ -322,7 +322,7 @@ vl_material_generation:
     # DashScope 无需 appid；该字段仅为兼容保留
     appid: ""
     appid_env: ""
-    max_retries: 4
+    max_retries: 6
     retry_initial_backoff_sec: 2.0
     retry_multiplier: 2.0
     retry_max_backoff_sec: 16.0

@@ -326,6 +326,7 @@ public class VideoProcessingController {
         response.put("status", task.status.name());
         response.put("progress", task.progress);
         response.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        response.put("userMessage", task.userMessage != null ? task.userMessage : "");
         response.put("resultPath", task.resultPath != null ? task.resultPath : "");
         response.put("errorMessage", task.errorMessage != null ? task.errorMessage : "");
         response.put("createdAt", task.createdAt.toString());

@@ -19,14 +19,19 @@ class SubtitleRepository:
     """统一封装 Step2/Step6 字幕相关读取、定位与映射能力。"""
 
     DEFAULT_STEP2_CANDIDATES = [
+        "intermediates/stages/stage1/outputs/step2_correction.json",
         "step2_correction_output.json",
         "step2_output.json",
     ]
     DEFAULT_STEP6_CANDIDATES = [
+        "intermediates/stages/stage1/outputs/step5_6_dedup_merge.json",
         "step6_merge_cross_output.json",
         "step6_output.json",
     ]
-    DEFAULT_SENTENCE_TS_CANDIDATES = ["sentence_timestamps.json"]
+    DEFAULT_SENTENCE_TS_CANDIDATES = [
+        "intermediates/stages/stage1/outputs/sentence_timestamps.json",
+        "sentence_timestamps.json",
+    ]
 
     def __init__(
         self,
@@ -110,6 +115,15 @@ class SubtitleRepository:
             candidate_name = str(name or "").strip()
             if not candidate_name:
                 continue
+            raw_candidate = Path(candidate_name)
+            if raw_candidate.is_absolute():
+                candidates.append(raw_candidate)
+                continue
+            if raw_candidate.parts:
+                candidates.append(base_dir / raw_candidate)
+                if len(raw_candidate.parts) == 1:
+                    candidates.append(intermediates_dir / candidate_name)
+                continue
             candidates.append(intermediates_dir / candidate_name)
             candidates.append(base_dir / candidate_name)
 
@@ -182,6 +196,10 @@ class SubtitleRepository:
                 }
             )
         self._paragraphs = normalized
+
+    def set_raw_sentence_timestamps(self, sentence_timestamps: Optional[Dict[str, Dict[str, Any]]]) -> None:
+        """直接注入内存句级时间轴，供恢复投影后的下游阶段复用统一检索逻辑。"""
+        self._sentence_timestamps = self._normalize_sentence_timestamps(sentence_timestamps or {})
 
     def load_step2_subtitles(self, *, strict: bool = False) -> List[Any]:
         """方法说明：SubtitleRepository.load_step2_subtitles 核心方法。

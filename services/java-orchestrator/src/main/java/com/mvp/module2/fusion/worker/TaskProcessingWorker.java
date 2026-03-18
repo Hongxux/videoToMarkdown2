@@ -1,6 +1,7 @@
 package com.mvp.module2.fusion.worker;
 
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
+import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskTransitionResult;
@@ -9,6 +10,7 @@ import com.mvp.module2.fusion.service.PersonaAwareReadingService;
 import com.mvp.module2.fusion.service.PersonaInsightCardService;
 import com.mvp.module2.fusion.service.TaskDeduplicationService;
 import com.mvp.module2.fusion.service.TaskProbeService;
+import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
 import com.mvp.module2.fusion.service.VideoProcessingOrchestrator;
 import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import com.mvp.module2.fusion.worker.watchdog.TaskWatchdog;
@@ -70,6 +72,9 @@ public class TaskProcessingWorker {
 
     @Autowired
     private TaskProbeService taskProbeService;
+
+    @Autowired(required = false)
+    private TaskRuntimeRecoveryService taskRuntimeRecoveryService;
 
     @Autowired
     private TaskWatchdogFactory taskWatchdogFactory;
@@ -653,6 +658,24 @@ public class TaskProcessingWorker {
                     bookOptions
             );
         }
+        TaskRuntimeRecoveryService.ResumeDecision resumeDecision = resolveVideoResumeDecision(task, outputDir);
+        if (resumeDecision == null || firstNonBlank(resumeDecision.resumeFromStage(), "download").equals("download")) {
+            return executeVideoPipelineFromDownload(task, outputDir);
+        }
+        VideoProcessingOrchestrator.IOPhaseResult recoveredIoResult =
+                buildRecoveredIoPhaseResult(task, outputDir, resumeDecision);
+        syncRecoveredOutputDir(task, recoveredIoResult.outputDir);
+        syncRecoveredTaskTitle(task, firstNonBlank(
+                resumeDecision.findText("video_title"),
+                recoveredIoResult.metricsVideoTitle
+        ));
+        return executeRecoveredVideoPipeline(task, recoveredIoResult, resumeDecision);
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult executeVideoPipelineFromDownload(
+            TaskEntry task,
+            String outputDir
+    ) throws Exception {
         VideoProcessingOrchestrator.IOPhaseResult ioResult =
                 executeVideoDownloadPhaseWithPermit(task.taskId, task.videoUrl, outputDir);
         syncRecoveredOutputDirAfterDownload(task, ioResult);
@@ -660,6 +683,128 @@ public class TaskProcessingWorker {
         ioResult = executeVideoTranscribePhaseWithPermit(task.taskId, ioResult);
         ioResult = orchestrator.processVideoStage1Phase(task.taskId, ioResult);
         return executeVideoPhase2WithPermit(task.taskId, ioResult);
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult executeRecoveredVideoPipeline(
+            TaskEntry task,
+            VideoProcessingOrchestrator.IOPhaseResult ioResult,
+            TaskRuntimeRecoveryService.ResumeDecision resumeDecision
+    ) throws Exception {
+        String startStage = firstNonBlank(resumeDecision != null ? resumeDecision.resumeFromStage() : "", "download");
+        return switch (startStage) {
+            case "transcribe" -> {
+                VideoProcessingOrchestrator.IOPhaseResult transcribed =
+                        executeVideoTranscribePhaseWithPermit(task.taskId, ioResult);
+                VideoProcessingOrchestrator.IOPhaseResult staged =
+                        orchestrator.processVideoStage1Phase(task.taskId, transcribed);
+                yield executeVideoPhase2WithPermit(task.taskId, staged);
+            }
+            case "stage1" -> {
+                VideoProcessingOrchestrator.IOPhaseResult staged =
+                        orchestrator.processVideoStage1Phase(task.taskId, ioResult);
+                yield executeVideoPhase2WithPermit(task.taskId, staged);
+            }
+            case "phase2a" -> executeVideoPhase2WithPermit(task.taskId, ioResult);
+            case "asset_extract_java" -> executeVideoAssetExtractStageWithPermit(task.taskId, ioResult);
+            case "phase2b" -> executeVideoPhase2BStageWithPermit(task.taskId, ioResult);
+            default -> executeVideoPipelineFromDownload(task, firstNonBlank(ioResult.outputDir, task.outputDir));
+        };
+    }
+
+    private TaskRuntimeRecoveryService.ResumeDecision resolveVideoResumeDecision(TaskEntry task, String outputDir) {
+        if (task == null || taskRuntimeRecoveryService == null) {
+            return null;
+        }
+        try {
+            return taskRuntimeRecoveryService.resolveResumeDecision(
+                    task.videoUrl,
+                    firstNonBlank(task.outputDir, outputDir),
+                    task.resultPath
+            ).orElse(null);
+        } catch (Exception error) {
+            logger.warn(
+                    "Resolve runtime resume decision failed: taskId={} outputDir={} err={}",
+                    task.taskId,
+                    outputDir,
+                    error.getMessage()
+            );
+            return null;
+        }
+    }
+
+    private VideoProcessingOrchestrator.IOPhaseResult buildRecoveredIoPhaseResult(
+            TaskEntry task,
+            String outputDir,
+            TaskRuntimeRecoveryService.ResumeDecision resumeDecision
+    ) {
+        VideoProcessingOrchestrator.IOPhaseResult ioResult = new VideoProcessingOrchestrator.IOPhaseResult();
+        ioResult.taskId = task.taskId;
+        ioResult.videoUrl = task.videoUrl;
+        ioResult.outputDir = firstNonBlank(
+                resumeDecision.findText("output_dir"),
+                task.outputDir,
+                outputDir
+        );
+        ioResult.videoPath = firstNonBlank(
+                resumeDecision.findText("video_path"),
+                task.videoUrl
+        );
+        ioResult.videoDuration = Math.max(1.0d, resumeDecision.findDouble("duration_sec", "video_duration"));
+        ioResult.downloadedFromUrl = isHttpUrl(task.videoUrl);
+        ioResult.cleanupSourcePath = ioResult.downloadedFromUrl ? ioResult.videoPath : "";
+        ioResult.pipelineStartTimeMs = System.currentTimeMillis();
+        ioResult.metricsOutputDir = ioResult.outputDir;
+        ioResult.metricsVideoPath = ioResult.videoPath;
+        ioResult.metricsInputVideoUrl = task.videoUrl;
+        ioResult.metricsVideoTitle = resumeDecision.findText("video_title");
+        ioResult.recoveryStartStage = resumeDecision.resumeFromStage();
+        ioResult.subtitlePath = resumeDecision.findText("subtitle_path");
+        ioResult.phase2aSemanticUnitsPath = resumeDecision.findText(
+                "semantic_units_path",
+                "phase2a_semantic_units_path"
+        );
+
+        PythonGrpcClient.DownloadResult downloadResult = new PythonGrpcClient.DownloadResult();
+        downloadResult.success = true;
+        downloadResult.videoPath = ioResult.videoPath;
+        downloadResult.durationSec = ioResult.videoDuration;
+        downloadResult.videoTitle = ioResult.metricsVideoTitle;
+        downloadResult.resolvedUrl = firstNonBlank(resumeDecision.findText("resolved_url"), task.videoUrl);
+        downloadResult.sourcePlatform = resumeDecision.findText("source_platform");
+        downloadResult.canonicalId = resumeDecision.findText("canonical_id");
+        downloadResult.contentType = resumeDecision.findText("content_type");
+        ioResult.downloadResult = downloadResult;
+
+        String step2JsonPath = resumeDecision.findText("step2_json_path");
+        String step6JsonPath = resumeDecision.findText("step6_json_path");
+        String sentenceTimestampsPath = resumeDecision.findText("sentence_timestamps_path");
+        if (!step2JsonPath.isBlank() || !step6JsonPath.isBlank() || !sentenceTimestampsPath.isBlank()) {
+            PythonGrpcClient.Stage1Result stage1Result = new PythonGrpcClient.Stage1Result();
+            stage1Result.success = true;
+            stage1Result.step2JsonPath = step2JsonPath;
+            stage1Result.step6JsonPath = step6JsonPath;
+            stage1Result.sentenceTimestampsPath = sentenceTimestampsPath;
+            ioResult.stage1Result = stage1Result;
+        }
+        return ioResult;
+    }
+
+    private void syncRecoveredOutputDir(TaskEntry task, String resolvedOutputDir) {
+        if (task == null || taskQueueManager == null) {
+            return;
+        }
+        String normalizedOutputDir = firstNonBlank(resolvedOutputDir, "");
+        if (normalizedOutputDir.isBlank()) {
+            return;
+        }
+        TaskEntry currentTask = taskQueueManager.getTask(task.taskId);
+        if (currentTask == null) {
+            return;
+        }
+        if (normalizedOutputDir.equals(firstNonBlank(currentTask.outputDir, ""))) {
+            return;
+        }
+        taskQueueManager.updateTaskOutputDir(task.taskId, normalizedOutputDir);
     }
 
     private void syncRecoveredTitleAfterDownload(
@@ -761,19 +906,58 @@ public class TaskProcessingWorker {
             String taskId,
             VideoProcessingOrchestrator.IOPhaseResult ioResult
     ) throws Exception {
+        return executeVideoPhase2StageWithPermit(
+                taskId,
+                "phase2",
+                () -> orchestrator.processVideoLLMPhase(taskId, ioResult)
+        );
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult executeVideoAssetExtractStageWithPermit(
+            String taskId,
+            VideoProcessingOrchestrator.IOPhaseResult ioResult
+    ) throws Exception {
+        return executeVideoPhase2StageWithPermit(
+                taskId,
+                "asset_extract_java",
+                () -> orchestrator.processVideoFromAssetExtractStage(taskId, ioResult)
+        );
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult executeVideoPhase2BStageWithPermit(
+            String taskId,
+            VideoProcessingOrchestrator.IOPhaseResult ioResult
+    ) throws Exception {
+        return executeVideoPhase2StageWithPermit(
+                taskId,
+                "phase2b",
+                () -> orchestrator.processVideoFromPhase2BStage(taskId, ioResult)
+        );
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult executeVideoPhase2StageWithPermit(
+            String taskId,
+            String phaseName,
+            Phase2Execution phase2Execution
+    ) throws Exception {
         Semaphore semaphore = phase2Semaphore;
         boolean permitAcquired = false;
         if (semaphore != null) {
-            acquirePhasePermit(taskId, semaphore, "phase2");
+            acquirePhasePermit(taskId, semaphore, phaseName);
             permitAcquired = true;
         }
         try {
-            return orchestrator.processVideoLLMPhase(taskId, ioResult);
+            return phase2Execution.execute();
         } finally {
             if (permitAcquired) {
                 semaphore.release();
             }
         }
+    }
+
+    @FunctionalInterface
+    private interface Phase2Execution {
+        VideoProcessingOrchestrator.ProcessingResult execute() throws Exception;
     }
 
     private void acquirePhasePermit(String taskId, Semaphore semaphore, String phaseName) throws InterruptedException {
@@ -1095,11 +1279,16 @@ public class TaskProcessingWorker {
         return lower.startsWith("http://") || lower.startsWith("https://");
     }
 
-    private String firstNonBlank(String value, String fallback) {
-        if (value != null && !value.isBlank()) {
-            return value;
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return "";
         }
-        return fallback;
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private String extractThrowableMessage(Throwable throwable) {

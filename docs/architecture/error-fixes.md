@@ -1,5 +1,645 @@
 ﻿# 错误修正记录
 
+## 2026-03-18 `UNKNOWN` 存储任务被前端误显示为“排队中”，同时任务列表丢失原始失败根因
+- Date:
+  - 2026-03-18
+- Symptom:
+  - 用户在任务列表里观察到“2 个失败 + 2 个排队中”，但后端真实队列为空，排队项也不会继续推进。
+  - 两个失败任务在列表中只能看到泛化提示，看不到真正失败根因。
+  - 实际排查发现：
+    - `VT_1773759485618_9`
+    - `VT_1773759504068_10`
+    两个失败任务的原始错误都已写入各自 `intermediates/task_metrics_latest.json`。
+  - 同时：
+    - `storage:e165e381693804effaffbd3d82de9c5d`
+    - `storage:e7c0c74818fe66b2bf5b454902239d89`
+    这两个条目并不在运行时队列，而是“目录存在但 markdown 缺失”的存储残留项。
+- Root cause:
+  - `StorageTaskCacheService` 在“没有 success flag 且没有 markdown”时会把历史目录标记为 `UNKNOWN`。
+  - 前端 `index.html` 的 `getTaskStatusVisual(...)` 对所有未显式识别的状态一律回退为 `queued`，导致 `UNKNOWN` 被错误画成“排队中”。
+  - `MobileMarkdownController.toListItem(...)` 一直没有把 `errorMessage` 回传给 `/api/mobile/tasks`，即使后端内存态或存储态已经持有错误文本。
+  - `TaskQueueManager.failTask(...)` 原先把 `UserFacingErrorMapper.toUserMessage(rawError)` 的结果同时写入 `statusMessage` 和 `errorMessage`，导致任务状态机持久化时丢失原始失败根因。
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 为 `UNKNOWN` 增加独立视觉状态，不再回退为 `queued`。
+    - `UNKNOWN` 的标签改为“异常残留”，文案改为“异常残留/未完成产物”。
+    - 当失败态文案只是泛化提示时，前端优先展示 `errorMessage` 中的原始失败根因。
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
+    - 为 `status-unknown` / `badge-unknown` 增加中性样式，避免继续混入排队态视觉。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+    - 从 `intermediates/task_metrics_latest.json` 读取 `error_message` 并挂到缓存任务视图。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `/api/mobile/tasks`
+    - `/api/mobile/tasks/changes`
+    - `/api/mobile/tasks/{taskId}/status`
+    统一补回 `userMessage` 与 `errorMessage`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+    - 运行时状态机新增 `userMessage`。
+    - `statusMessage/userMessage` 保留用户可读提示。
+    - `errorMessage` 改为保留原始失败根因，不再被用户提示覆盖。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/DatabaseInitializer.java`
+    - 持久化层新增 `user_message` 列，保持 `user_message` 与 `error_message` 分离存储。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 前端状态投影必须显式处理 `UNKNOWN/BLOCKED/FAILED/CANCELLED`，禁止用“默认分支 = queued”承接未知状态。
+  - 任务状态真源必须分离“给用户看的提示”和“给工程排障用的根因”，禁止再用单字段覆盖两种语义。
+  - 存储态扫描结果只要不是运行时队列真源，就不能借用“排队中”这类运行态语义。
+## 2026-03-17 `build_runtime_payload_fingerprint` 收紧为单参数后，下载阶段与多处恢复链调用仍传 `extra=`，导致 Python gRPC 直接抛 `TypeError`
+- Date:
+  - 2026-03-17
+- Symptom:
+  - `DownloadVideo` 进入下载阶段即报错：
+    - `build_runtime_payload_fingerprint() got an unexpected keyword argument 'extra'`
+  - Java 侧表现为：
+    - `VideoProcessingOrchestrator.processVideoDownloadPhase(...)` 抛出 `RuntimeException("Download failed: Unexpected <class 'TypeError'> ...")`
+  - 这不是下载器或网络问题，而是 Python 服务在构建 runtime fingerprint 时就提前崩溃。
+- Root cause:
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - `build_runtime_payload_fingerprint(...)` 被收紧成只接受单个 `payload` 参数。
+  - 但现有主链里仍有一批旧调用点按兼容约定传入 `extra=`，包括：
+    - `download`
+    - `transcript`
+    - `stage1`
+    - `phase2a`
+    - `phase2b`
+  - 结果是 helper 契约和调用链脱节，最先在下载阶段暴露成硬错误。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - 恢复 `build_runtime_payload_fingerprint(payload, *, extra=None)` 的兼容签名。
+    - 当 `extra` 为空时，行为保持不变。
+    - 当 `extra` 存在时，按稳定结构：
+      - `{"payload": payload, "extra": extra}`
+      一起参与哈希，既兼容旧调用，也避免不同阶段仅靠主 payload 发生误碰撞。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_store.py`
+  - `pytest tests/test_runtime_recovery_store.py -q --basetemp var/tmp_pytest_runtime_payload_fingerprint_compat`
+    - 结果：`32 passed`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后基础 helper 的签名若要收紧，必须先全仓扫描调用点并补兼容层，不能直接改公共契约。
+  - 这类被多阶段共享的 runtime helper，应优先“兼容演进”，避免因为一个局部重构把主链下载/恢复入口一起打断。
+
+## 2026-03-17 Phase2A `request_scope_ids_json` 依赖 prompt 正则提取，导致恢复提示可能缺失
+- Date:
+  - 2026-03-17
+- Symptom:
+  - 用户观察到 task-local SQLite 中部分 `phase2a` 的 `llm_records.request_scope_ids_json` 看起来像“被截断”或为空。
+  - 对 `phase2a` 主恢复链本身影响有限，因为恢复主键仍然是 `stage + chunk_id + llm_call_id + input_fingerprint`。
+  - 但这个字段作为恢复提示不稳定，会降低后续投影/诊断链路的可信度。
+- Root cause:
+  - `runtime_recovery_sqlite.py` 原先只从 `request_payload.prompt` 用正则提取 `request_scope_ids`。
+  - `phase2a` 的 VL/视觉调用很多不是 `"[SCOPE_ID] ..."` 这种 prompt 结构，导致提取结果可能为空。
+  - SQLite 本身没有主动截断；问题本质是“提取不全”，不是“存储裁剪”。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - `request_scope_ids` 改成“显式结构化字段优先，prompt 正则兜底”。
+  - `services/python_grpc/src/common/utils/runtime_llm_context.py`
+    - `persist_success/persist_failure` 在写库前会优先把 `metadata/runtime_identity` 里的显式 `request_scope_ids` 注入 request payload。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - `phase2a` 的 `runtime_identity` 显式携带当前 `unit_id -> request_scope_ids`。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 回写原始交互到恢复库时，也显式注入 `unit_id -> request_scope_ids`。
+  - `tests/test_runtime_llm_context.py`
+  - `tests/test_vl_runtime_recovery.py`
+    - 增加显式 `request_scope_ids` 持久化与 `phase2a` 集成回归。
+- Verification:
+  - `pytest tests/test_runtime_llm_context.py -x -vv --basetemp var/tmp_pytest_request_scope_ids_phase2a_one_d`
+  - 手工脚本复现 `VLVideoAnalyzer.analyze_clip(...)`，确认 `llm_records.request_scope_ids_json == ["SU777"]`
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_sqlite.py services/python_grpc/src/common/utils/runtime_llm_context.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+- Prevention:
+  - 以后恢复提示字段必须优先来自结构化输入，不能把 prompt 文本解析当唯一真相。
+  - 以后凡是 `phase2a/phase2b` 这类按单元运行的链路，若恢复需要定位单元范围，必须显式写入 `unit_id/request_scope_ids`，禁止依赖自然语言 prompt 约定。
+
+## 2026-03-17 Phase2A `semantic_units` 已切到 SQLite projection 后，旧 `*.meta.json` sidecar 仍对不存在的 JSON 路径强写导致主链崩溃
+- Date:
+  - 2026-03-17
+- Symptom:
+  - `AnalyzeSemanticUnits` 在正常主链上报错：
+    - `No such file or directory: ...\\intermediates\\stages\\phase2a\\outputs\\semantic_units.json.meta.json`
+  - 触发点不是 SQLite 提交失败，而是 Phase2A 已经不再物理落盘 `semantic_units.json` 时，代码仍尝试给旧候选路径写 `*.meta.json` 资源侧车。
+  - 结果就是“主资源不存在，但 sidecar 仍强写”，直接把 Phase2A 热路径打断。
+- Root cause:
+  - `grpc_service_impl.py` 中 `_write_resource_meta(...)` 的语义仍是“无条件给传入路径生成 sidecar”，没有区分“真实物理资源”与“任务内 SQLite projection / 虚拟路径”。
+  - Phase2A 在收敛为 task-local SQLite projection 后，`_phase2a_semantic_units_candidates(output_dir)` 里的 canonical/legacy JSON 路径很多情况下已经不再创建。
+  - 调用方仍遍历这些候选路径写 sidecar，于是对不存在的父目录执行 `open(...meta.json, 'w')`，触发 `Errno 2`。
+- Fix:
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `_write_resource_meta(...)` 改成只对“真实存在的物理资源”写 sidecar。
+    - 若 `resource_path` 为空或主资源不存在，直接返回，不再单独创建 `*.meta.json`。
+    - 对仍需保留 sidecar 的真实资源，先确保 `meta_path` 父目录存在，再写入元数据。
+  - `services/python_grpc/src/server/tests/test_phase2a_reuse_candidates.py`
+    - 补充回归测试，覆盖“缺失的 Phase2A 旧路径不会再生成 sidecar，也不会抛异常”。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/common/utils/runtime_recovery_sqlite.py services/python_grpc/src/transcript_pipeline/stage1_projection_repository.py`
+  - `pytest tests/test_runtime_recovery_store.py tests/test_runtime_recovery_resume_index.py tests/test_runtime_llm_context.py services/python_grpc/src/transcript_pipeline/tests/test_stage1_projection_repository.py -q --basetemp var/tmp_pytest_runtime_db_local_after_sql_fix`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是阶段产物已经切到“内存态主链 + SQLite 恢复投影”的模块，禁止再把 `*.meta.json` 当成必写 sidecar。
+  - 资源元数据写口必须先验证“主资源是否真实存在”；不能允许 sidecar 独立于主资源存在。
+  - 代码评审时必须检查“是否还在给虚拟路径、兼容候选路径、projection 占位路径写文件”，避免旧文件协议反向污染新恢复边界。
+
+## 2026-03-17 Stage1 仅在整步完成时发送 `hard`，导致长 step 期间 watchdog 心跳粒度过粗
+- Date:
+  - 2026-03-17
+- Symptom:
+  - `stage1` 的 `step1-6` 原先只有在 `step_completed` 时才发送一次 `hard` heartbeat。
+  - 当 `step2_correction`、`step4_clean_local`、`step5_6_dedup_merge` 这类 step 内部包含多次 LLM 调用时，业务实际上已经持续推进，但 watchdog 侧只能看到“还停留在当前 step，没有新的 hard”。
+  - 这会放大长 step 场景下的 idle 观测间隔，让 heartbeat 节奏落后于真实 LLM 完成节奏。
+- Root cause:
+  - Stage1 的 heartbeat 桥接只接在 `graph.create_tracked_node(...)->progress_callback(step_completed)` 这一层，属于 step 粒度事件。
+  - 虽然 Stage1 的最小恢复事实已经下沉到 `runtime_llm_context / llm_call commit`，但 watchdog 没有复用这层细粒度事件。
+  - 结果就是“恢复语义已经是 llm_call 粒度，但 watchdog 仍停留在 step 粒度”，两条观察口径不一致。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_llm_context.py`
+    - 新增可选 `llm_event_emitter`，允许 runtime 层在单次 LLM 调用成功提交或恢复命中后抛出结构化事件。
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+    - `DeepSeekClient.complete_json(...)` 在 Stage1 runtime 上下文里，每完成一次调用就发送一次 `llm_call_completed` 事件。
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - 新增 Stage1 LLM 事件到 progress 事件的翻译逻辑，把单次 LLM 完成映射为现有 watchdog 可消费的 `hard` heartbeat。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py`
+    - 分别补齐“LLM 完成事件发出”和“Stage1 进度事件映射”的回归测试。
+- Verification:
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py -q --basetemp var/tmp_pytest_stage1_llm_hard_heartbeat`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是 watchdog 需要观察“阶段内真实推进”的链路，必须优先复用已经存在的最小 durable/progress 事实，禁止只在更粗的 step 包装层发 heartbeat。
+  - 以后凡是 Stage1/Phase2A 这类 step 内含多次外部调用的阶段，必须检查“业务最小推进单元”和“watchdog 心跳粒度”是否一致。
+
+## 2026-03-17 Stage1 残留 `checkpoints.db` 形成恢复真源分叉风险
+- Date:
+  - 2026-03-17
+- Symptom:
+  - Stage1 主链恢复实际上已经依赖 `RuntimeRecoveryStore -> resume_plan -> runtime_state.db`，但代码里仍残留一套 `output_dir/checkpoints.db` 的私有 step checkpoint 机制。
+  - 这会让维护者和后续改动误判恢复真源，出现“同一个 Stage1 到底该信私有 checkpoint 还是统一 runtime SQLite”的认知分裂。
+  - 一旦后续有人重新打开 `enable_sqlite` 或继续给 `resume=True` 叠加旧逻辑，就会产生双写双读、恢复边界不一致和排障对账困难。
+- Root cause:
+  - Stage1 恢复架构已经演进到了 `resume_plan + stage/scope/llm_commit`，但 `transcript_pipeline.graph` 和 `streaming_executor` 里的 `SQLiteCheckpointer` 没有随架构收口一起删除。
+  - 旧分支最初承担的是 step 级 checkpoint snapshot，但现在最小恢复单元已经下沉到 task-local SQLite 的结构化事实；这套专用库不再提供独立业务价值。
+  - API 形态上仍保留了 `resume=True` 这种不带恢复载荷的旧入口，进一步放大了“好像还存在第二恢复协议”的错觉。
+- Fix:
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - 删除 `enable_sqlite`、`SQLiteCheckpointer` 以及 `resume -> load_checkpoint(checkpoints.db)` 旧分支。
+    - 恢复入口显式收敛为 `resume_plan / resume_state / resume_from_step`，并在仅收到遗留 `resume=True` 时记录兼容日志。
+  - `services/python_grpc/src/transcript_pipeline/streaming_executor.py`
+    - 删除 streaming executor 对 Stage1 私有 step checkpoint 的写入口。
+  - `services/python_grpc/src/transcript_pipeline/checkpoint.py`
+    - 收口为轻量恢复辅助模块，仅保留 `STEP_INDEX_MAP / generate_thread_id`。
+  - `docs/architecture/gRPC.md`
+    - 明确记录 Stage1 已不再维护专用 `checkpoints.db`，恢复真源统一为 runtime SQLite + resume_plan。
+- Verification:
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py -q --basetemp var/tmp_pytest_stage1_resume_no_checkpoint_db`
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/checkpoint.py services/python_grpc/src/transcript_pipeline/graph.py services/python_grpc/src/transcript_pipeline/streaming_executor.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是阶段恢复语义已经并入 `RuntimeRecoveryStore` / `resume_plan` 的模块，必须同步删除旧的专用 checkpoint 持久化，禁止长期并存。
+  - 以后新增恢复入口时，必须显式携带恢复描述符或最小恢复状态，不能只保留 `resume=True` 这类没有边界信息的布尔开关。
+  - 代码评审时必须检查“是否又引入第二真源”，尤其是本地 JSON/SQLite sidecar 是否在和 `runtime_state.db` 重复表达同一恢复事实。
+
+## 2026-03-18 WebSocket 重连时终态事件回放边界提前前移，导致 `taskTerminalEvent` 仍可能丢失
+- Date:
+  - 2026-03-18
+- Symptom:
+  - 浏览器主任务状态流即使已经支持断线重连，终态消息 `taskTerminalEvent` 在某些重连窗口里仍然会丢失。
+  - 典型现象是：前端看起来已经处理过终态事件，但在连接断开、页面刷新或重连后，服务器不再回放该终态消息，最终导致任务终态提示与本地任务状态不一致。
+- Root cause:
+  - 前端原先在 `ack` 真正被服务器确认之前，就先把 `messageId/eventId` 写入本地 `lastAckedTerminalEventId` 游标。
+  - 后端 `replayPendingEvents(...)` 又会在重连时直接用这个 query 参数调用 `acknowledgeThrough(...)`，把服务器端待回放终态事件提前删除。
+  - 结果是客户端本地游标和服务器确认状态发生分叉：一旦连接在“本地先写游标、服务器尚未持久化 ack”之间断开，终态消息就会被错误跳过。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskTerminalEventService.java`
+    - `replayPendingEvents(...)` 不再根据重连 query 参数执行服务端 ack 删除，重连游标只作为回放下界。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+    - `handleAck(...)` 在服务器成功持久化 ack 后，显式回发 `ackConfirmed` 消息给客户端。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 终态事件改为两阶段 ack：
+      - 收到终态事件后只记录 `pendingAckMessageId` 并发送 `ack`
+      - 只有在收到 `ackConfirmed` 后才推进本地 `lastAckedTerminalEventId`
+    - 连接重建成功后会自动重发未确认 ack，避免“已处理但未确认”的窗口长期悬空。
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 受当前工作树中无关 Java 编译错误影响，尚未完成全量 Maven 编译验证。
+- Prevention:
+  - 以后任何 replay 游标都必须区分“客户端已处理”与“服务器已确认”两种语义，禁止共用一个游标字段。
+  - 重连 query 参数只能作为只读回放边界，不能在服务端被直接解释成 ack 删除操作。
+
+## 2026-03-18 WebSocket 重连后终态已回放，但任务列表仍可能被旧快照回退为过时状态
+- Date:
+  - 2026-03-18
+- Symptom:
+  - 浏览器在 WebSocket 重连后，即使任务已经真实完成，任务列表和当前任务面板仍偶发显示旧的 `PROCESSING/QUEUED` 状态。
+  - 从用户视角看像是“终态仍然丢了”，但后端任务实际上已经完成，且终态事件可能已经回放成功。
+- Root cause:
+  - 前端 `fetchTasks()`、`mergeTaskRecordsIntoState()`、`mergeLiveTaskUpdateIntoState()` 之前都允许后到达的旧快照或旧增量直接覆盖本地任务记录。
+  - 浏览器虽然已经通过 `taskTerminalEvent` 或 `taskUpdate` 拿到本地 `completed` 状态，但随后一轮 REST 快照对账或一条滞后的实时更新，仍可能把同一 `taskId` 回退成非终态。
+  - `taskUpdate` 此前也没有把 `completedAt` 正式落进本地任务对象，前端缺少一个稳定的终态判据去抵御这种回退。
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - `fetchTasks()` 在全量快照落地前，先按 `taskId` 复用当前内存里的任务记录，并统一走 `mergeTaskRecordSnapshot(...)`，禁止缺少 `completedAt` 的旧快照把本地已完成任务回退。
+    - `mergeTaskRecordsIntoState()` 与 `mergeLiveTaskUpdateIntoState()` 统一复用同一套合并规则，保证“全量快照 / 增量对账 / WebSocket 实时更新”三条链路的终态语义一致。
+    - `mergeLiveTaskUpdateIntoState()` 正式合并 `completedAt`，让浏览器本地状态拥有稳定的完成时间锚点。
+- Verification:
+  - 通过 PowerShell 抽取 `index.html` 主内联脚本后执行 `node --check`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 仍会被当前工作树中既有的无关编译问题阻塞，未能作为本次改动的有效回归信号。
+- Prevention:
+  - 以后凡是同时存在“WebSocket 回放 + REST 对账”的任务流，必须让全量快照、增量对账、实时更新复用同一套状态合并规则，不能各自独立覆盖。
+  - 以后凡是终态字段已经进入实时 payload，就必须同步落入前端本地状态模型；否则回放成功后仍可能在后续对账里被旧值反压。
+
+## 2026-03-17 WebSocket 探活已上线但业务推送仍走原始会话，慢连接会继续放大发送阻塞
+- Date:
+  - 2026-03-17
+- Symptom:
+  - 服务端虽然已经具备协议层 `PingMessage` 定时探活与半开连接回收，但任务状态推送仍会在慢浏览器连接或后台冻结页场景下出现阻塞发送。
+  - 日志层面会表现为 `blocking send` 或发送失败关连接，而单个慢 session 还可能拖慢同一时刻其他 session 的推送节奏。
+  - 订阅表、单播回包和终态回放若继续持有原始 `WebSocketSession`，就无法真正享受到协议层探活之外的发送背压保护。
+- Root cause:
+  - `TaskWebSocketHandler` 原先在连接建立时保存的是原始 `WebSocketSession`，后续订阅注册与单播回包也继续把原始 session 放入订阅表。
+  - 业务推送路径的 `sendRawMessage(...)` 仍是全局 `synchronized` 阻塞发送，导致“一个连接慢”会被放大成“整个发送链慢”。
+  - 协议层 `ping/pong` 只能识别链路活性，不能替代业务发送路径的背压隔离。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+    - 连接建立后统一将 session 包装为 `ConcurrentWebSocketSessionDecorator`，并把托管 session 作为用户会话表、订阅表、单播回包与终态回放的唯一发送句柄。
+    - 新增托管 session 解析方法，避免回调里拿到原始 session 时又绕回未装饰发送链。
+    - 去掉 `sendRawMessage(...)` 的全局 `synchronized`，改由每连接装饰器负责发送限流、缓冲上限与超时保护。
+    - 发送失败日志补充 `userId/streamKey/sessionId` 上下文，便于排查慢连接与异常流。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandlerRecoveryStatusTest.java`
+    - 新增连接建立后必须存储 `ConcurrentWebSocketSessionDecorator`、订阅表必须复用托管 session 的测试。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是服务端已经引入协议层探活的 WebSocket 链路，必须同时检查业务推送是否仍绕过托管会话；否则会出现“探活上线了，但慢连接放大问题还在”的错觉。
+  - 以后凡是多连接广播路径，禁止使用全局 `synchronized` 把所有会话串成一把锁；应优先依赖单连接装饰器或队列做背压隔离。
+
+## 2026-03-17 浏览器后台恢复后任务状态 WebSocket 假活跃，导致实时更新不再自愈
+- Date:
+  - 2026-03-17
+- Symptom:
+  - 浏览器页面切到后台一段时间后，任务状态 WebSocket 经常在服务端侧已中断或已失活，但网页端返回前台后仍保留一个表面 `OPEN` 的旧连接。
+  - 结果是任务列表和任务详情页不再继续收到实时状态更新，只能依赖手动刷新恢复。
+  - 服务端日志会出现阻塞发送被中断，例如 `The current thread was interrupted while waiting for a blocking send to complete`。
+- Root cause:
+  - 浏览器后台态对 WebSocket 与定时器不提供强保证，连接可能被冻结、被系统回收，或在网络切换后变成“假活跃”。
+  - 网页端原先虽然具备 `close/error -> reconnect` 骨架，但 `startTaskUpdatesSocketHeartbeat()` 只有空壳，没有真正周期发送 `ping`，也没有基于最近入站信号判定连接是否已失活。
+  - 当旧连接没有及时触发 `close/error` 事件时，前台恢复逻辑只看到 `readyState === OPEN`，于是不会主动重建连接。
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 为任务状态 WebSocket 增加真实的应用层 `ping/pong` 心跳，周期发送 `{"action":"ping"}` 并在超时后强制重连。
+    - 新增最近一次入站信号时间记录，任何入站消息都会刷新活跃时间，避免“有业务消息却被误判死亡”。
+    - 健康检查不再只看 `readyState`，而是同时校验连接是否处于恢复态、是否超过心跳超时窗口。
+    - `visibilitychange` 与 `pageshow` 恢复时会对“表面 OPEN 但实际 stale”的连接做重建。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 浏览器端 WebSocket 不能把 `readyState === OPEN` 当成真实可用的唯一依据，必须结合最近应用层活跃信号做判活。
+  - 对浏览器页面来说，后台掉线是常态，不应该追求“永不断”，而应该默认设计为“可检测、可重连、可补快照”。
+  - 浏览器 JavaScript 无法主动发送协议层 WebSocket control ping，因此前端自愈场景应优先采用应用层 `ping/pong`。
+
+## 2026-03-16 Stage1 projector 初版把 SQLite 当审计包读取，导致恢复边界过宽且首轮投影直接 miss
+- Date:
+  - 2026-03-16
+- Symptom:
+  - 新增的 `Stage1ProjectionRepository` 初版虽然已经走到 task-local SQLite，但恢复入口仍依赖：
+    - `stage_snapshots.payload_json`
+    - `restored.request_payload`
+  - 实际运行时会出现两类问题：
+    - Stage1 snapshot 从 SQLite 读出来没有 `subtitle_path`，projector 直接返回 `None`
+    - projector 初始化时若沿用 `RuntimeRecoveryStore` 默认 `task_id=output_dir.name`，会把 Stage1 的 `llm_records` 全部过滤掉，导致“snapshot 有、llm rows 空”
+- Root cause:
+  - `RuntimeRecoverySqliteIndex.upsert_stage_snapshot(...)` 虽然接收了完整 payload，但落库时把 `payload_json` 固定写成 `'{}'`，恢复读口拿不到 `subtitle_path / domain / main_topic`。
+  - projector 初版又把恢复窗口边界绑定到了 `request_payload.prompt`，这属于审计语义，不是恢复语义。
+  - 此外，projector 在不知道真实 `task_id` 时直接初始化 `RuntimeRecoveryStore`，默认值会变成 `output_dir.name`，与真实任务不一致。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - `stage_snapshots` 新增恢复标量字段：`subtitle_path / domain / main_topic`。
+    - `llm_records` 新增 `request_scope_ids_json`，作为窗口恢复描述符。
+    - Stage1 snapshot 读口改为直接回填这些恢复标量，不再依赖 `payload_json`。
+    - `record_llm_attempt_started/committed/failed(...)` 现在会抽取 `request_scope_ids_json`；SQLite 恢复不再把完整请求正文当真相。
+  - `services/python_grpc/src/transcript_pipeline/stage1_projection_repository.py`
+    - projector 优先用 snapshot 里的 `task_id` 重建 store，避免 task 过滤错位。
+    - projector 恢复窗口边界改为消费 `request_scope_ids`，而不是读取完整 prompt。
+- Verification:
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_stage1_projection_repository.py -q --basetemp var/tmp_pytest_stage1_projection_recovery`
+  - `pytest tests/test_runtime_llm_context.py -q --basetemp var/tmp_pytest_runtime_llm_ctx`
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_sqlite.py services/python_grpc/src/transcript_pipeline/stage1_projection_repository.py`
+- Prevention:
+  - 以后凡是“恢复需要什么”的信息，都必须在 SQLite 中以显式恢复字段或最小描述符保存，禁止把 `payload_json` 或完整 prompt/system 文本当成恢复真相。
+  - 以后凡是 projector / recovery repository 初始化时涉及 `task_id` 过滤，都必须优先从 snapshot/task_meta 恢复真实任务标识，不能偷用 `output_dir.name` 这类宿主路径默认值。
+
+## 2026-03-16 Stage1 `step1_validate` 命中 `DeepSeekClient.complete()` 未初始化局部变量，恢复链路直接中断
+- Date:
+  - 2026-03-16
+- Symptom:
+  - Stage1 在 `step1_validate` 阶段直接失败，统一错误记录里出现
+    `cannot access local variable 'restored' where it is not associated with a value`。
+  - 失败发生在 LLM 热路径本身，而不是 SQLite 恢复真源读写失败，所以会把整条 `stage1` 校验链直接打断。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+    里原本就有两条 `complete_text` 无运行态上下文的测试，同样会稳定复现该错误。
+- Root cause:
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py` 的 `DeepSeekClient.complete()`
+    在 `if runtime_context is not None:` 分支内才给 `restored` 赋值。
+  - 但分支外立即执行了 `if restored is not None:`，当正常热路径没有激活 runtime context 时，
+    Python 会抛出 `UnboundLocalError`。
+  - 这属于恢复分支改造污染热路径的边界错误：恢复能力是可选增强，但局部变量生命周期却被写成了必需前置条件。
+- Fix:
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+    - 在 `DeepSeekClient.complete()` 中先将 `restored = None`，再按是否存在 runtime context 决定是否加载 committed 结果。
+    - 顺手收紧该段缩进与返回体格式，避免后续继续引入同类分支缩进错误。
+- Verification:
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py -q --basetemp var/tmp_pytest_deepseek`
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是“恢复可选、热路径必走”的代码，都必须先给恢复变量提供安全默认值，禁止把恢复上下文隐式当成必有前置条件。
+  - 以后凡是对 LLM 客户端增加 runtime restore 分支，必须补一条“runtime context 缺失仍可正常请求”的回归测试。
+
+## 2026-03-16 SQLite scope node 双重定义导致 `depends_on` 投影丢失，pending-scope 基准口径被打空
+- Date:
+  - 2026-03-16
+- Symptom:
+  - `tools/benchmarks/runtime_recovery_cost_breakdown.py` 在默认配置下会打印大量
+    `RuntimeRecoverySqliteIndex.upsert_scope_node() got an unexpected keyword argument 'depends_on'`
+    警告。
+  - 随后 `pending_scope_rows` 会掉成 `0`，导致 `pending scope list` 的基准口径失真。
+  - 这类问题虽然没有直接中断主流程，但会让 `scope_graph -> SQLite hint` 的观测结果不可信。
+- Root cause:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py` 里存在两个同名 `upsert_scope_node(...)`。
+  - 后面的定义覆盖了前面的定义，但签名里缺少 `depends_on` 参数。
+  - `RuntimeRecoveryStore.upsert_scope_node(...)` 在调用 SQLite 适配层时会显式传入 `depends_on`，于是被后面的覆盖版本拒绝。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - 给实际生效的后置 `upsert_scope_node(...)` 签名补齐 `depends_on` 参数。
+    - `depends_on` 的归一逻辑改为与前置定义保持一致：优先信任显式传入值，否则回退到 `dependency_fingerprints.keys()`。
+  - 重新执行 `tools/benchmarks/runtime_recovery_cost_breakdown.py`，确认：
+    - `pending_scope_rows = 240`
+    - `pending scope list` 查询重新返回有效数据。
+- Verification:
+  - `python -X utf8 tools/benchmarks/runtime_recovery_cost_breakdown.py`
+  - `pytest tests/test_runtime_recovery_query_plan.py tests/test_runtime_recovery_store.py tests/test_runtime_recovery_resume_index.py tests/test_runtime_llm_context.py -q`
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+- Prevention:
+  - 同一类中禁止保留同名方法的历史残片；后续若做大改，必须先清理被覆盖的死定义。
+  - 任何 benchmark 脚本一旦出现 warning flood，必须先把 warning 当成真实缺陷排查，而不是直接接受输出数字。
+
+## 2026-03-16 Python 阶段入口 pending scope 漏检，且热路径重复重投影 scope_graph 拖慢预取
+- Date:
+  - 2026-03-16
+- Symptom:
+  - Python 进程在阶段入口按 `pending scope` 批量派发时，`LOCAL_WRITING / IN_FLIGHT` 的 `llm_call` 有概率完全不出现在 `scope_hint_*` 里。
+  - 结果是断电后某些“已经发起但还没 durable 提交”的调用不会被识别成待重放 scope，只能退化回单条目录恢复或直接漏派发。
+  - 同时，阶段入口预取如果每次都先 `sync_scope_hints_from_scope_graph()`，会把 `scope_graph.json` 全量重投影一遍，导致批量预取热路径本身变慢。
+- Root cause:
+  - `begin_llm_attempt(...)` 之前只写了文件真源和 SQLite attempt 镜像，没有把 `LOCAL_WRITING` 同步进 `scope_graph -> scope_hint_*`，因此细粒度 hint 只在 `commit/fail/dirty` 之后才完整。
+  - `list_scope_hints(...)` 默认每次查询前都刷新 `scope_graph` 投影，这个语义对排障/纠偏安全，但不适合阶段入口的高频热路径。
+  - `scope_hint_*` 里缺少 `unit_id / stage_step` 时，阶段入口也无法稳定把 pending scope 反映射回业务单元与具体步骤。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - `begin_llm_attempt(...)` 现在会立即把 `LOCAL_WRITING` 同步进 `scope_graph`，并通过 `scope_hint_*` 暴露 `IN_FLIGHT` 计划态。
+    - `list_scope_hints(...)` 新增 `refresh_from_scope_graph` 开关；阶段入口预取热路径改为直接消费 SQLite hint，避免重复重投影。
+    - 新增 `prefetch_restorable_llm_scope_cache(...) / prefetch_restorable_chunk_scope_cache(...)`，统一阶段入口批量预取。
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - `scope_hint_plan / scope_hint_latest` 新增 `unit_id / stage_step` 字段与对应索引。
+    - `pending_only` 判定纳入 `PLANNED / IN_FLIGHT / LOCAL_WRITING / EXECUTING`，断电后不会漏掉待重放 scope。
+  - `services/python_grpc/src/common/utils/runtime_llm_context.py`
+    - 进入 stage 时自动批量预取可 restore 的 `llm_call`，并先走内存 cache。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `phase2b` 入口先按 pending scope 批量预取并优先派发 `pending/new` section。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - `phase2a` screenshot chunk 入口先批量预取 committed chunk，再进入流式/批量处理。
+- Verification:
+  - `pytest tests/test_runtime_recovery_store.py tests/test_runtime_llm_context.py -q`
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_store.py services/python_grpc/src/common/utils/runtime_recovery_sqlite.py services/python_grpc/src/common/utils/runtime_llm_context.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `python -X utf8 tools/benchmarks/runtime_recovery_sqlite_vs_json.py`
+- Prevention:
+  - 以后凡是阶段入口想消费 `pending scope`，必须保证 `begin -> in-flight -> commit/fail` 全链路都能投影到统一 hint 表，禁止只在成功或失败后才补 hint。
+  - 以后凡是批量恢复热路径，都要显式区分“纠偏刷新”和“只读热路径”；不能为了安全一律在查询前全量重投影。
+  - 以后凡是需要从恢复 hint 回映射到业务单元的场景，`unit_id / stage_step` 必须进入 hint 表 contract。
+
+## 2026-03-16 `fallback` 语义边界错误，导致系统把多种非首选路径混叫成 fallback
+- Date:
+  - 2026-03-16
+- Symptom:
+  - 系统把多种“非首选路径”都混叫成 `fallback`，例如 provider 备选切换、素材路径本地补找、combined -> two-step 执行策略切换。
+  - 结果是下游 `llm_call` 会被错误地标成 fallback，上游真正的 `VL analysis failed` 反而没有成为唯一可信的 fallback 源头。
+  - 人工修好根因后，前端虽然有了 fallback repair 入口，但如果 fallback 源头定义错了，修复范围也会跟着错。
+- Root cause:
+  - `fallback` 事实只存在于局部实现分支，没有进入统一的 `response_metadata / scope_graph / recovery directive` 语义。
+  - `DeepSeek -> Qwen`、素材路径透传缺失、combined -> two-step 这些不同类型的“非首选路径”没有被语义拆开，导致系统误把它们都当成 fallback。
+  - 真正的 `VL analysis failed` 虽然有 `used_fallback / failure_snapshot / unit_failures` 等运行态信息，但此前没有被压到统一的 `scope_ref` 与 fallback 审计里。
+  - 控制面虽然已经具备 stage 恢复能力，但缺少一条从 fallback 审计日志提取 `scope_ref` 并定向标脏的 repair 链路。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 把 `DeepSeek -> Qwen` 的对外语义收敛为 `provider_switch / 备选方案切换`，不再写成 fallback。
+    - provider switch 仍保留失败历史，但不再把 `is_fallback` 置为 `true`。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - 把素材本地补找改写为“素材路径透传缺失”问题记录，不再写入 `materials.metadata["fallback"]`。
+    - 仅继承真正来自上游 `VL analysis failed` 的 fallback metadata。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 从 `vl_analysis_output_latest.json / vl_last_error.json` 恢复 `used_fallback / unit_failures`，并把真正的 `VL fallback` 注入 `MaterialRequests.metadata["fallback"]`。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 只接收 `is_fallback=true` 的 payload 进入 `fallback_context`。
+    - combined -> two-step 只作为执行策略切换记录，不再把自己写成 fallback。
+    - 每次 recoverable `llm_call` 仅在消费真正的上游 `VL fallback` 时才把当前 `scope_ref` 追加到 `propagated_scope_refs`。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 在 `VL analysis failed` 最终失败处基于 runtime scope 直接写入 fallback audit，作为真正 fallback 的源头。
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - 在 `intermediates/rt/` 下追加写入 `fallback_records.jsonl / error_records.jsonl / manual_retry_required_records.jsonl`，把 fallback、统一错误与人工重试错误拆账保存。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskRuntimeRecoveryService.java`
+    - 从 `intermediates/rt/fallback_records.jsonl` 聚合 `propagated_scope_refs`，形成 `FallbackRepairDirective`，并兼容旧路径。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskRuntimeStageStore.java`
+    - 按 `scope_graph.depends_on` 后代关系把 seed scope 与下游子图标成 `DIRTY`。
+    - Java stage 阻塞状态同时追加写入 `intermediates/rt/error_records.jsonl / manual_retry_required_records.jsonl`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 新增 `/tasks/{taskId}/repair-fallback` 控制面入口。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 在任务上下文菜单暴露“修复 fallback 路径”，避免只能整单重新提交。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_llm_context.py services/python_grpc/src/content_pipeline/infra/llm/fallback_audit.py services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是“成功但来自非首选路径”的结果，必须先区分它是备选方案切换、路径透传缺失、执行策略切换，还是真正 fallback，禁止混叫。
+  - 以后只有真正代表主分析能力失效、需要后续定向回收的路径才允许进入 `fallback` 语义。
+  - 以后凡是人工修复后允许继续的场景，都要优先设计成 scope 子图回收，而不是默认退化成整任务重提。
+  - 以后凡是 fallback 日志，都必须保留失败历史、请求上下文和堆栈，禁止只留一句 `fallback happened` 的摘要。
+
+## 2026-03-15 Stage1 llm_call scope 元数据未落到 scope node，导致统一恢复规划丢失 step 归属
+- Date:
+  - 2026-03-15
+- Symptom:
+  - Stage1 已经给 `DeepSeekClient.complete_json(...)` 透传了显式 `llm_call_id` 与 `stage_step/scope_variant/unit_id`，但 `scope_graph` 里的 `llm_call` node 仍然只保留了 `chunk_id/attempt`。
+  - 同时，显式传入的 `llm_call_id` 还被 `RuntimeLLMContext` 按 32 字符裁断，导致像 `stage1_step2_correction.batch_0001` 这样的精确 scope id 退化成截断版本。
+  - 结果是 Stage1 统一 `resume_plan` 在向 `llm_call` 归因时会丢失 step 级定位信息，测试也无法稳定断言 `stage_step/scope_variant`。
+- Root cause:
+  - `RuntimeLLMContext._sanitize_scope_id(...)` 对 `llm_call_id` 仍沿用 32 字符上限，这个上限适合 `chunk_id`，但不适合作为显式可读的 `llm_call` 标识。
+  - `RuntimeRecoveryStore.commit_llm_attempt(...)` / `fail_llm_attempt(...)` 在回写 `scope_graph` 时，只把 `chunk_id/attempt` 填回 scope node，没有把 manifest 里的 `stage_step/scope_variant/unit_id/provider/request_name` 透传回去。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_llm_context.py`
+    - 显式 `llm_call_id` 的 scope id 上限提高到 96，保留可读全名。
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - `commit_llm_attempt(...)` 与 `fail_llm_attempt(...)` 在 `upsert_scope_node(...)` 时显式回填 `stage_step/scope_variant/unit_id/provider/request_name`。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+    - 增加对 `scope_id/stage_step/scope_variant` 的断言，防止 scope node 再次退化成只剩 attempt 元数据。
+- Verification:
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py -q`
+  - `pytest tests/test_runtime_recovery_store.py tests/test_vl_runtime_recovery.py services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py services/python_grpc/src/transcript_pipeline/tests/test_phase1_dynamic_topic_sampling.py services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py -q`
+- Prevention:
+  - 以后凡是 manifest 已经持有的 planner 关键字段，scope node 回写时必须同步透传，不能只保留最小 attempt 元数据。
+  - 以后凡是显式传入的可读 `llm_call_id`，长度上限必须对齐 scope graph 的 contract，不能沿用 `chunk_id` 的裁剪规则。
+
+## 2026-03-15 VL token 成本审计只保留粗粒度 prompt/completion，导致视频 token 明细与多处计费口径分叉
+- Date:
+  - 2026-03-15
+- Symptom:
+  - Phase2A 的 `phase2a_token_cost_audit.json`、`vl_token_report_latest.json` 和 Java 侧 `task_metrics` 使用了不同的 VL 计费口径：
+    - Python 统一审计只保留 `prompt_tokens/completion_tokens/total_tokens`；
+    - `vl_report_writer.py` 仍按旧的 USD / qwen3-vl-plus / ernie 范围做硬编码估算；
+    - Java `VideoProcessingOrchestrator` 继续按另一套旧常量重新汇总。
+  - 用户侧会误以为“VL 只算了 prompt，没有算视频本身 token”，因为报表没有显式保留 `prompt_tokens_details.video_tokens` 等 provider 明细。
+  - 对 DashScope 的一次正式在线调用已确认 provider 可返回非零视频明细：
+    - `prompt_tokens=305`
+    - `prompt_tokens_details.video_tokens=266`
+    - `prompt_tokens_details.text_tokens=39`
+- Root cause:
+  - `llm_gateway._extract_usage_from_response(...)` 在 VL 返回进入缓存/审计前，就把 provider usage 裁成了少数字段，直接丢失了 `prompt_tokens_details` / `completion_tokens_details`。
+  - `vl_video_analyzer.py` 的本地 usage 归一化同样只保留了三元组，导致离线任务和恢复链路也拿不到视频细分 token。
+  - `token_costing.py`、`vl_report_writer.py`、Java `VideoProcessingOrchestrator` 分别维护了不同的价格常量和币种假设，形成同一任务三套计费结果。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/infra/llm/token_costing.py`
+    - 统一改为当前价格快照；
+    - `normalize_usage_payload(...)` 保留 `prompt_tokens_details`、`input_tokens_details`、`completion_tokens_details`、`output_tokens_details`；
+    - 新增 `text_input_tokens/image_input_tokens/audio_input_tokens/video_input_tokens/media_input_tokens` 聚合字段；
+    - 成本估算里显式标记 `billing_input_token_field=prompt_tokens`，避免再把 VL 输入误读成“只有文本 prompt”。
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - VL usage 不再裁剪字段，直接透传统一归一化后的完整 usage。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 在线/离线 VL usage 统一走 `normalize_usage_payload(...)`。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - `token_stats` 新增 `input_tokens_actual/output_tokens_actual/text_input_tokens_actual/video_input_tokens_actual/media_input_tokens_actual`；
+    - Phase2A token audit 写入 `billing_notes`，并保留 request transport / cost basis 说明。
+  - `services/python_grpc/src/server/vl_report_writer.py`
+    - 删除旧的 USD/Qwen3/Ernie 硬编码估算；
+    - 改为直接复用 `token_costing.py` 输出统一 `pricing` 和 `pricing_snapshot`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - Java 汇总优先读取 Python `vl_token_report_latest.json` 的已计算成本；
+    - DeepSeek 汇总优先读取 `phase2b_deepseek_call_audit.json` 的 summary 成本，缺失时才回退本地 token 单价。
+- Verification:
+  - 正式 VL 在线调用（DashScope）返回 200，并拿到非零 usage 明细：
+    - `prompt_tokens=305`
+    - `prompt_tokens_details.video_tokens=266`
+    - `prompt_tokens_details.text_tokens=39`
+  - `python -m pytest services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/server/tests/test_vl_report_writer.py -q`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/token_costing.py services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/server/vl_report_writer.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - 以后凡是 provider 已经返回 usage detail 的链路，禁止在网关层先裁剪成“只有 prompt/completion/total”再落盘。
+  - 以后凡是 LLM/VL 成本计算，必须统一复用同一个 pricing snapshot 与 normalize 入口，禁止 Python/Java/报告层各维护一套模型价格。
+  - 以后凡是用户会拿来核账的报表，必须同时保留“billed input token 字段”和 provider usage 细分字段，避免把 VL 输入误展示成纯文本 prompt。
+
+## 2026-03-15 upgrade-log.md mojibake after shell insertion
+- Date:
+  - 2026-03-15
+- Symptom:
+  - A newly added section in `docs/architecture/upgrade-log.md` was rendered as `?` even though BOM and file-level encoding were still valid.
+  - The issue was content corruption during insertion, not a missing BOM in the target file.
+- Root cause:
+  - The entry was inserted through a shell command path that did not preserve the intended Unicode content reliably for that here-string payload.
+  - As a result, the file stayed `UTF-8 with BOM`, but the inserted characters were already downgraded before write.
+- Fix:
+  - Replaced the corrupted block first, then rewrote the file explicitly with `utf-8-sig`.
+  - Re-ran `python -X utf8 tools/architecture/check_docs_encoding.py` to verify file-level encoding after repair.
+- Prevention:
+  - For `docs/architecture/*.md`, prefer `apply_patch`; if BOM blocks patching, use an explicit `utf-8-sig` rewrite path and verify immediately.
+  - When mojibake appears, fix encoding/content first and only then continue with architecture notes or business changes.
+
+## 2026-03-15 TaskRuntimeRedisRetentionService 缺省布尔配置触发空指针，Spring 启动链整体失败
+- Date:
+  - 2026-03-15
+- Symptom:
+  - Java orchestrator 启动时，`mobileCardController -> taskWebSocketHandler -> taskQueueManager -> taskRuntimeRedisRetentionService` 整条依赖链创建失败。
+  - 根因栈最终落在 `TaskRuntimeRedisRetentionService.parseBoolean(...)`：缺省配置场景下对 `null` 调用了 `toLowerCase(Locale.ROOT)`，直接抛出 `NullPointerException`。
+  - 结果是一个本应“可选增强”的 Redis retention 组件，反而把整个 Spring 容器启动拖死。
+- Root cause:
+  - `parseBoolean(...)` 使用 `firstNonBlank(value, "")` 试图兜底，但 `firstNonBlank(...)` 会把空串视为 blank 并返回 `null`，因此兜底逻辑实际上失效。
+  - 同一类风险还存在于 `task-terminal-retention-hours` 的强类型注入上：一旦外部配置给出非法字符串，Spring 也可能在 bean 创建阶段提前失败，而不是按可选能力降级。
+- Fix:
+  - 将 `parseBoolean(...)` 改为先判断 `null`，缺省场景直接返回 `false`，不再对空值调用 `toLowerCase(...)`。
+  - 将 `task.runtime.redis.task-terminal-retention-hours` 从 `long` 构造注入改为 `String` 手动解析，统一走服务内部容错逻辑，并对非法值回退到默认 `168h`。
+  - 保留 Redis 客户端的延迟初始化和失败降级语义，确保 retention 配置错误不会再次拖垮主启动链路。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=TaskStatusPresentationServiceTest test -q`
+- Prevention:
+  - 所有可选基础设施能力的配置解析都必须“空值安全 + 非法值可降级”，禁止在构造函数里把缺省配置放大成容器级硬失败。
+  - 对 `@Value` 注入的数值型配置，优先在服务内部统一做字符串解析与默认值回退，而不是把配置合法性完全交给 Spring 类型转换。
+  - 新增配置解析逻辑时，必须补覆盖“缺省值”和“非法值”两类回归测试，避免再次出现启动期 NPE。
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskRuntimeRedisRetentionService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskStatusPresentationServiceTest.java`
+  - `docs/architecture/error-fixes.md`
+## 2026-03-15 runtime LLM 可读目录在 Windows 上触发长路径写盘失败
+- Date:
+  - 2026-03-15
+- Symptom:
+  - `llm_call` 本地目录从短键升级到可读布局后，`manifest.json` 或 `part_0001.json` 在 Windows 上偶发 `FileNotFoundError` / `WinError 206`。
+  - 现象主要出现在 pytest 临时目录或较长 task 输出目录下，错误点并不是业务逻辑，而是原子写盘创建临时文件阶段。
+- Root cause:
+  - 目录命名同时叠加了 `stage/chunk/call/<readable_llm_call_id>.aNNN` 和较长的 `.tmp.<pid>.<time_ns>` 临时文件后缀，路径长度逼近 Windows 边界。
+  - 之前只考虑了“目录更可读”，没有把“原子写盘临时文件名也会继续拉长完整路径”纳入设计约束。
+- Fix:
+  - 将本地运行态目录收口为更短但仍可读的 `stage/chunk/call/<llm_call_id>.aNNN/part_*.json`。
+  - 将 `llm_call_id` 压缩为“短前缀 + hash”，并折叠 `step_name/unit_id` 的重复前缀。
+  - 将原子写盘临时文件名从长 `.tmp.<pid>.<time_ns>` 收短为更短后缀，降低临时文件阶段的路径长度。
+- Verification:
+  - `pytest tests/test_runtime_recovery_store.py tests/test_vl_runtime_recovery.py -q`
+  - `python -m py_compile services/python_grpc/src/common/utils/async_disk_writer.py services/python_grpc/src/common/utils/runtime_recovery_store.py`
+- Prevention:
+  - 所有新的运行态目录设计都必须同时评估“正式文件路径 + 临时文件路径”的最坏长度，而不是只看最终文件名。
+  - Windows 上涉及 `attempt_dir.mkdir(...)`、原子 rename、part 分块写盘的改动，必须补一条长路径回归测试。
+- Files:
+  - `services/python_grpc/src/common/utils/async_disk_writer.py`
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+  - `tests/test_runtime_recovery_store.py`
+  - `tests/test_vl_runtime_recovery.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-15 task_runtime_state 受理持久化 SQL 列数和值数不一致，导致新任务提交直接报 500
+- Date:
+  - 2026-03-15
+- Symptom:
+  - 移动端或控制面提交新任务时，后端在 `persist accepted task failed` 处直接抛 `IllegalStateException`。
+  - SQLite 根因报错为：
+    - `[SQLITE_ERROR] SQL error or missing database (20 values for 21 columns)`
+  - 结果是任务还没入队，就在受理持久化阶段失败，恢复态、排队态和后续执行链路都不会被建立。
+- Root cause:
+  - `task_runtime_state` 新增了 `recovery_payload_json` 列后，[TaskStateRepository.java](/D:/videoToMarkdownTest2/services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java) 的 `INSERT INTO ... VALUES (?, ...)` 仍保留旧的 20 个占位符。
+  - 这是典型的位置参数 SQL 脆弱性：列清单和参数绑定分离，新增列时编译期不会报错，直到运行时 SQLite 才发现“21 列对应 20 个值”。
+- Fix:
+  - 将 [TaskStateRepository.java](/D:/videoToMarkdownTest2/services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java) 的 `upsertTask(...)` 从位置参数 `JdbcTemplate.update(...)` 改为 `NamedParameterJdbcTemplate + MapSqlParameterSource`。
+  - 让 `task_id/user_id/.../recovery_payload_json/updated_at` 都通过命名参数绑定，避免以后继续出现“列和问号个数漂移”。
+  - 新增 [TaskStateRepositoryTest.java](/D:/videoToMarkdownTest2/services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskStateRepositoryTest.java)，覆盖 `recovery_payload` 持久化和同一任务二次 `upsert` 的幂等更新。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests test-compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=com.mvp.module2.fusion.service.TaskStateRepositoryTest" surefire:test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - 对多列 `upsert/insert` 一律优先使用命名参数，禁止继续在关键持久化路径使用长串位置参数。
+  - 任何给 `task_runtime_state` 新增列的改动，都必须同步补仓储层回归测试，而不是只依赖人工点接口验证。
+  - 任务受理链路的数据库错误必须保留表名、列名和 SQL 语义上下文，避免上层只看到模糊的 `persist accepted task failed`。
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskStateRepositoryTest.java`
+  - `docs/architecture/error-fixes.md`
+
 ## 2026-03-15 浏览器 `/ws/tasks` 半开连接无法快速发现且终态通知会在断线窗口内丢失
 - Date:
   - 2026-03-15
@@ -10499,3 +11139,309 @@
   - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
   - `docs/architecture/upgrade-log.md`
   - `docs/architecture/error-fixes.md`
+## 2026-03-15 Stage1 and Phase2A artifact path drift could split canonical and legacy outputs
+- Date:
+  - 2026-03-15
+- Symptom:
+  - `ProcessStage1` 在异步等待 30 秒后仍然报错：
+    - `Stage1 outputs not ready after async wait: ...\\intermediates\\step2_correction_output.json`
+    - `Stage1 outputs not ready after async wait: ...\\intermediates\\step6_merge_cross_output.json`
+  - 现场目录实际存在：
+    - `...\\intermediates\\intermediates\\step2_correction_output.json`
+    - `...\\intermediates\\intermediates\\step6_merge_cross_output.json`
+  - `Phase2A` 语义单元链路同时存在同类风险：
+    - `RichTextPipeline` 已写 canonical 路径；
+    - `grpc_service_impl` / `markdown_enhancer` 仍有旧候选路径与旧主写回路径；
+    - 不同阶段可能读取到不同版本的 `semantic_units`。
+- Root cause:
+  - `stage_artifact_paths.py` 的 helper 约定输入是任务根目录，但 `run_pipeline -> StepOutputConfig` 传入了 `output_dir/intermediates`，导致 Stage1 helper 再次拼接 `intermediates`，最终把 step2/step6 落到 `intermediates/intermediates/...`。
+  - `ProcessStage1` 等待的却是单层 legacy 路径 `intermediates/step2_correction_output.json` 与 `intermediates/step6_merge_cross_output.json`，因此 flush 后仍判定“文件未就绪”。
+  - `Phase2A` 后续链路没有统一复用 `stage_artifact_paths`：
+    - 候选路径函数只看旧 `semantic_units_phase2a.json` / `intermediates/semantic_units_phase2a.json`；
+    - `GenerateMaterialRequests` 与 `AnalyzeWithVL` 回写时只更新单一路径；
+    - `markdown_enhancer` 读取候选也没有优先 canonical。
+- Fix:
+  - `services/python_grpc/src/common/utils/stage_artifact_paths.py`
+    - `_base_dir(...)` 增加兼容归一化：若调用方误传 `.../intermediates`，自动回退到任务根目录，阻断 `intermediates/intermediates/...` 再次出现。
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - `StepOutputConfig` 默认 `output_dir` 改回任务根目录语义；
+    - `run_pipeline(...)` 不再传 `output_dir/intermediates`；
+    - Stage1 步骤输出统一通过 helper 写 canonical + legacy 镜像。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `Phase2A` 语义单元候选路径统一改走 `stage_artifact_paths`；
+    - 新增 `_persist_phase2a_semantic_units_payload(...)`，一次同步 canonical + legacy；
+    - `GenerateMaterialRequests` / `AnalyzeWithVL` 回写改为多镜像同步，避免“读 canonical、写 legacy”分叉。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 读取语义单元候选路径统一改走 `stage_artifact_paths`，优先 canonical。
+  - `tests/test_stage_artifact_layout.py`
+    - 补充回归测试，锁定“误传 intermediates 目录时，不得生成 intermediates/intermediates”。
+  - `services/python_grpc/src/server/tests/test_phase2a_reuse_candidates.py`
+    - 更新候选路径预期，并增加 Phase2A canonical + legacy 同步回写测试。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/transcript_pipeline/graph.py services/python_grpc/src/common/utils/stage_artifact_paths.py`
+  - 手工脚本验证：
+    - Stage1 在“任务根目录输入”和“误传 intermediates 输入”两种情况下，都只生成单层 `intermediates/...`，不再出现 `intermediates/intermediates/...`
+    - `Phase2A` helper 与 `MarkdownEnhancer` 候选路径均返回：
+      - `intermediates/stages/phase2a/outputs/semantic_units.json`
+      - `semantic_units_phase2a.json`
+      - `intermediates/semantic_units_phase2a.json`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+    - 本次未通过，失败原因为 `protobuf-maven-plugin` 无法删除 `services/java-orchestrator/target/protoc-dependencies/...` 下的临时目录，属于构建目录锁定/清理问题，不是本次 Python 路径修复导致的编译错误。
+- Prevention:
+  - 以后凡是新增阶段产物路径，读写双方都必须只通过 `stage_artifact_paths` 暴露，禁止在业务代码里再手写一套 candidate 列表。
+  - 以后凡是阶段级 payload 既保留 canonical 又保留 legacy，更新时必须一次同步所有镜像，禁止“只写主路径、靠旧文件历史残留兜底”。
+  - 以后凡是 helper 语义是“任务根目录”，调用方不得再传 `.../intermediates`；若确需兼容历史调用，必须在 helper 层统一归一化，而不是在多个调用点各自猜测。
+- Files:
+  - `services/python_grpc/src/common/utils/stage_artifact_paths.py`
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `tests/test_stage_artifact_layout.py`
+  - `services/python_grpc/src/server/tests/test_phase2a_reuse_candidates.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-16 Vision AI 未入任务总账，且 DeepSeek 降级 Qwen 时按错模型计价
+- Date:
+  - 2026-03-16
+- Symptom:
+  - 任务花费此前只稳定覆盖 `VL + DeepSeek`，`Vision AI` 实际发生的 provider 调用没有进入 `task_metrics_latest.json -> websocket -> 前端任务卡片` 的总账。
+  - `DeepSeek` 失败后虽然已经会自动降级到 `Qwen`，但 `phase2b_deepseek_call_audit.json` 仍沿用请求模型 `deepseek-chat`，导致 Qwen 调用被按错误快照估价。
+  - 用户侧看到的是“任务里确实跑过视觉/降级链路，但花费不全，且分项口径不可信”。
+- Root Cause:
+  - `Vision AI` 网关只返回业务字段，没有保留 OpenAI-compatible 响应中的 `usage`，也没有形成任务级审计文件。
+  - `deepseek_audit.py` 在计算成本时优先使用请求模型，而不是响应里的实际模型。
+  - Java 任务总账聚合层只读取 `vl_token_report_latest.json` 与 `phase2b_deepseek_call_audit.json` 的旧 DeepSeek 口径，无法纳入 `Vision AI` 和 `Qwen fallback`。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/infra/llm/token_costing.py`
+    - 新增 `qwen-plus` 定价快照。
+    - `summary.by_model` 现在显式携带 `model` 字段，便于下游按真实模型聚合。
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - 从 Vision AI 响应中提取标准化 `usage`，挂到内部元数据。
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_audit.py`
+    - 新增 `vision_ai_call_audit.json`，按任务汇总 `usage/cost/by_model`。
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - Vision AI 网关剥离内部元数据、写 runtime metadata、追加任务级审计。
+  - `services/python_grpc/src/content_pipeline/infra/llm/deepseek_audit.py`
+    - 成本估算改为优先使用响应中的实际模型；当 `DeepSeek -> Qwen` 发生时，记录 `input.model=qwen-plus`，并保留 `requested_model=deepseek-chat`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 任务总账统一读取：
+      - `vl_token_report_latest.json`
+      - `vision_ai_call_audit.json`
+      - `phase2b_deepseek_call_audit.json`
+    - 汇总输出 `vl + vision_ai + text_llm`，并兼容保留 `deepseek_chat / qwen_fallback` 分项。
+- Verification:
+  - 静态与回归：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/token_costing.py services/python_grpc/src/content_pipeline/infra/llm/deepseek_audit.py services/python_grpc/src/content_pipeline/infra/llm/vision_ai_audit.py services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - `python -m pytest services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/content_pipeline/tests/test_deepseek_audit.py services/python_grpc/src/content_pipeline/tests/test_vision_ai_audit.py -q`
+  - 正式在线调用：
+    - `Vision AI` 实调返回：
+      - `prompt_tokens=89`
+      - `completion_tokens=60`
+      - `image_input_tokens=62`
+      - `total_cost=0.0003824 CNY`
+    - `DeepSeek` 用无效 key 触发真实降级到 `Qwen` 后，审计返回：
+      - `metadata_model=qwen-plus`
+      - `audit_input_model=qwen-plus`
+      - `requested_model=deepseek-chat`
+      - `total_cost=0.000024 CNY`
+  - Java 编译：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+    - 本次未通过；失败原因是仓库当前 protobuf generated sources 缺失/清理异常，不是这次成本改动引入的首错。
+- Prevention:
+  - 以后凡是 OpenAI-compatible/VL/Vision provider 调用，都必须把 `usage` 保留到统一审计口径，禁止只消费业务文本结果。
+  - 以后凡是存在 provider degradation 的链路，成本估算必须以“实际响应模型”为准，并把“请求模型/实际模型”同时写入审计。
+  - 以后凡是任务级用户可见花费，必须只从统一任务总账推前端，禁止前端或 controller 自己再拼分项。
+- Files:
+  - `services/python_grpc/src/content_pipeline/infra/llm/token_costing.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/deepseek_audit.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_audit.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+
+## 2026-03-16 Python DeepSeek 直连分支未统一降级到 Qwen，VL 分析指数退避次数不足
+- Symptom:
+  - Python 端部分 DeepSeek 调用在多次指数退避后仍停留在原始 provider 失败态，没有像统一网关那样自动降级到 `qwen`。
+  - 这类遗漏主要出现在 `phase2b` 的 `markdown_enhancer`，导致正文增强、结构化等链路和其他网关调用表现不一致。
+  - VL 分析链路默认只做 4 次指数退避，长尾网络抖动或 provider 短暂波动时，恢复窗口偏窄。
+- Root Cause:
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py` 直接持有 `LLMClient` 并调用 `complete_text/complete_json`，绕过了 `llm_gateway` 中已经存在的 `DeepSeek -> Qwen` 降级逻辑。
+  - VL 分析重试次数虽然已经做成配置，但代码默认值和仓库配置文件仍停留在旧的较低值，未对齐当前容错目标。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 新增统一 `_complete_text/_complete_json` 包装层。
+    - 当底层客户端是标准 `LLMClient` 时，强制经由 `llm_gateway.deepseek_complete_text/deepseek_complete_json` 发起调用，复用现有指数退避、快速熔断和 `Qwen fallback`。
+    - 构造阶段也改为复用 `llm_gateway.get_deepseek_client(...)`，避免 `phase2b` 再保留自建 DeepSeek client 旁路。
+    - 保留测试桩/非标准客户端的兼容直调路径，避免破坏现有单测和离线桩行为。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 默认 `max_retries` 从 `4` 提高到 `6`。
+  - `config/module2_config.yaml`
+    - `vl_material_generation.api.max_retries` 从 `4` 调整到 `6`。
+  - `config/module2_config.local.yaml`
+    - 本地覆盖配置同步调整到 `6`，避免本地运行继续落在旧值。
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - 新增文本调用回归测试，锁定“DeepSeek 文本调用在 4 次退避后必须降级到 Qwen”。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py`
+    - 新增 `markdown_enhancer` 网关路由测试，锁定文本/JSON 路径都不再绕过统一降级链。
+    - 新增构造回归测试，锁定 `phase2b` 初始化阶段也通过 `llm_gateway.get_deepseek_client(...)` 创建客户端。
+- Verification:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是 Python 侧新增 DeepSeek 调用，默认必须优先接入 `llm_gateway`，禁止业务模块直接持有 `LLMClient` 后各自实现退避/降级。
+  - 以后凡是退避次数属于运行策略，而不是业务语义，必须优先走统一配置并同步更新仓库默认值与本地覆盖值，避免“代码默认值”和“运行配置”长期漂移。
+  - 以后凡是修复 provider fallback 问题，至少补两类测试：
+    - 网关级降级回归测试
+    - 业务入口是否真正走到统一网关的回归测试
+
+## 2026-03-15 Phase2B 最终分类未通过现有 taskUpdate websocket 及时推送
+- Symptom:
+  - Phase2B 分类日志已经出现 `classified task=... category=... is_new=...`，但前端任务列表仍停留在旧状态，必须手动刷新后才能看到最新 `categoryPath`。
+  - 任务完成 websocket 已经正常到达，但 payload 里没有携带最终分类字段，导致前端实时合并阶段丢失这次末端状态变化。
+- Root Cause:
+  - 现有实时通道复用了 `taskUpdate`，但 `TaskWebSocketHandler` 只广播基础任务状态、进度和结果路径，没有在终态时回读 `video_meta.json/category_classification.json` 中已经落盘的分类结果。
+  - Web 前端的实时合并逻辑也没有从 `taskUpdate` 中接收并覆盖 `categoryPath/taskPath`。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+    - 在 `buildTaskUpdatePayload(...)` 中仅针对 `COMPLETED` 终态回读任务目录里的 `video_meta.json` / `category_classification.json`。
+    - 将最终 `categoryPath` 与对应 `taskPath` 填充到现有 `taskUpdate` payload，继续复用原 websocket 事件类型，不新增平行消息模型。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 在 `mergeLiveTaskUpdateIntoState(...)` 中合并 websocket 返回的 `categoryPath/taskPath`，让任务列表与当前任务视图在实时更新时立即反映最终分类。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandlerRecoveryStatusTest.java`
+    - 新增终态回归测试，锁定“完成态 taskUpdate 必须带出已落盘分类路径”。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=TaskWebSocketHandlerRecoveryStatusTest test -q`
+    - 在 Codex sandbox 内首次执行被默认 Maven 仓库权限拦截；切换到可写仓库/放宽沙箱后已通过。
+- Prevention:
+  - 以后凡是“任务终态之后才落盘”的用户可见元数据，必须优先复用 `taskUpdate` 的终态补全逻辑，避免“日志已成功、前端仍旧值”的最终一致性缺口。
+  - 以后新增任务级元数据字段时，后端 payload 与前端实时合并逻辑必须成对补齐，禁止只写落盘文件不更新 websocket 合并面。
+
+## 2026-03-16 转录阶段单段完成事件未显式声明为 hard watchdog 信号
+- Symptom:
+  - 转录阶段虽然一直有 `soft` 心跳维持，但“某一段已经转录完成”这类强进度里程碑没有在事件源头显式声明为 `hard`，导致 Java 侧观察时容易把 transcribe 阶段理解为只有 soft keepalive。
+  - 静态代码链路里确实存在 `progress_callback -> RuntimeStageSession.mark -> TaskWatchdogSignalWriter.emit`，但 hard 语义更多依赖默认值，不够可见。
+- Root Cause:
+  - `parallel_transcription.py` 发出的单段完成事件只携带 `checkpoint/completed/pending/segment_index`，没有把 `signal_type` 明确编码进事件。
+  - `grpc_service_impl.py` 的 transcribe 桥接层也没有显式透传 `signal_type`，而是隐式依赖 `RuntimeStageSession.mark(...)` 的默认 `hard` 行为；这让语义分散在默认参数里，不利于 Java/Python 两端对齐排障。
+- Fix:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 为并行成功和串行补偿成功的单段完成事件统一补齐 `signal_type=hard`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `TranscribeVideo` 的 `_on_transcribe_segment_completed(...)` 显式读取并透传 `signal_type`，异常值统一回退为 `hard`，保证 Java 端收到的是强信号而不是隐式默认。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+    - 回归测试新增 `signal_type=hard` 断言，锁定事件语义。
+  - `tests/test_grpc_runtime_stage_state.py`
+    - 补充 `RuntimeStageSession.mark(...)` 默认发出 `hard` 的断言，防止后续默认值被改弱。
+- Verification:
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py tests/test_grpc_runtime_stage_state.py -q`
+    - 第二条命令里 `tests/test_grpc_runtime_stage_state.py` 仍因仓库当前 `RuntimeRecoveryStore` 落盘路径与测试断言不一致而失败；这是存量测试漂移，不是本次 hard-signal 修复引入的新失败。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - 以后凡是“阶段内明确完成一个业务单元”的事件，都必须在事件源头显式携带 `signal_type`，禁止把强/弱信号语义只埋在桥接层默认参数里。
+  - 以后 Python 侧 watchdog 桥接代码一律透传上游 `signal_type`，只把默认值当兜底，不当业务语义来源。
+  - 以后修复跨语言 watchdog 语义问题，至少同时补两类回归：
+    - 事件源 payload 语义回归
+    - 桥接层默认/透传行为回归
+
+## 2026-03-16 转录阶段 hard 事件只修了 signal_type，没有修触发时机，且单段结果未进入 SQLite 恢复链
+- Symptom:
+  - Python 端日志显示分段不断完成，但 Java 端在转录批次结束前仍主要看到 `soft` 信号，`hard` 里程碑明显滞后。
+  - 任务断电后重跑时，即使前面已有若干分段转录完成，也会整阶段从头重转，而不是复用已完成分段。
+- Root Cause:
+  - 前一轮修复只补了 `signal_type=hard`，没有修 `parallel_transcription.py` 内部“先把 `as_completed(...)` 结果整批收齐，再统一回到主线程发进度”的实现；真正的 hard 发送时点仍然绑在“整批结束”，不是“单段结束”。
+  - transcribe 单段结果此前没有接入 `RuntimeRecoveryStore.commit_chunk_payload(...)` / `batch_load_committed_chunk_payloads(...)` / SQLite `chunk_records`，阶段内没有 durable segment checkpoint，自然也就没有断电续跑的复用基础。
+- Fix:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 用 `_iter_parallel_batch_results(...)` 直接按 future 完成顺序逐条产出结果，去掉整批缓冲。
+    - 新增 `TranscriptionSegmentRuntimeHooks`，并在“恢复成功 / 转录成功 / 串行补偿失败”三个时点接入 runtime recovery。
+    - 当全部分段都能从 runtime recovery 恢复时，直接返回字幕，跳过整段音频提取和并行执行。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 为每个 transcribe segment 建立稳定 `chunk_id + input_fingerprint + scope_ref`，把单段结果写入 `transcribe` stage chunk。
+    - stage outputs manifest 记录 `segment_scope_refs` 与 `segment_runtime_stats`，让后续恢复决策能看见真实分段状态。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+    - 新增“future 完成即 yield”回归，锁定 hard 事件的触发时机。
+    - 新增“串行补偿失败会记录 runtime failure”回归，避免只记成功不记失败。
+  - `tests/test_transcribe_segment_runtime_recovery.py`
+    - 新增 SQLite 恢复回归，验证部分恢复与全量恢复都能命中已提交分段。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py services/python_grpc/src/media_engine/knowledge_engine/core/transcription.py services/python_grpc/src/server/grpc_service_impl.py tests/test_transcribe_segment_runtime_recovery.py`
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `pytest tests/test_transcribe_segment_runtime_recovery.py -q`
+- Prevention:
+  - 以后凡是并行单元级别的进度事件，必须在 future 完成的那个时点就产生；禁止先聚合成 batch，再补发“完成”事件。
+  - 以后凡是要求断电续跑的阶段，durable commit 粒度必须与并行/重试粒度一致，不能只在阶段尾部落最终产物。
+  - 以后修 watchdog 问题，必须同时核对两条链：
+    - `signal_type` 是否正确
+    - 事件触发时机是否正确
+
+## 2026-03-16 transcribe chunk 与 stage1 llm-call 同时双写文件，导致恢复真源不单一
+- Symptom:
+  - transcribe 分段已经能从 SQLite 恢复，但写入时仍会生成 chunk JSON 文件，真源语义仍然摇摆在“文件”与“SQLite”之间。
+  - stage1 的 llm-call 每次开始/成功/失败都会额外写 request/manifest/part/commit/error 多个 JSON 文件，重复写入明显，恢复时虽然优先命中 SQLite，落盘路径仍然以文件为主。
+- Root Cause:
+  - `RuntimeRecoveryStore` 对 chunk 与 llm attempt 默认采用“文件真源 + SQLite 镜像”策略，恢复链比写入链先进了一步，但写入链没有一起收口。
+  - `RuntimeRecoveryStore` 每次构造都会各自创建一个 `RuntimeRecoverySqliteIndex`，同进程多个 store 之间无法共享同一套 SQLite 连接。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - 新增按 `db_path` 共享的 `RuntimeRecoverySqliteIndex.shared(...)`，把进程内连接复用收敛到 SQLite index 层。
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - chunk 路径新增 `record_chunk_state(...)`，让 `PLANNED/EXECUTING` 也能直接进 SQLite。
+    - 当 metadata 指定 `storage_backend=sqlite` 时：
+      - transcribe chunk 不再写 `result.json/chunk_state.json/commit.json/error.json`
+      - llm attempt 不再写 `request.json/manifest.json/part_*.json/commit.json/error.json`
+    - `RuntimeRecoveryStore` 改为复用共享 SQLite index，而不是每次新建。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - transcribe segment 明确标记 `storage_backend=sqlite`，并补上 `PLANNED/EXECUTING` 状态写入。
+  - `services/python_grpc/src/common/utils/runtime_llm_context.py`
+    - 新增 `storage_backend` 参数，并由 stage1 选择 `sqlite` 真源。
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - stage1 激活 runtime llm context 时显式开启 `storage_backend=sqlite`。
+- Verification:
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py tests/test_transcribe_segment_runtime_recovery.py tests/test_runtime_llm_context.py -q`
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_sqlite.py services/python_grpc/src/common/utils/runtime_recovery_store.py services/python_grpc/src/common/utils/runtime_llm_context.py services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py services/python_grpc/src/transcript_pipeline/graph.py services/python_grpc/src/server/grpc_service_impl.py tests/test_transcribe_segment_runtime_recovery.py tests/test_runtime_llm_context.py`
+  - stage1 SQLite 真源场景还补做了一次仓库内手工验证脚本，确认：
+    - 首次调用会写入 `llm_records/llm_record_content`
+    - 二次调用直接恢复
+    - `stage1` 目录下不再生成 `request/manifest/commit/part` JSON 文件
+- Prevention:
+  - 以后凡是声明为“SQLite 真源”的恢复链，写入链必须同步去掉对应的 JSON 真源，禁止继续保留隐式双写主从。
+  - 以后新增 runtime store 时，默认复用按 `db_path` 共享的 SQLite index，避免同进程重复持有连接。
+  - 以后做热/冷数据优化时，优先沿用 `*_records` 与 `*_content` 的表拆分，而不是再额外复制一套状态/结果模型。
+
+## 2026-03-18 并行转录在 OpenBLAS 直接打崩子进程时没有触发自动降并发
+- Symptom:
+  - CPU 并行转录日志已经给出 `OpenBLAS error: Memory allocation still failed after 10 retries, giving up.`，随后 8 个分段统一报错 `A process in the process pool was terminated abruptly while the future was running or pending.`。
+  - 任务虽然命中了“资源不足导致子进程崩溃”这一类故障，但没有像既有 `mkl_malloc/OOM` 场景那样自动降 `worker` 重试，而是整批分段一起失败。
+  - 这会把原本只需要把并发从 `2 -> 1` 就可能继续跑完的场景，扩大成整段转录失败，并继续挤压同机 Java 进程可用内存。
+- Root Cause:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py` 之前的自动降并发逻辑，只覆盖“子进程还能返回结构化失败结果，且 `error` 文本里带有 `mkl_malloc/failed to allocate memory`”这一层。
+  - 这次断点发生在更底层：OpenBLAS 在子进程里直接申请内存失败，进程池还没来得及回传结构化 `error`，主进程只能看到通用的 `BrokenProcessPool / terminated abruptly` 文本，因此没有被归类为可降级重试。
+  - 同一文件里还有两个次级缺口会放大这类问题：`submit()` 阶段异常此前不会被归一成失败结果，`MemoryError()` 被 `str(e)` 后可能变成空串，都会让资源耗尽识别继续漏判。
+  - 与 2026-03-14 那条“转录遇到 `mkl_malloc/OOM` 自动降 worker 重试”相比，旧修复覆盖的是“错误已回到 `parallel_transcription` 聚合层”的情况；这次漏掉的是“子进程先死，聚合层只剩通用进程池崩溃信号”的情况。
+  - 同时，transcribe worker 侧此前没有像 CV worker 那样在导入数值库前先锁定 `OMP/MKL/OPENBLAS/NUMEXPR` 线程，spawn 子进程在加载 `faster_whisper` 依赖树时更容易触发底层线程与内存放大。
+- Fix:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 在导入 `faster_whisper` 之前，先用 `setdefault(...)` 锁定 `OMP_NUM_THREADS=1`、`MKL_NUM_THREADS=1`、`OPENBLAS_NUM_THREADS=1`、`NUMEXPR_NUM_THREADS=1`、`VECLIB_MAXIMUM_THREADS=1`，让 spawn 出来的 transcribe worker 在数值库初始化阶段就避免嵌套线程放大。
+    - 新增统一错误文本格式化，避免 `MemoryError()` 这类空消息异常被提前字符串化后丢失资源耗尽语义。
+    - 资源耗尽关键字补齐 `memory allocation still failed`，覆盖 OpenBLAS 的原生日志表述。
+    - 新增对 `BrokenProcessPool` / `process pool was terminated abruptly` / `terminated abruptly while the future was running or pending` 的识别，把“进程池异常终止”纳入自动降并发重试链，而不是直接按普通失败落入后续补偿路径。
+    - 把进程池创建与 `submit()` 阶段异常也统一折叠成失败结果，确保它们能继续进入同一条自动降并发决策链。
+    - 降级日志里显式标记“疑似资源不足或底层线程库崩溃”，方便后续排障区分“业务异常”与“运行时资源异常”。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+    - 新增回归测试，锁定“第一轮出现 `terminated abruptly`，必须按 `workers=2 -> 1` 自动重试，并在重试成功前不得提前掉进串行补偿”。
+    - 新增单测，锁定“空消息 `MemoryError` 仍要保留资源耗尽语义”和“`submit()` 阶段异常也必须被折叠为可回退失败结果”。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是“native 库先把 worker 打死，主进程只看到进程池崩溃”的故障，必须在聚合层把 `BrokenProcessPool` 这类通用信号也映射回资源/运行时异常语义，不能只靠业务层结构化 `error`。
+  - 以后新增 Python 多进程 worker 时，必须像 CV worker 一样，把 BLAS/OpenMP 线程限制放在重型数值库导入之前，禁止把线程治理留到库已经初始化之后。
+  - 以后修并发转录的资源问题，至少保留两类回归：
+    - 返回结构化 `OOM` 文本时的降并发重试
+    - 只返回 `process pool terminated abruptly` 时的降并发重试
+  - 以后凡是把异常压成字符串的聚合层代码，都必须保留“空消息异常的类型信息”，否则 `MemoryError` 这类关键语义会在日志看起来像空值，分类器也会被误导。

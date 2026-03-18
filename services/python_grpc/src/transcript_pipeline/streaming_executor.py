@@ -7,7 +7,9 @@ from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple
 
-from .checkpoint import STEP_INDEX_MAP, SQLiteCheckpointer
+from services.python_grpc.src.common.utils.stage_artifact_paths import stage1_sentence_timestamps_path
+
+from .checkpoint import STEP_INDEX_MAP
 from .nodes import phase2_preprocessing as pp
 from .nodes import step1_node
 from .state import PipelineState
@@ -27,6 +29,7 @@ def should_use_streaming_stage1_executor(
     resume: bool,
     resume_state: Optional[Dict[str, Any]],
     resume_from_step: Optional[str],
+    resume_plan: Optional[Dict[str, Any]],
     enable_checkpoints: bool,
 ) -> Tuple[bool, str]:
     if not _read_bool_env("TRANSCRIPT_STAGE1_STREAMING_ENABLED", True):
@@ -41,6 +44,8 @@ def should_use_streaming_stage1_executor(
         return False, "resume_state is provided"
     if str(resume_from_step or "").strip():
         return False, "resume_from_step is provided"
+    if resume_plan:
+        return False, "resume_plan is provided"
     step3_overlap = max(0, min(9, int(pp._read_int_env("TRANSCRIPT_STEP3_WINDOW_OVERLAP", 0))))
     if step3_overlap != 0:
         return False, "TRANSCRIPT_STEP3_WINDOW_OVERLAP must be 0"
@@ -147,21 +152,16 @@ class StreamingStage1Graph:
     def __init__(
         self,
         *,
-        sqlite_checkpointer: Optional[SQLiteCheckpointer] = None,
         output_config: Optional[Any] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         max_step: int = 6,
     ) -> None:
-        self._sqlite_checkpointer = sqlite_checkpointer
         self._output_config = output_config
         self._progress_callback = progress_callback
         self._max_step = int(max_step or 6)
 
     def _persist_step(self, step_name: str, state: Dict[str, Any]) -> None:
         step_index = STEP_INDEX_MAP.get(step_name, 0)
-        if self._sqlite_checkpointer:
-            thread_id = str(state.get("_thread_id", "default"))
-            self._sqlite_checkpointer.save_checkpoint(thread_id, step_name, step_index, state)
         if self._output_config:
             self._output_config.save_step_output(step_name, state)
         if self._progress_callback:
@@ -187,14 +187,33 @@ class StreamingStage1Graph:
                     error,
                 )
 
+    def _emit_runtime_event(self, event: Dict[str, Any]) -> None:
+        if self._progress_callback is None:
+            return
+        try:
+            self._progress_callback(dict(event or {}))
+        except Exception as error:
+            logging.getLogger("stage1_pipeline").warning(
+                "Stage1 streaming runtime event callback failed: %s",
+                error,
+            )
+
     async def ainvoke(self, initial_state: Dict[str, Any], _config: Dict[str, Any]) -> Dict[str, Any]:
         return await run_stage1_streaming_executor(
             dict(initial_state),
             on_step_completed=self._persist_step,
+            on_runtime_event=self._emit_runtime_event,
         )
 
 
-async def _save_step4_sentence_timestamps(output_dir: str, translated_sentences: List[Dict[str, Any]]) -> None:
+async def _save_step4_sentence_timestamps(
+    output_dir: str,
+    translated_sentences: List[Dict[str, Any]],
+    *,
+    persist_artifacts: bool = True,
+) -> None:
+    if not persist_artifacts:
+        return
     storage = pp.LocalStorage(str(Path(output_dir) / "local_storage"))
     timestamps = {
         str(item.get("sentence_id", "")): {
@@ -205,9 +224,13 @@ async def _save_step4_sentence_timestamps(output_dir: str, translated_sentences:
         if isinstance(item, dict) and str(item.get("sentence_id", "")).strip()
     }
     storage.save_sentence_timestamps(timestamps)
-    intermediates_dir = Path(output_dir) / "intermediates"
-    intermediates_dir.mkdir(parents=True, exist_ok=True)
-    with open(intermediates_dir / "sentence_timestamps.json", "w", encoding="utf-8") as output_stream:
+    canonical_path = stage1_sentence_timestamps_path(output_dir)
+    canonical_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(canonical_path, "w", encoding="utf-8") as output_stream:
+        json.dump(timestamps, output_stream, ensure_ascii=False, indent=2)
+    legacy_path = Path(output_dir) / "intermediates" / "sentence_timestamps.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(legacy_path, "w", encoding="utf-8") as output_stream:
         json.dump(timestamps, output_stream, ensure_ascii=False, indent=2)
 
 
@@ -222,6 +245,50 @@ def _persist_streaming_step(
     if on_step_completed is not None:
         on_step_completed(step_name, merged)
     return merged
+
+
+def _build_stage1_wave_id(wave_index: int) -> str:
+    return f"wave_{max(1, int(wave_index) + 1):04d}"
+
+
+def _build_stage1_substage_event(
+    *,
+    step_name: str,
+    wave_id: str,
+    event_name: str,
+    status: str,
+    max_step: int,
+    work_units: Optional[List[Dict[str, Any]]] = None,
+    result_summary: Optional[Dict[str, Any]] = None,
+    fallback_used: bool = False,
+    error: str = "",
+) -> Dict[str, Any]:
+    step_index = int(STEP_INDEX_MAP.get(step_name, 0) or 0)
+    safe_max_step = max(1, int(max_step or 1))
+    completed = max(0, min(max(0, step_index - 1), safe_max_step))
+    pending = max(0, safe_max_step - completed)
+    payload: Dict[str, Any] = {
+        "event": str(event_name or "").strip() or "substage_running",
+        "stage": "stage1",
+        "scope_type": "substage",
+        "substage_name": step_name,
+        "wave_id": wave_id,
+        "step_name": step_name,
+        "stage_step": step_name,
+        "checkpoint": f"{step_name}.{wave_id}",
+        "status": str(status or "").strip() or "running",
+        "completed": completed,
+        "pending": pending,
+        "timestamp_ms": int(time.time() * 1000),
+        "fallback_used": bool(fallback_used),
+    }
+    if isinstance(work_units, list) and work_units:
+        payload["work_units"] = work_units
+    if isinstance(result_summary, dict) and result_summary:
+        payload["result_summary"] = result_summary
+    if str(error or "").strip():
+        payload["error"] = str(error or "").strip()
+    return payload
 
 
 def _finalize_step56_output(
@@ -316,11 +383,88 @@ async def run_stage1_streaming_executor(
     initial_state: Dict[str, Any],
     *,
     on_step_completed: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    on_runtime_event: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     state = dict(initial_state)
+    max_step = max(1, int(state.get("max_step", 6) or 6))
+    wave_counters: Dict[str, int] = {}
 
-    step1_result = await step1_node(state)
+    def _next_wave_id(step_name: str) -> str:
+        current_value = int(wave_counters.get(step_name, 0) or 0)
+        wave_counters[step_name] = current_value + 1
+        return _build_stage1_wave_id(current_value)
+
+    def _emit_substage_event(
+        *,
+        step_name: str,
+        wave_id: str,
+        event_name: str,
+        status: str,
+        work_units: Optional[List[Dict[str, Any]]] = None,
+        result_summary: Optional[Dict[str, Any]] = None,
+        fallback_used: bool = False,
+        error: str = "",
+    ) -> None:
+        if on_runtime_event is None:
+            return
+        on_runtime_event(
+            _build_stage1_substage_event(
+                step_name=step_name,
+                wave_id=wave_id,
+                event_name=event_name,
+                status=status,
+                max_step=max_step,
+                work_units=work_units,
+                result_summary=result_summary,
+                fallback_used=fallback_used,
+                error=error,
+            )
+        )
+
+    step1_wave_id = _next_wave_id("step1_validate")
+    step1_work_units = [
+        {
+            "scope_type": "chunk",
+            "chunk_id": f"stage1.step1_validate.{step1_wave_id}.input_validate",
+            "kind": "input_validate",
+            "unit_ids": ["main"],
+        }
+    ]
+    _emit_substage_event(
+        step_name="step1_validate",
+        wave_id=step1_wave_id,
+        event_name="substage_planned",
+        status="planned",
+        work_units=step1_work_units,
+    )
+    _emit_substage_event(
+        step_name="step1_validate",
+        wave_id=step1_wave_id,
+        event_name="substage_running",
+        status="running",
+        work_units=step1_work_units,
+    )
+    try:
+        step1_result = await step1_node(state)
+    except Exception as error:
+        _emit_substage_event(
+            step_name="step1_validate",
+            wave_id=step1_wave_id,
+            event_name="substage_failed",
+            status="failed",
+            work_units=step1_work_units,
+            error=str(error),
+        )
+        raise
     state = _merge_step_result(state, step1_result)
+    _emit_substage_event(
+        step_name="step1_validate",
+        wave_id=step1_wave_id,
+        event_name="substage_completed",
+        status="completed",
+        work_units=step1_work_units,
+        result_summary={"is_valid": bool(state.get("is_valid", False))},
+    )
     if on_step_completed:
         on_step_completed("step1_validate", state)
     if not state.get("is_valid", False):
@@ -402,7 +546,27 @@ async def run_stage1_streaming_executor(
                 ]
             )
             next_step56_submit_index += len(batch)
-            await step56_runner.submit(lambda batch=batch: _process_step56_window(batch))
+            wave_id = _next_wave_id(pp.STEP5_6_NODE_NAME)
+            sentence_ids = [
+                str(item.get("sentence_id", "")).strip()
+                for item in batch
+                if isinstance(item, dict) and str(item.get("sentence_id", "")).strip()
+            ]
+            work_units = [{"scope_type": "llm_call", "unit_ids": sentence_ids, "window_size": len(batch)}]
+            _emit_substage_event(
+                step_name=pp.STEP5_6_NODE_NAME,
+                wave_id=wave_id,
+                event_name="substage_planned",
+                status="planned",
+                work_units=work_units,
+            )
+            await step56_runner.submit(
+                lambda batch=batch, wave_id=wave_id, work_units=work_units: _run_step56_wave(
+                    batch=batch,
+                    wave_id=wave_id,
+                    work_units=work_units,
+                )
+            )
         await step56_runner.drain_available(_on_step56_result)
 
     async def _process_step2_batch(
@@ -631,6 +795,157 @@ async def run_stage1_streaming_executor(
             fallback_paragraphs = pp._build_fallback_paragraphs_impl(fallback_ids, sentence_text_map)
             return fallback_ids, fallback_paragraphs, 0, error, {"window_fallback_used": 1}
 
+    async def _run_step2_wave(
+        *,
+        batch: List[Dict[str, Any]],
+        wave_id: str,
+        work_units: List[Dict[str, Any]],
+    ):
+        _emit_substage_event(
+            step_name="step2_correction",
+            wave_id=wave_id,
+            event_name="substage_running",
+            status="running",
+            work_units=work_units,
+        )
+        try:
+            result = await _process_step2_batch(batch)
+        except Exception as error:
+            _emit_substage_event(
+                step_name="step2_correction",
+                wave_id=wave_id,
+                event_name="substage_failed",
+                status="failed",
+                work_units=work_units,
+                error=str(error),
+            )
+            raise
+        batch_corrected, _batch_corrections, _batch_cleanup_removals, _tokens, fallback_error, _batch_metrics = result
+        _emit_substage_event(
+            step_name="step2_correction",
+            wave_id=wave_id,
+            event_name="substage_completed",
+            status="completed",
+            work_units=work_units,
+            result_summary={"corrected_count": len(list(batch_corrected or []))},
+            fallback_used=fallback_error is not None,
+        )
+        return result
+
+    async def _run_step3_wave(
+        *,
+        batch: List[Dict[str, Any]],
+        wave_id: str,
+        work_units: List[Dict[str, Any]],
+    ):
+        _emit_substage_event(
+            step_name="step3_merge",
+            wave_id=wave_id,
+            event_name="substage_running",
+            status="running",
+            work_units=work_units,
+        )
+        try:
+            result = await _process_step3_window(batch)
+        except Exception as error:
+            _emit_substage_event(
+                step_name="step3_merge",
+                wave_id=wave_id,
+                event_name="substage_failed",
+                status="failed",
+                work_units=work_units,
+                error=str(error),
+            )
+            raise
+        merged_batch, _tokens, fallback_error, _parse_metrics = result
+        _emit_substage_event(
+            step_name="step3_merge",
+            wave_id=wave_id,
+            event_name="substage_completed",
+            status="completed",
+            work_units=work_units,
+            result_summary={"merged_sentence_count": len(list(merged_batch or []))},
+            fallback_used=fallback_error is not None,
+        )
+        return result
+
+    async def _run_step35_wave(
+        *,
+        batch: List[Dict[str, Any]],
+        wave_id: str,
+        work_units: List[Dict[str, Any]],
+    ):
+        _emit_substage_event(
+            step_name="step3_5_translate",
+            wave_id=wave_id,
+            event_name="substage_running",
+            status="running",
+            work_units=work_units,
+        )
+        try:
+            result = await _process_step35_window(batch)
+        except Exception as error:
+            _emit_substage_event(
+                step_name="step3_5_translate",
+                wave_id=wave_id,
+                event_name="substage_failed",
+                status="failed",
+                work_units=work_units,
+                error=str(error),
+            )
+            raise
+        translated_batch, _tokens, fallback_error, _parse_metrics = result
+        _emit_substage_event(
+            step_name="step3_5_translate",
+            wave_id=wave_id,
+            event_name="substage_completed",
+            status="completed",
+            work_units=work_units,
+            result_summary={"translated_count": len(list(translated_batch or []))},
+            fallback_used=fallback_error is not None,
+        )
+        return result
+
+    async def _run_step56_wave(
+        *,
+        batch: List[Dict[str, Any]],
+        wave_id: str,
+        work_units: List[Dict[str, Any]],
+    ):
+        _emit_substage_event(
+            step_name=pp.STEP5_6_NODE_NAME,
+            wave_id=wave_id,
+            event_name="substage_running",
+            status="running",
+            work_units=work_units,
+        )
+        try:
+            result = await _process_step56_window(batch)
+        except Exception as error:
+            _emit_substage_event(
+                step_name=pp.STEP5_6_NODE_NAME,
+                wave_id=wave_id,
+                event_name="substage_failed",
+                status="failed",
+                work_units=work_units,
+                error=str(error),
+            )
+            raise
+        keep_ids, paragraphs, _tokens, fallback_error, _parse_metrics = result
+        _emit_substage_event(
+            step_name=pp.STEP5_6_NODE_NAME,
+            wave_id=wave_id,
+            event_name="substage_completed",
+            status="completed",
+            work_units=work_units,
+            result_summary={
+                "kept_sentence_count": len(list(keep_ids or [])),
+                "paragraph_count": len(list(paragraphs or [])),
+            },
+            fallback_used=fallback_error is not None,
+        )
+        return result
+
     async def _on_step56_result(_index: int, result: Any) -> None:
         nonlocal step56_tokens
         keep_ids, paragraphs, tokens, _error, parse_metrics = result
@@ -675,7 +990,27 @@ async def run_stage1_streaming_executor(
                 ]
             )
             next_step35_submit_index += len(batch)
-            await step35_runner.submit(lambda batch=batch: _process_step35_window(batch))
+            wave_id = _next_wave_id("step3_5_translate")
+            sentence_ids = [
+                str(item.get("sentence_id", "")).strip()
+                for item in batch
+                if isinstance(item, dict) and str(item.get("sentence_id", "")).strip()
+            ]
+            work_units = [{"scope_type": "llm_call", "unit_ids": sentence_ids, "window_size": len(batch)}]
+            _emit_substage_event(
+                step_name="step3_5_translate",
+                wave_id=wave_id,
+                event_name="substage_planned",
+                status="planned",
+                work_units=work_units,
+            )
+            await step35_runner.submit(
+                lambda batch=batch, wave_id=wave_id, work_units=work_units: _run_step35_wave(
+                    batch=batch,
+                    wave_id=wave_id,
+                    work_units=work_units,
+                )
+            )
         await _flush_translated_ready()
         await step35_runner.drain_available(_on_step35_result)
 
@@ -698,7 +1033,27 @@ async def run_stage1_streaming_executor(
                 ]
             )
             next_step3_submit_start += len(batch)
-            await step3_runner.submit(lambda batch=batch: _process_step3_window(batch))
+            wave_id = _next_wave_id("step3_merge")
+            subtitle_ids = [
+                str(item.get("subtitle_id", "")).strip()
+                for item in batch
+                if isinstance(item, dict) and str(item.get("subtitle_id", "")).strip()
+            ]
+            work_units = [{"scope_type": "llm_call", "unit_ids": subtitle_ids, "window_size": len(batch)}]
+            _emit_substage_event(
+                step_name="step3_merge",
+                wave_id=wave_id,
+                event_name="substage_planned",
+                status="planned",
+                work_units=work_units,
+            )
+            await step3_runner.submit(
+                lambda batch=batch, wave_id=wave_id, work_units=work_units: _run_step3_wave(
+                    batch=batch,
+                    wave_id=wave_id,
+                    work_units=work_units,
+                )
+            )
         await step3_runner.drain_available(_on_step3_result)
 
     step2_runner = _OrderedTaskRunner(pp._resolve_step_max_inflight("STEP2"))
@@ -709,7 +1064,27 @@ async def run_stage1_streaming_executor(
     batch_size = max(1, pp._read_int_env("TRANSCRIPT_STEP2_BATCH_SIZE", 20))
     for start in range(0, len(subtitles), batch_size):
         batch = list(subtitles[start : start + batch_size])
-        await step2_runner.submit(lambda batch=batch: _process_step2_batch(batch))
+        wave_id = _next_wave_id("step2_correction")
+        subtitle_ids = [
+            str(item.get("subtitle_id", "")).strip()
+            for item in batch
+            if isinstance(item, dict) and str(item.get("subtitle_id", "")).strip()
+        ]
+        work_units = [{"scope_type": "llm_call", "unit_ids": subtitle_ids, "window_size": len(batch)}]
+        _emit_substage_event(
+            step_name="step2_correction",
+            wave_id=wave_id,
+            event_name="substage_planned",
+            status="planned",
+            work_units=work_units,
+        )
+        await step2_runner.submit(
+            lambda batch=batch, wave_id=wave_id, work_units=work_units: _run_step2_wave(
+                batch=batch,
+                wave_id=wave_id,
+                work_units=work_units,
+            )
+        )
     await step2_runner.finish(_on_step2_result)
 
     subtitle_timestamps = {
@@ -743,7 +1118,27 @@ async def run_stage1_streaming_executor(
     if len(corrected_subtitles) > next_step3_submit_start:
         batch = list(corrected_subtitles[next_step3_submit_start:])
         next_step3_submit_start += len(batch)
-        await step3_runner.submit(lambda batch=batch: _process_step3_window(batch))
+        wave_id = _next_wave_id("step3_merge")
+        subtitle_ids = [
+            str(item.get("subtitle_id", "")).strip()
+            for item in batch
+            if isinstance(item, dict) and str(item.get("subtitle_id", "")).strip()
+        ]
+        work_units = [{"scope_type": "llm_call", "unit_ids": subtitle_ids, "window_size": len(batch)}]
+        _emit_substage_event(
+            step_name="step3_merge",
+            wave_id=wave_id,
+            event_name="substage_planned",
+            status="planned",
+            work_units=work_units,
+        )
+        await step3_runner.submit(
+            lambda batch=batch, wave_id=wave_id, work_units=work_units: _run_step3_wave(
+                batch=batch,
+                wave_id=wave_id,
+                work_units=work_units,
+            )
+        )
     await step3_runner.finish(_on_step3_result)
 
     step3_output = {
@@ -761,7 +1156,27 @@ async def run_stage1_streaming_executor(
     if len(translate_candidates) > next_step35_submit_index:
         batch = list(translate_candidates[next_step35_submit_index:])
         next_step35_submit_index += len(batch)
-        await step35_runner.submit(lambda batch=batch: _process_step35_window(batch))
+        wave_id = _next_wave_id("step3_5_translate")
+        sentence_ids = [
+            str(item.get("sentence_id", "")).strip()
+            for item in batch
+            if isinstance(item, dict) and str(item.get("sentence_id", "")).strip()
+        ]
+        work_units = [{"scope_type": "llm_call", "unit_ids": sentence_ids, "window_size": len(batch)}]
+        _emit_substage_event(
+            step_name="step3_5_translate",
+            wave_id=wave_id,
+            event_name="substage_planned",
+            status="planned",
+            work_units=work_units,
+        )
+        await step35_runner.submit(
+            lambda batch=batch, wave_id=wave_id, work_units=work_units: _run_step35_wave(
+                batch=batch,
+                wave_id=wave_id,
+                work_units=work_units,
+            )
+        )
     await step35_runner.finish(_on_step35_result)
 
     step35_output = {
@@ -778,17 +1193,143 @@ async def run_stage1_streaming_executor(
 
     if not step2_step4_merged_done:
         state[pp.STEP2_STEP4_MERGED_STATE_FLAG] = False
-        step4_result = await pp.step4_node(state)
+        step4_wave_id = _next_wave_id("step4_clean_local")
+        step4_work_units = [
+            {
+                "scope_type": "chunk",
+                "chunk_id": f"stage1.step4_clean_local.{step4_wave_id}.step4_local_cleanup",
+                "kind": "step4_local_cleanup",
+                "unit_ids": ["main"],
+            }
+        ]
+        _emit_substage_event(
+            step_name="step4_clean_local",
+            wave_id=step4_wave_id,
+            event_name="substage_planned",
+            status="planned",
+            work_units=step4_work_units,
+        )
+        _emit_substage_event(
+            step_name="step4_clean_local",
+            wave_id=step4_wave_id,
+            event_name="substage_running",
+            status="running",
+            work_units=step4_work_units,
+        )
+        try:
+            step4_result = await pp.step4_node(state)
+        except Exception as error:
+            _emit_substage_event(
+                step_name="step4_clean_local",
+                wave_id=step4_wave_id,
+                event_name="substage_failed",
+                status="failed",
+                work_units=step4_work_units,
+                error=str(error),
+            )
+            raise
         state = _merge_step_result(state, step4_result)
+        _emit_substage_event(
+            step_name="step4_clean_local",
+            wave_id=step4_wave_id,
+            event_name="substage_completed",
+            status="completed",
+            work_units=step4_work_units,
+            result_summary={"cleaned_count": len(list(step4_result.get("cleaned_sentences", []) or []))},
+        )
         if on_step_completed:
             on_step_completed("step4_clean_local", state)
-        step56_result = await pp.step5_6_node(state)
+        step56_wave_id = _next_wave_id(pp.STEP5_6_NODE_NAME)
+        step56_work_units = [
+            {
+                "scope_type": "chunk",
+                "chunk_id": f"stage1.{pp.STEP5_6_NODE_NAME}.{step56_wave_id}.step56_local_merge",
+                "kind": "step56_local_merge",
+                "unit_ids": ["main"],
+            }
+        ]
+        _emit_substage_event(
+            step_name=pp.STEP5_6_NODE_NAME,
+            wave_id=step56_wave_id,
+            event_name="substage_planned",
+            status="planned",
+            work_units=step56_work_units,
+        )
+        _emit_substage_event(
+            step_name=pp.STEP5_6_NODE_NAME,
+            wave_id=step56_wave_id,
+            event_name="substage_running",
+            status="running",
+            work_units=step56_work_units,
+        )
+        try:
+            step56_result = await pp.step5_6_node(state)
+        except Exception as error:
+            _emit_substage_event(
+                step_name=pp.STEP5_6_NODE_NAME,
+                wave_id=step56_wave_id,
+                event_name="substage_failed",
+                status="failed",
+                work_units=step56_work_units,
+                error=str(error),
+            )
+            raise
         state = _merge_step_result(state, step56_result)
+        _emit_substage_event(
+            step_name=pp.STEP5_6_NODE_NAME,
+            wave_id=step56_wave_id,
+            event_name="substage_completed",
+            status="completed",
+            work_units=step56_work_units,
+            result_summary={"paragraph_count": len(list(step56_result.get("pure_text_script", []) or []))},
+        )
         if on_step_completed:
             on_step_completed(pp.STEP5_6_NODE_NAME, state)
         return state
 
-    await _save_step4_sentence_timestamps(output_dir, translated_sentences)
+    persist_stage1_artifacts = not bool(state.get("_disable_stage1_artifact_persistence", False))
+    step4_wave_id = _next_wave_id("step4_clean_local")
+    step4_work_units = [
+        {
+            "scope_type": "chunk",
+            "chunk_id": f"stage1.step4_clean_local.{step4_wave_id}.step4_local_cleanup",
+            "kind": "step4_local_cleanup",
+            "unit_ids": ["main"],
+        }
+    ]
+    _emit_substage_event(
+        step_name="step4_clean_local",
+        wave_id=step4_wave_id,
+        event_name="substage_planned",
+        status="planned",
+        work_units=step4_work_units,
+    )
+    _emit_substage_event(
+        step_name="step4_clean_local",
+        wave_id=step4_wave_id,
+        event_name="substage_running",
+        status="running",
+        work_units=step4_work_units,
+    )
+    try:
+        await _save_step4_sentence_timestamps(
+            output_dir,
+            translated_sentences,
+            persist_artifacts=persist_stage1_artifacts,
+        )
+    except TypeError as error:
+        if "persist_artifacts" not in str(error):
+            raise
+        if persist_stage1_artifacts:
+            await _save_step4_sentence_timestamps(output_dir, translated_sentences)
+    _emit_substage_event(
+        step_name="step4_clean_local",
+        wave_id=step4_wave_id,
+        event_name="substage_completed",
+        status="completed",
+        work_units=step4_work_units,
+        result_summary={"cleaned_count": len(cleaned_passthrough_sentences)},
+    )
     step4_output = {
         "cleaned_sentences": cleaned_passthrough_sentences,
         "current_step": "step4_clean_local",
@@ -804,7 +1345,27 @@ async def run_stage1_streaming_executor(
     if len(cleaned_passthrough_sentences) > next_step56_submit_index:
         batch = list(cleaned_passthrough_sentences[next_step56_submit_index:])
         next_step56_submit_index += len(batch)
-        await step56_runner.submit(lambda batch=batch: _process_step56_window(batch))
+        wave_id = _next_wave_id(pp.STEP5_6_NODE_NAME)
+        sentence_ids = [
+            str(item.get("sentence_id", "")).strip()
+            for item in batch
+            if isinstance(item, dict) and str(item.get("sentence_id", "")).strip()
+        ]
+        work_units = [{"scope_type": "llm_call", "unit_ids": sentence_ids, "window_size": len(batch)}]
+        _emit_substage_event(
+            step_name=pp.STEP5_6_NODE_NAME,
+            wave_id=wave_id,
+            event_name="substage_planned",
+            status="planned",
+            work_units=work_units,
+        )
+        await step56_runner.submit(
+            lambda batch=batch, wave_id=wave_id, work_units=work_units: _run_step56_wave(
+                batch=batch,
+                wave_id=wave_id,
+                work_units=work_units,
+            )
+        )
     await step56_runner.finish(_on_step56_result)
 
     ordered_all_pairs = pp._sentence_id_and_text_pairs_impl(cleaned_passthrough_sentences)

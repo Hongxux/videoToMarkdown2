@@ -143,3 +143,40 @@ def test_deepseek_audit_writes_token_cost_summary(tmp_path):
     assert payload["records"][0]["token_usage"]["prompt_cache_hit_tokens"] == 400
     assert payload["records"][0]["cost_estimate"]["status"] == "ok"
     assert payload["records"][0]["cost_estimate"]["currency"] == "CNY"
+
+
+def test_deepseek_audit_uses_actual_qwen_model_for_fallback_pricing(tmp_path):
+    ctx = build_phase2b_audit_context(
+        output_dir=str(tmp_path),
+        task_id="task-qwen-fallback",
+        enabled=True,
+        only_img_desc_augment=False,
+    )
+    token = push_deepseek_audit_context(ctx)
+    try:
+        append_deepseek_call_record(
+            prompt="img description augment request",
+            system_message="You are an image description augmentation assistant.",
+            model="deepseek-chat",
+            temperature=0.2,
+            need_logprobs=False,
+            output_text="fallback output",
+            metadata={
+                "model": "qwen-plus",
+                "prompt_tokens": 800,
+                "completion_tokens": 200,
+                "total_tokens": 1000,
+            },
+        )
+    finally:
+        pop_deepseek_audit_context(token)
+
+    audit_path = tmp_path / "intermediates" / "phase2b_deepseek_call_audit.json"
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    record = payload["records"][0]
+
+    assert record["input"]["model"] == "qwen-plus"
+    assert record["input"]["requested_model"] == "deepseek-chat"
+    assert record["cost_estimate"]["resolved_model_key"] == "qwen-plus"
+    assert record["cost_estimate"]["currency"] == "CNY"
+    assert record["cost_estimate"]["total_cost"] > 0

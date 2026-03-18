@@ -19,7 +19,6 @@ import os
 import gc
 import json
 import time
-import hashlib
 from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +26,7 @@ from collections import OrderedDict
 from multiprocessing import shared_memory
 import threading
 from contextlib import contextmanager
+from services.python_grpc.src.common.utils.hash_policy import fast_digest_bytes
 from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
 from services.python_grpc.src.content_pipeline.infra.runtime.resource_utils import ResourceOrchestrator
 from services.python_grpc.src.content_pipeline.infra.runtime.dynamic_decision_engine import DynamicDecisionEngine, GlobalAnalysisCache
@@ -1943,7 +1943,7 @@ class VisualFeatureExtractor:
             frame = frames[idx]
             
             # 计算 Hash 用于去重分析
-            h = hashlib.md5(frame[::2, ::2].tobytes()).hexdigest()
+            h = fast_digest_bytes(frame[::2, ::2].tobytes())
             all_sampled_hashes.append(h)
             
             if h not in self._analysis_cache:

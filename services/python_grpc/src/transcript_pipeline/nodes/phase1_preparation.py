@@ -56,6 +56,53 @@ TOPIC_SAMPLE_EXTRA_PER_INTERVAL = 5
 TOPIC_SAMPLE_MAX_CHARS = 6000
 
 
+def _build_stage1_runtime_call_kwargs(
+    *,
+    stage_step: str,
+    unit_id: str,
+    scope_variant: str = "",
+) -> Dict[str, Any]:
+    normalized_stage_step = str(stage_step or "").strip() or "stage1_unknown"
+    normalized_unit_id = str(unit_id or "").strip() or "unit_0001"
+    normalized_scope_variant = str(scope_variant or "").strip() or normalized_unit_id
+    return {
+        "__runtime_identity__": {
+            "step_name": normalized_stage_step,
+            "request_name": "complete_json",
+            "unit_id": normalized_unit_id,
+            "llm_call_id": f"{normalized_stage_step}.{normalized_unit_id}",
+        },
+        "__runtime_metadata__": {
+            "stage_step": normalized_stage_step.removeprefix("stage1_"),
+            "scope_variant": normalized_scope_variant,
+            "unit_id": normalized_unit_id,
+        },
+    }
+
+
+async def _complete_json_with_runtime_identity(
+    llm: Any,
+    prompt: str,
+    *,
+    system_prompt: str,
+    runtime_kwargs: Dict[str, Any],
+):
+    try:
+        return await llm.complete_json(
+            prompt,
+            system_prompt=system_prompt,
+            **runtime_kwargs,
+        )
+    except TypeError as error:
+        error_text = str(error)
+        if "__runtime_" not in error_text:
+            raise
+        return await llm.complete_json(
+            prompt,
+            system_prompt=system_prompt,
+        )
+
+
 def _read_int_env(name: str, default: int) -> int:
     """读取整数环境变量，异常时返回默认值。"""
     raw = os.getenv(name)
@@ -293,9 +340,15 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
             video_title=video_title or "(无)"
         )
         
-        result, response = await llm.complete_json(
+        result, response = await _complete_json_with_runtime_identity(
+            llm,
             prompt,
             system_prompt=TOPIC_INFERENCE_SYSTEM_PROMPT,
+            runtime_kwargs=_build_stage1_runtime_call_kwargs(
+                stage_step="stage1_step1_validate",
+                unit_id="topic_inference",
+                scope_variant="topic_inference",
+            ),
         )
         
         logger.log_llm_call(

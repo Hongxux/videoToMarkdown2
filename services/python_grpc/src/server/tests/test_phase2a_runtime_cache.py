@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 
 try:
     from services.python_grpc.src.server import grpc_service_impl as impl
+    from services.python_grpc.src.server.phase2a_runtime_repository import get_phase2a_repository_views
+    from services.python_grpc.src.server.stage1_runtime_repository import get_stage1_repository_views
 except Exception as import_error:
     pytest.skip(f"grpc_service_impl import unavailable: {import_error}", allow_module_level=True)
 
@@ -47,6 +49,33 @@ def test_phase2a_runtime_cache_roundtrip_returns_deepcopy(tmp_path):
     assert loaded_twice[0]["unit_id"] == "U001"
 
 
+def test_stage1_runtime_repository_roundtrip_returns_deepcopy(tmp_path):
+    servicer = _build_servicer_for_cache_tests()
+    output_dir = str(tmp_path / "task")
+    final_state = {
+        "corrected_subtitles": [{"subtitle_id": "S001", "text": "hello"}],
+        "pure_text_script": [{"paragraph_id": "P001", "text": "world"}],
+        "sentence_timestamps": {"S001": {"start_sec": 0.0, "end_sec": 1.0}},
+        "domain": "cs",
+        "main_topic": "sorting",
+    }
+
+    servicer._cache_stage1_runtime_outputs(output_dir=output_dir, final_state=final_state)
+
+    loaded_once = servicer._get_stage1_runtime_outputs(output_dir=output_dir)
+    assert isinstance(loaded_once, dict)
+    loaded_once_views = get_stage1_repository_views(loaded_once)
+    assert loaded_once_views["step2_subtitles"][0]["subtitle_id"] == "S001"
+
+    loaded_once_views["step2_subtitles"][0]["subtitle_id"] = "MUTATED"
+    loaded_twice = servicer._get_stage1_runtime_outputs(output_dir=output_dir)
+    loaded_twice_views = get_stage1_repository_views(loaded_twice)
+    assert loaded_twice_views["step2_subtitles"][0]["subtitle_id"] == "S001"
+
+    servicer._clear_stage1_runtime_cache(output_dir)
+    assert servicer._get_stage1_runtime_outputs(output_dir=output_dir) is None
+
+
 def test_phase2a_runtime_cache_clear_removes_entry(tmp_path):
     servicer = _build_servicer_for_cache_tests()
     output_dir = str(tmp_path / "task")
@@ -81,7 +110,7 @@ def test_phase2a_runtime_cache_ref_lookup_and_clear(tmp_path):
 
     by_ref = servicer._get_phase2a_runtime_cache_entry_by_ref(ref_id)
     assert isinstance(by_ref, dict)
-    assert by_ref.get("semantic_units")[0]["unit_id"] == "U002"
+    assert get_phase2a_repository_views(by_ref)["semantic_units"][0]["unit_id"] == "U002"
 
     servicer._clear_phase2a_runtime_cache(output_dir)
     assert servicer._get_phase2a_runtime_cache_entry_by_ref(ref_id) is None

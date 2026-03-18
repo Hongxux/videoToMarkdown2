@@ -268,6 +268,7 @@ public class StorageTaskCacheService {
         newTask.bookTitle = metadata.bookTitle;
         newTask.bookLeafTitle = metadata.bookLeafTitle;
         newTask.bookLeafOutlineIndex = metadata.bookLeafOutlineIndex;
+        newTask.errorMessage = metadata.errorMessage;
         
         if (metadata.hasSuccessFlag) {
             newTask.status = metadata.success ? "COMPLETED" : "FAILED";
@@ -277,6 +278,16 @@ public class StorageTaskCacheService {
             newTask.statusMessage = resolved != null ? "历史任务可查看" : "未检测到 markdown";
         }
         
+        if (newTask.userMessage == null) {
+            if ("FAILED".equals(newTask.status)) {
+                newTask.userMessage = "任务失败";
+            } else if ("UNKNOWN".equals(newTask.status)) {
+                newTask.userMessage = "异常残留/未完成产物";
+            } else if ("COMPLETED".equals(newTask.status)) {
+                newTask.userMessage = newTask.statusMessage;
+            }
+        }
+
         if (resolved != null) {
             newTask.markdownAvailable = true;
             newTask.markdownPath = resolved.markdownPath;
@@ -361,6 +372,10 @@ public class StorageTaskCacheService {
                 metadata.taskId = firstNonBlank(
                         jsonText(root, "task_id"),
                         jsonText(root, "taskId")
+                );
+                metadata.errorMessage = firstNonBlank(
+                        jsonText(root, "error_message"),
+                        jsonText(root, "errorMessage")
                 );
                 if (root.has("video_path")) metadata.videoPath = trimToNull(root.get("video_path").asText());
                 if (root.has("result_markdown_path")) metadata.resultMarkdownPath = trimToNull(root.get("result_markdown_path").asText());
@@ -493,6 +508,8 @@ public class StorageTaskCacheService {
         public String bookLeafOutlineIndex;
         public String status;
         public String statusMessage;
+        public String userMessage;
+        public String errorMessage;
         public Instant createdAt;
         public Instant completedAt;
         public String resultPath;
@@ -535,6 +552,7 @@ public class StorageTaskCacheService {
         boolean hasSuccessFlag;
         boolean success;
         Instant generatedAt;
+        String errorMessage;
         String inputVideoUrl;
         String videoTitle;
         String videoPath;

@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 
 
+from services.python_grpc.src.common.utils.runtime_recovery_store import RuntimeRecoveryStore  # noqa: E402
 from services.python_grpc.src.content_pipeline.phase2b.video_category_service import (  # noqa: E402
     classify_phase2b_output,
 )
@@ -77,6 +78,37 @@ def _seed_task(
             },
         )
     return task_dir
+
+
+def _seed_phase2b_result_artifact(
+    task_dir: Path,
+    *,
+    title: str,
+    group_name: str,
+    body_text: str,
+) -> None:
+    store = RuntimeRecoveryStore(
+        output_dir=str(task_dir),
+        task_id=task_dir.name,
+        storage_key=task_dir.name,
+    )
+    store.commit_projection_payload(
+        stage="phase2b",
+        projection_name="result_document",
+        payload={
+            "title": title,
+            "knowledge_groups": [
+                {
+                    "group_name": group_name,
+                    "units": [
+                        {
+                            "body_text": body_text,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
 
 
 def test_classify_phase2b_output_writes_task_and_summary_artifacts(tmp_path, monkeypatch):
@@ -151,6 +183,69 @@ def test_classify_phase2b_output_writes_task_and_summary_artifacts(tmp_path, mon
     video_meta = json.loads((task_dir / "video_meta.json").read_text(encoding="utf-8"))
     assert video_meta["category_path"] == "engineering/algorithms"
     assert video_meta["category_depth"] == 2
+
+
+def test_classify_phase2b_output_restores_from_sqlite_result_artifact(tmp_path, monkeypatch):
+    task_dir = _build_task_dir(tmp_path, "task-sqlite")
+    _write_json(
+        task_dir / "video_meta.json",
+        {
+            "title": "SQLite restore case",
+        },
+    )
+    _seed_phase2b_result_artifact(
+        task_dir,
+        title="SQLite restore case",
+        group_name="Dynamic Programming",
+        body_text="This lesson explains dynamic programming state design.",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    responses = [
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/algorithms/dynamic-programming",
+                    "is_new": True,
+                    "reasoning": "The content focuses on dynamic programming.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/algorithms/dynamic-programming",
+                    "is_new": True,
+                    "reasoning": "The content focuses on dynamic programming.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+    ]
+
+    async def _fake_deepseek_complete_text(**kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2b.video_category_service.llm_gateway.deepseek_complete_text",
+        _fake_deepseek_complete_text,
+    )
+
+    result = asyncio.run(
+        classify_phase2b_output(
+            output_dir=str(task_dir),
+            title="SQLite restore case",
+            result_json_path=str(task_dir / "result.json"),
+        )
+    )
+
+    assert result is not None
+    assert result["category_path"] == "engineering/algorithms/dynamic-programming"
 
 
 def test_classify_phase2b_output_accepts_direct_multi_level_category_path(tmp_path, monkeypatch):

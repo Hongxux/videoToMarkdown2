@@ -9,7 +9,6 @@ OpenCV 视频解码兼容工具。
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import shutil
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import cv2
+from services.python_grpc.src.common.utils.hash_policy import md5_short_text_compat
 
 _PATH_CACHE_LOCK = threading.Lock()
 _PATH_CACHE: Dict[str, Tuple[str, int, int]] = {}
@@ -270,7 +270,7 @@ def build_decode_fallback_path(source_video_path: str) -> Path:
         fingerprint = f"{source.resolve()}::{stat.st_size}::{int(stat.st_mtime_ns)}"
     except Exception:
         fingerprint = str(source)
-    digest = hashlib.md5(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    digest = md5_short_text_compat(fingerprint)
     cache_dir = source.parent / "_opencv_decode_fallback"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"{source.stem}_{digest}_h264.mp4"
