@@ -1633,11 +1633,16 @@
 
     function resolvePhase2bWebSocketUrl() {
         const fromWindow = t(window.__mobileTaskWebSocketUrl || window.__mobilePhase2bWsUrl);
-        if (fromWindow) {
-            return fromWindow;
-        }
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        return `${protocol}//${window.location.host}/ws/tasks`;
+        const raw = fromWindow || `${protocol}//${window.location.host}/ws/tasks`;
+        try {
+            const resolved = new URL(raw, window.location.href);
+            resolved.searchParams.set('clientType', 'browser');
+            return resolved.toString();
+        } catch (_error) {
+            const joiner = raw.includes('?') ? '&' : '?';
+            return `${raw}${joiner}clientType=browser`;
+        }
     }
 
     function ensurePhase2bWebSocketConnected() {

@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
 
 import java.lang.reflect.Field;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -126,6 +127,54 @@ class MobileMarkdownControllerRecoveryStatusTest {
                         && task.taskId.equals(updated.taskId)
                         && updated.status == TaskQueueManager.TaskStatus.QUEUED
         ));
+    }
+
+
+    @Test
+    void listTaskChangesShouldIncludeProcessingTaskWhenOnlyRuntimeUpdatedAtAdvanced() throws Exception {
+        MobileMarkdownController controller = new MobileMarkdownController();
+        TaskQueueManager queueManager = newQueueManager();
+        StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
+        injectField(controller, "taskQueueManager", queueManager);
+        injectField(controller, "storageTaskCacheService", storageCache);
+
+        TaskEntry task = queueManager.submitTask(
+                "u_task_changes_runtime_updated",
+                "https://example.com/video-runtime-updated",
+                "./output/runtime-updated",
+                TaskQueueManager.Priority.NORMAL,
+                "Runtime Updated Demo"
+        );
+        task.status = TaskQueueManager.TaskStatus.PROCESSING;
+        task.createdAt = Instant.parse("2026-03-19T08:00:00Z");
+        task.updatedAt = Instant.parse("2026-03-19T08:12:00Z");
+        task.progress = 0.57d;
+        task.statusMessage = "Phase2A running (semantic_units.window_0003)";
+
+        long since = Instant.parse("2026-03-19T08:10:00Z").toEpochMilli();
+        ResponseEntity<Map<String, Object>> response = controller.listTaskChanges(
+                since,
+                false,
+                "compact",
+                null,
+                200
+        );
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+        assertEquals(false, response.getBody().get("resyncRequired"));
+        assertEquals(false, response.getBody().get("hasMoreChanges"));
+        assertTrue(response.getBody().get("upserts") instanceof List<?>);
+        List<?> upserts = (List<?>) response.getBody().get("upserts");
+        assertEquals(1, upserts.size());
+        assertTrue(upserts.get(0) instanceof Map<?, ?>);
+        Map<?, ?> item = (Map<?, ?>) upserts.get(0);
+        assertEquals(task.taskId, item.get("taskId"));
+        assertEquals(TaskQueueManager.TaskStatus.PROCESSING.name(), item.get("status"));
+        assertEquals("2026-03-19T08:12:00Z", item.get("runtimeUpdatedAt"));
+        assertEquals("Phase2A running (semantic_units.window_0003)", item.get("statusMessage"));
+        assertEquals(0.57d, ((Number) item.get("progress")).doubleValue(), 0.0001d);
+        assertTrue(((Number) response.getBody().get("nextSince")).longValue() >= task.updatedAt.toEpochMilli());
     }
 
     private static TaskQueueManager newQueueManager() throws Exception {

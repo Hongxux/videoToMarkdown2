@@ -10,6 +10,7 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URI;
@@ -24,8 +25,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -148,15 +152,19 @@ class TaskWebSocketHandlerRecoveryStatusTest {
         when(session.getUri()).thenReturn(URI.create("ws://localhost/ws/tasks?userId=user-a&clientType=browser"));
         when(session.isOpen()).thenReturn(true);
 
-        handler.afterConnectionEstablished(session);
+        try {
+            handler.afterConnectionEstablished(session);
 
-        @SuppressWarnings("unchecked")
-        Map<String, Map<String, WebSocketSession>> userSessions =
-                (Map<String, Map<String, WebSocketSession>>) readField(handler, "userSessions");
-        WebSocketSession managedSession = userSessions.get("user-a").get("ws-session-001");
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, WebSocketSession>> userSessions =
+                    (Map<String, Map<String, WebSocketSession>>) readField(handler, "userSessions");
+            WebSocketSession managedSession = userSessions.get("user-a").get("ws-session-001");
 
-        assertNotNull(managedSession);
-        assertTrue(managedSession instanceof ConcurrentWebSocketSessionDecorator);
+            assertNotNull(managedSession);
+            assertTrue(managedSession instanceof ConcurrentWebSocketSessionDecorator);
+        } finally {
+            handler.stopHeartbeatTimer();
+        }
     }
 
     @Test
@@ -170,23 +178,27 @@ class TaskWebSocketHandlerRecoveryStatusTest {
         when(session.getUri()).thenReturn(URI.create("ws://localhost/ws/tasks?userId=user-b&clientType=browser"));
         when(session.isOpen()).thenReturn(true);
 
-        handler.afterConnectionEstablished(session);
-        handler.handleTextMessage(session, new TextMessage("""
-                {"action":"subscribe","taskId":"task-transport-1"}
-                """));
+        try {
+            handler.afterConnectionEstablished(session);
+            handler.handleTextMessage(session, new TextMessage("""
+                    {"action":"subscribe","taskId":"task-transport-1"}
+                    """));
 
-        @SuppressWarnings("unchecked")
-        Map<String, Map<String, WebSocketSession>> userSessions =
-                (Map<String, Map<String, WebSocketSession>>) readField(handler, "userSessions");
-        @SuppressWarnings("unchecked")
-        Map<String, Map<String, WebSocketSession>> taskSubscribers =
-                (Map<String, Map<String, WebSocketSession>>) readField(handler, "taskSubscribers");
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, WebSocketSession>> userSessions =
+                    (Map<String, Map<String, WebSocketSession>>) readField(handler, "userSessions");
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, WebSocketSession>> taskSubscribers =
+                    (Map<String, Map<String, WebSocketSession>>) readField(handler, "taskSubscribers");
 
-        WebSocketSession managedSession = userSessions.get("user-b").get("ws-session-002");
-        WebSocketSession subscribedSession = taskSubscribers.get("task-transport-1").get("ws-session-002");
+            WebSocketSession managedSession = userSessions.get("user-b").get("ws-session-002");
+            WebSocketSession subscribedSession = taskSubscribers.get("task-transport-1").get("ws-session-002");
 
-        assertTrue(managedSession instanceof ConcurrentWebSocketSessionDecorator);
-        assertSame(managedSession, subscribedSession);
+            assertTrue(managedSession instanceof ConcurrentWebSocketSessionDecorator);
+            assertSame(managedSession, subscribedSession);
+        } finally {
+            handler.stopHeartbeatTimer();
+        }
     }
 
     @Test
@@ -200,17 +212,53 @@ class TaskWebSocketHandlerRecoveryStatusTest {
         when(session.getUri()).thenReturn(URI.create("ws://localhost/ws/tasks?userId=user-ack&clientType=browser"));
         when(session.isOpen()).thenReturn(true);
 
-        handler.afterConnectionEstablished(session);
-        handler.handleTextMessage(session, new TextMessage("""
-                {"action":"ack","messageId":21}
-                """));
+        try {
+            handler.afterConnectionEstablished(session);
+            handler.handleTextMessage(session, new TextMessage("""
+                    {"action":"ack","messageId":21}
+                    """));
 
-        verify(terminalEventService).acknowledge("user-ack", 21L);
-        verify(session).sendMessage(argThat(message ->
-                message instanceof TextMessage
-                        && ((TextMessage) message).getPayload().contains("\"type\":\"ackConfirmed\"")
-                        && ((TextMessage) message).getPayload().contains("\"messageId\":21")
+            verify(terminalEventService).acknowledge("user-ack", 21L);
+            verify(session).sendMessage(argThat(message ->
+                    message instanceof TextMessage
+                            && ((TextMessage) message).getPayload().contains("\"type\":\"ackConfirmed\"")
+                            && ((TextMessage) message).getPayload().contains("\"messageId\":21")
+            ));
+        } finally {
+            handler.stopHeartbeatTimer();
+        }
+    }
+
+    @Test
+    void sendRawMessageShouldNotCloseSessionWhenBlockingSendIsInterrupted() throws Exception {
+        TaskWebSocketHandler handler = new TaskWebSocketHandler();
+        WebSocketSession session = mock(WebSocketSession.class);
+        when(session.getId()).thenReturn("ws-session-interrupted-send");
+        when(session.getUri()).thenReturn(URI.create(
+                "ws://localhost/ws/tasks?userId=user-interrupted&streamKey=mobile-task-stream"
         ));
+        when(session.isOpen()).thenReturn(true);
+        doThrow(new IOException(
+                "The current thread was interrupted while waiting for a blocking send to complete",
+                new InterruptedException("simulated interrupt")
+        )).when(session).sendMessage(any(TextMessage.class));
+
+        try {
+            handler.afterConnectionEstablished(session);
+
+            @SuppressWarnings("unchecked")
+            Map<String, Map<String, WebSocketSession>> userSessions =
+                    (Map<String, Map<String, WebSocketSession>>) readField(handler, "userSessions");
+            WebSocketSession managedSession = userSessions.get("user-interrupted").get("ws-session-interrupted-send");
+
+            invokeSendRawMessage(handler, managedSession, Map.of("type", "taskUpdate", "taskId", "task-1"));
+
+            assertTrue(Thread.currentThread().isInterrupted());
+            verify(session, never()).close(any());
+        } finally {
+            handler.stopHeartbeatTimer();
+            Thread.interrupted();
+        }
     }
 
     private static Map<?, ?> invokeBuildTaskUpdatePayload(TaskWebSocketHandler handler, TaskQueueManager.TaskEntry task)
@@ -240,6 +288,20 @@ class TaskWebSocketHandlerRecoveryStatusTest {
         );
         assertTrue(value instanceof Map<?, ?>);
         return (Map<?, ?>) value;
+    }
+
+    private static void invokeSendRawMessage(
+            TaskWebSocketHandler handler,
+            WebSocketSession session,
+            Map<String, Object> payload
+    ) throws Exception {
+        Method method = TaskWebSocketHandler.class.getDeclaredMethod(
+                "sendRawMessage",
+                WebSocketSession.class,
+                Map.class
+        );
+        method.setAccessible(true);
+        method.invoke(handler, session, payload);
     }
 
     private static void injectField(Object target, String fieldName, Object value) throws Exception {

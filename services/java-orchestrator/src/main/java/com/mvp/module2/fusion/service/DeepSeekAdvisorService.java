@@ -7,6 +7,7 @@ import com.mvp.module2.fusion.service.llm.LlmClient;
 import com.mvp.module2.fusion.service.llm.LlmFallbackStrategy;
 import com.mvp.module2.fusion.service.llm.LlmGateway;
 import com.mvp.module2.fusion.service.llm.LlmGatewayResult;
+import com.mvp.module2.fusion.service.llm.LlmErrorDescriber;
 import com.mvp.module2.fusion.service.llm.LlmPromptRequest;
 import com.mvp.module2.fusion.service.llm.LlmProviderConfig;
 import com.mvp.module2.fusion.service.llm.LlmResponse;
@@ -507,7 +508,7 @@ public class DeepSeekAdvisorService {
                     onDelta
             );
         } catch (Exception ex) {
-            throw new IllegalStateException("Phase2b provider chain failed: " + ex.getMessage(), ex);
+            throw new IllegalStateException("Phase2b provider chain failed: " + resolveAdvisorFailureMessage(ex), ex);
         }
         String rawMarkdown = String.valueOf(gatewayResult.content == null ? "" : gatewayResult.content).trim();
         String finalMarkdown = streamRequested ? rawMarkdown : normalizePhase2bListIndentation(rawMarkdown);
@@ -861,16 +862,7 @@ public class DeepSeekAdvisorService {
     }
 
     private String resolveAdvisorFailureMessage(Throwable ex) {
-        String lastNonBlankMessage = "";
-        Throwable cursor = ex;
-        while (cursor != null) {
-            String message = String.valueOf(cursor.getMessage() == null ? "" : cursor.getMessage()).trim();
-            if (StringUtils.hasText(message)) {
-                lastNonBlankMessage = message;
-            }
-            cursor = cursor.getCause();
-        }
-        return lastNonBlankMessage;
+        return LlmErrorDescriber.describe(ex);
     }
 
     private Throwable resolveAdvisorFailureCause(Throwable ex) {

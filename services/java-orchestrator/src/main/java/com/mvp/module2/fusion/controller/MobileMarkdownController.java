@@ -14,6 +14,7 @@ import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
 import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
+import com.mvp.module2.fusion.service.TaskStateRepository;
 import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import com.mvp.module2.fusion.service.TaskManualCollectionRepository;
 import com.mvp.module2.fusion.service.TaskBundleExportService;
@@ -158,6 +159,9 @@ public class MobileMarkdownController {
     @Autowired(required = false)
     private com.mvp.module2.fusion.service.TaskCleanupIndexService taskCleanupIndexService;
 
+    @Autowired(required = false)
+    private TaskStateRepository taskStateRepository;
+
     @Autowired
     private FileTransferService fileTransferService;
 
@@ -195,7 +199,8 @@ public class MobileMarkdownController {
         int normalizedPage = Math.max(0, page);
         boolean compactView = isCompactTaskListView(rawView);
         Set<String> statusFilter = parseTaskStatusFilter(rawStatuses);
-        List<TaskView> finalViewList = collectTaskViews(normalizedPage, pageSize);
+        TaskViewCollectionSnapshot snapshot = collectTaskViews(normalizedPage, pageSize);
+        List<TaskView> finalViewList = snapshot.tasks();
         List<TaskView> filteredTasks = filterTaskViews(finalViewList, onlyMultiSegment, statusFilter);
         List<Map<String, Object>> taskList = new ArrayList<>(filteredTasks.size());
         for (TaskView task : filteredTasks) {
@@ -230,12 +235,14 @@ public class MobileMarkdownController {
         boolean compactView = isCompactTaskListView(rawView);
         Set<String> statusFilter = parseTaskStatusFilter(rawStatuses);
 
-        List<TaskView> filteredTasks = filterTaskViews(collectTaskViews(0, 0), onlyMultiSegment, statusFilter);
+        TaskViewCollectionSnapshot snapshot = collectTaskViews(0, 0);
+        List<TaskView> filteredTasks = filterTaskViews(snapshot.tasks(), onlyMultiSegment, statusFilter);
         long collectionBindingsUpdatedAt = categoryClassificationResultsRepository != null
                 ? categoryClassificationResultsRepository.getLastUpdatedEpochMillis()
                 : 0L;
         long nextSince = Math.max(calculateTaskListSyncVersion(filteredTasks), collectionBindingsUpdatedAt);
-        boolean resyncRequired = normalizedSince > 0L && collectionBindingsUpdatedAt > normalizedSince;
+        boolean resyncRequired = (normalizedSince > 0L && collectionBindingsUpdatedAt > normalizedSince)
+                || snapshot.resyncRequired();
 
         List<TaskView> changedTasks = filteredTasks.stream()
                 .filter(task -> computeTaskSyncVersion(task) > normalizedSince)
@@ -255,6 +262,26 @@ public class MobileMarkdownController {
         response.put("hasMoreChanges", hasMoreChanges);
         response.put("view", compactView ? "compact" : "full");
         response.put("deletes", List.of());
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping(value = "/tasks/reconcile-terminal", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> reconcileTerminalTasks(
+            @RequestBody(required = false) TaskTerminalReconcileRequest request
+    ) {
+        List<String> taskIds = normalizeRequestedTaskIds(request != null ? request.taskIds : null, 200);
+        List<Map<String, Object>> tasks = new ArrayList<>();
+        for (String taskId : taskIds) {
+            TaskView task = resolveTaskView(taskId);
+            if (task == null || !isTerminalReconcileStatus(task.status)) {
+                continue;
+            }
+            tasks.add(toListItem(task, true));
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("tasks", tasks);
+        response.put("requestedCount", taskIds.size());
+        response.put("reconciledCount", tasks.size());
         return ResponseEntity.ok(response);
     }
 
@@ -1143,7 +1170,7 @@ public class MobileMarkdownController {
 
         String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
         Path target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
-        if (!target.startsWith(resolved.baseDir)) {
+        if (target == null || !target.startsWith(resolved.baseDir)) {
             return ResponseEntity.status(400).body(Map.of("message", "illegal path"));
         }
         if (!Files.exists(target) || !Files.isRegularFile(target)) {
@@ -1254,8 +1281,37 @@ public class MobileMarkdownController {
         }
 
         boolean runtimeRemoved = taskQueueManager.removeTask(normalizedTaskId);
+        PythonGrpcClient.ReleaseResourcesResult releaseResult = releasePythonTaskResources(normalizedTaskId);
         StorageDeleteResult storageDelete = deleteStorageTaskByTaskId(normalizedTaskId);
+        boolean persistedStateDeleted;
+        try {
+            persistedStateDeleted = deletePersistedTaskState(normalizedTaskId);
+        } catch (Exception ex) {
+            logger.warn("delete persisted task state failed: taskId={} err={}", normalizedTaskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of(
+                    "success", false,
+                    "status", "DELETE_FAILED",
+                    "message", "delete persisted task state failed"
+            ));
+        }
         if (!storageDelete.success) {
+            boolean cleanupPending = scheduleDeferredTaskCleanup(normalizedTaskId, storageDelete, runtimeTask);
+            if (cleanupPending && (runtimeRemoved || persistedStateDeleted || storageDelete.found)) {
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("success", true);
+                payload.put("taskId", normalizedTaskId);
+                payload.put("status", "DELETED_PENDING_CLEANUP");
+                payload.put("runtimeRemoved", runtimeRemoved);
+                payload.put("storageDeleted", false);
+                payload.put("persistedStateDeleted", persistedStateDeleted);
+                payload.put("deletedEntries", storageDelete.deletedEntries);
+                payload.put("cleanupPending", true);
+                payload.put("message", "task deleted; storage cleanup pending");
+                if (releaseResult != null && releaseResult.message != null && !releaseResult.message.isBlank()) {
+                    payload.put("resourceReleaseMessage", releaseResult.message);
+                }
+                return ResponseEntity.ok(payload);
+            }
             return ResponseEntity.status(500).body(Map.of(
                     "success", false,
                     "status", "DELETE_FAILED",
@@ -1263,13 +1319,14 @@ public class MobileMarkdownController {
             ));
         }
 
-        if (!runtimeRemoved && !storageDelete.found) {
+        if (!runtimeRemoved && !storageDelete.found && !persistedStateDeleted) {
             return ResponseEntity.ok(Map.of(
                     "success", true,
                     "taskId", normalizedTaskId,
                     "status", "ALREADY_DELETED",
                     "runtimeRemoved", false,
                     "storageDeleted", false,
+                    "persistedStateDeleted", false,
                     "deletedEntries", 0,
                     "message", "task already deleted"
             ));
@@ -1278,11 +1335,13 @@ public class MobileMarkdownController {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("success", true);
         payload.put("taskId", normalizedTaskId);
-        payload.put("status", (runtimeRemoved || storageDelete.deleted) ? "DELETED" : "REMOVED");
+        payload.put("status", (runtimeRemoved || storageDelete.deleted || persistedStateDeleted) ? "DELETED" : "REMOVED");
         payload.put("runtimeRemoved", runtimeRemoved);
         payload.put("storageDeleted", storageDelete.deleted);
+        payload.put("persistedStateDeleted", persistedStateDeleted);
         payload.put("deletedEntries", storageDelete.deletedEntries);
-        payload.put("message", (runtimeRemoved || storageDelete.deleted) ? "task deleted" : "task removed");
+        payload.put("cleanupPending", false);
+        payload.put("message", (runtimeRemoved || storageDelete.deleted || persistedStateDeleted) ? "task deleted" : "task removed");
         clearTaskCleanupIndexQuietly(normalizedTaskId);
         return ResponseEntity.ok(payload);
     }
@@ -1460,7 +1519,7 @@ public class MobileMarkdownController {
         if (rawPath != null && !rawPath.isBlank()) {
             String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
             target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
-            if (!target.startsWith(resolved.baseDir)) {
+            if (target == null || !target.startsWith(resolved.baseDir)) {
                 return ResponseEntity.status(400).body(Map.of("message", "invalid path"));
             }
             if (!Files.exists(target) || !Files.isRegularFile(target)) {
@@ -1506,7 +1565,7 @@ public class MobileMarkdownController {
         if (request.path != null && !request.path.isBlank()) {
             String decodedPath = URLDecoder.decode(request.path, StandardCharsets.UTF_8);
             target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
-            if (!target.startsWith(resolved.baseDir)) {
+            if (target == null || !target.startsWith(resolved.baseDir)) {
                 return ResponseEntity.status(400).body(Map.of("message", "illegal path"));
             }
             if (!isMarkdownFile(target.getFileName().toString())) {
@@ -2317,7 +2376,7 @@ public class MobileMarkdownController {
 
         String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
         Path target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
-        if (!target.startsWith(resolved.baseDir)) {
+        if (target == null || !target.startsWith(resolved.baseDir)) {
             return ResponseEntity.status(400).body(Map.of("message", "illegal path"));
         }
         if (!Files.exists(target) || !Files.isRegularFile(target)) {
@@ -2563,16 +2622,19 @@ public class MobileMarkdownController {
         return safe + "_bundle.zip";
     }
 
-    private List<TaskView> collectTaskViews(int page, int pageSize) {
+    private TaskViewCollectionSnapshot collectTaskViews(int page, int pageSize) {
         int normalizedPage = Math.max(0, page);
         if (normalizedPage == 0 && storageTaskCategoryService != null) {
             storageTaskCategoryService.triggerBackfillAsync();
         }
         List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
+        Set<String> runtimeTaskIds = collectRuntimeTaskIds(runtimeTasks);
+        Set<String> runtimeStorageKeys = collectRuntimeStorageKeys(runtimeTasks);
         com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult =
                 storageTaskCacheService.getTasks(normalizedPage, pageSize);
 
         List<TaskView> finalViewList = new ArrayList<>();
+        boolean residualTaskPurged = false;
         if (normalizedPage == 0) {
             for (TaskEntry runtimeTask : runtimeTasks) {
                 finalViewList.add(fromRuntimeTask(runtimeTask));
@@ -2580,6 +2642,10 @@ public class MobileMarkdownController {
         }
 
         for (com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached : storageResult.tasks) {
+            if (tryPurgeAbnormalResidualStorageTask(cached, runtimeTaskIds, runtimeStorageKeys)) {
+                residualTaskPurged = true;
+                continue;
+            }
             finalViewList.add(fromCachedTask(cached));
         }
         finalViewList = deduplicateTaskViews(finalViewList);
@@ -2596,7 +2662,95 @@ public class MobileMarkdownController {
             attachCategoryAssignment(task, categoryAssignmentsByTaskPath.get(task.taskPath));
             attachTaskCostSummary(task);
         }
-        return finalViewList;
+        return new TaskViewCollectionSnapshot(finalViewList, residualTaskPurged);
+    }
+
+    private Set<String> collectRuntimeTaskIds(List<TaskEntry> runtimeTasks) {
+        Set<String> runtimeTaskIds = new LinkedHashSet<>();
+        if (runtimeTasks == null || runtimeTasks.isEmpty()) {
+            return runtimeTaskIds;
+        }
+        for (TaskEntry runtimeTask : runtimeTasks) {
+            String taskId = trimToNullSafe(runtimeTask != null ? runtimeTask.taskId : null);
+            if (taskId != null) {
+                runtimeTaskIds.add(taskId);
+            }
+        }
+        return runtimeTaskIds;
+    }
+
+    private Set<String> collectRuntimeStorageKeys(List<TaskEntry> runtimeTasks) {
+        Set<String> runtimeStorageKeys = new LinkedHashSet<>();
+        if (runtimeTasks == null || runtimeTasks.isEmpty()) {
+            return runtimeStorageKeys;
+        }
+        for (TaskEntry runtimeTask : runtimeTasks) {
+            String storageKey = trimToNullSafe(resolveRuntimeStorageKey(runtimeTask));
+            if (storageKey != null) {
+                runtimeStorageKeys.add(storageKey);
+            }
+        }
+        return runtimeStorageKeys;
+    }
+
+    // 复用既有删除链路清理孤儿 UNKNOWN 存储任务，避免脏目录在每次列表聚合时反复回流到前端。
+    private boolean tryPurgeAbnormalResidualStorageTask(
+            com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached,
+            Set<String> runtimeTaskIds,
+            Set<String> runtimeStorageKeys
+    ) {
+        if (!isAbnormalResidualStorageTask(cached)) {
+            return false;
+        }
+        String cachedTaskId = trimToNullSafe(cached.taskId);
+        String cachedStorageKey = trimToNullSafe(cached.storageKey);
+        if (cachedTaskId != null && runtimeTaskIds.contains(cachedTaskId)) {
+            return false;
+        }
+        if (cachedStorageKey != null && runtimeStorageKeys.contains(cachedStorageKey)) {
+            return false;
+        }
+
+        String deleteIdentity = cachedTaskId != null ? cachedTaskId : STORAGE_TASK_PREFIX + cachedStorageKey;
+        StorageDeleteResult storageDelete = deleteStorageTaskByTaskId(deleteIdentity);
+        if (!storageDelete.success) {
+            logger.warn(
+                    "purge abnormal residual task skipped: taskId={} storageKey={} message={}",
+                    cachedTaskId,
+                    cachedStorageKey,
+                    storageDelete.message
+            );
+            return false;
+        }
+        if (cachedTaskId != null) {
+            try {
+                deletePersistedTaskState(cachedTaskId);
+            } catch (Exception ex) {
+                logger.warn("purge abnormal residual persisted state failed: taskId={} err={}", cachedTaskId, ex.getMessage());
+            }
+            clearTaskCleanupIndexQuietly(cachedTaskId);
+        }
+        logger.info(
+                "purged abnormal residual task during task listing: taskId={} storageKey={} deleted={} found={}",
+                cachedTaskId,
+                cachedStorageKey,
+                storageDelete.deleted,
+                storageDelete.found
+        );
+        return true;
+    }
+
+    private boolean isAbnormalResidualStorageTask(
+            com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached
+    ) {
+        if (cached == null || cached.markdownAvailable) {
+            return false;
+        }
+        String storageKey = trimToNullSafe(cached.storageKey);
+        if (storageKey == null || !isSafeStorageKey(storageKey)) {
+            return false;
+        }
+        return "UNKNOWN".equals(normalizeTaskStatusToken(cached.status));
     }
 
     private List<TaskView> filterTaskViews(List<TaskView> tasks, boolean onlyMultiSegment, Set<String> statusFilter) {
@@ -2614,12 +2768,22 @@ public class MobileMarkdownController {
                     continue;
                 }
             }
-            if (onlyMultiSegment && !isTaskMultiSegmentReadable(task)) {
+            if (onlyMultiSegment && !isTaskMultiSegmentReadable(task) && !shouldBypassMultiSegmentFilter(task)) {
                 continue;
             }
             filtered.add(task);
         }
         return filtered;
+    }
+
+    private boolean shouldBypassMultiSegmentFilter(TaskView task) {
+        if (task == null) {
+            return false;
+        }
+        String normalizedStatus = normalizeTaskStatusToken(task.status);
+        return "FAILED".equals(normalizedStatus)
+                || "MANUAL_RETRY_REQUIRED".equals(normalizedStatus)
+                || "FATAL".equals(normalizedStatus);
     }
 
     private Set<String> parseTaskStatusFilter(String rawStatuses) {
@@ -2635,6 +2799,32 @@ public class MobileMarkdownController {
             }
         }
         return statuses;
+    }
+
+    private List<String> normalizeRequestedTaskIds(List<String> rawTaskIds, int limit) {
+        if (rawTaskIds == null || rawTaskIds.isEmpty()) {
+            return List.of();
+        }
+        int normalizedLimit = Math.max(1, Math.min(500, limit));
+        Set<String> deduplicated = new LinkedHashSet<>();
+        for (String rawTaskId : rawTaskIds) {
+            String normalizedTaskId = trimToNullSafe(rawTaskId);
+            if (normalizedTaskId == null) {
+                continue;
+            }
+            deduplicated.add(normalizedTaskId);
+            if (deduplicated.size() >= normalizedLimit) {
+                break;
+            }
+        }
+        return new ArrayList<>(deduplicated);
+    }
+
+    private boolean isTerminalReconcileStatus(String rawStatus) {
+        String normalizedStatus = taskStatusPresentationService.normalizeStatusUpper(rawStatus);
+        return "COMPLETED".equals(normalizedStatus)
+                || "FAILED".equals(normalizedStatus)
+                || "CANCELLED".equals(normalizedStatus);
     }
 
     private String normalizeTaskStatusToken(String rawStatus) {
@@ -2669,6 +2859,9 @@ public class MobileMarkdownController {
             return 0L;
         }
         long version = 0L;
+        if (task.runtimeUpdatedAt != null) {
+            version = Math.max(version, task.runtimeUpdatedAt.toEpochMilli());
+        }
         if (task.metaUpdatedAt != null) {
             version = Math.max(version, task.metaUpdatedAt.toEpochMilli());
         }
@@ -2698,6 +2891,7 @@ public class MobileMarkdownController {
         item.put("status", task.status != null ? task.status : "");
         item.put("createdAt", instantToText(task.createdAt));
         item.put("lastOpenedAt", instantToText(task.lastOpenedAt));
+        item.put("runtimeUpdatedAt", instantToText(task.runtimeUpdatedAt));
         item.put("markdownAvailable", task.markdownAvailable);
         item.put("source", task.storageTask ? "storage" : "runtime");
         item.put("storageKey", task.storageKey != null ? task.storageKey : "");
@@ -3107,6 +3301,7 @@ public class MobileMarkdownController {
         view.status = task.status != null ? task.status.name() : TaskStatus.QUEUED.name();
         view.createdAt = task.createdAt;
         view.completedAt = task.completedAt;
+        view.runtimeUpdatedAt = task.updatedAt;
         view.resultPath = task.resultPath;
         view.progress = task.progress;
         view.statusMessage = task.statusMessage;
@@ -3309,11 +3504,147 @@ public class MobileMarkdownController {
     }
 
     private Path resolveAssetTargetPath(Path baseDir, String decodedPath) {
+        String normalized = normalizeRequestedAssetPath(decodedPath);
+        if (normalized == null) {
+            return null;
+        }
+        List<String> segments = splitRequestedAssetPath(normalized);
+        if (segments == null || segments.isEmpty()) {
+            return null;
+        }
+
+        Path directTarget = tryResolveRelativeAssetPath(baseDir, segments);
+        if (directTarget != null && Files.exists(directTarget)) {
+            return directTarget;
+        }
+
+        Path displayNameTarget = tryResolveDisplayNameAssetPath(baseDir, segments);
+        if (displayNameTarget != null && Files.exists(displayNameTarget)) {
+            return displayNameTarget;
+        }
+
+        if (directTarget != null) {
+            return directTarget;
+        }
+        return displayNameTarget;
+    }
+
+    private String normalizeRequestedAssetPath(String decodedPath) {
         String normalized = decodedPath == null ? "" : decodedPath.trim();
         while (normalized.startsWith("/") || normalized.startsWith("\\")) {
             normalized = normalized.substring(1);
         }
-        return baseDir.resolve(normalized).normalize();
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private List<String> splitRequestedAssetPath(String normalizedPath) {
+        if (normalizedPath == null || normalizedPath.isBlank()) {
+            return null;
+        }
+        String[] rawSegments = normalizedPath.replace('\\', '/').split("/+");
+        List<String> segments = new ArrayList<>();
+        for (String rawSegment : rawSegments) {
+            if (rawSegment == null || rawSegment.isEmpty()) {
+                continue;
+            }
+            String logicalSegment = rawSegment.trim();
+            if (logicalSegment.isEmpty() || ".".equals(logicalSegment) || "..".equals(logicalSegment)) {
+                return null;
+            }
+            segments.add(rawSegment);
+        }
+        return segments.isEmpty() ? null : segments;
+    }
+
+    private Path tryResolveRelativeAssetPath(Path baseDir, List<String> segments) {
+        if (baseDir == null || segments == null || segments.isEmpty()) {
+            return null;
+        }
+        Path candidate = baseDir;
+        for (String segment : segments) {
+            try {
+                candidate = candidate.resolve(segment);
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+        return candidate.normalize();
+    }
+
+    private Path tryResolveDisplayNameAssetPath(Path baseDir, List<String> segments) {
+        if (baseDir == null || segments == null || segments.isEmpty()) {
+            return null;
+        }
+
+        Path currentDir = baseDir;
+        for (int index = 0; index < segments.size() - 1; index++) {
+            String segment = segments.get(index);
+            Path nextDir;
+            try {
+                nextDir = currentDir.resolve(segment).normalize();
+            } catch (Exception ex) {
+                return resolveSanitizedDisplayTail(currentDir, joinRequestedAssetTail(segments, index));
+            }
+            if (Files.isDirectory(nextDir)) {
+                currentDir = nextDir;
+                continue;
+            }
+            return resolveSanitizedDisplayTail(currentDir, joinRequestedAssetTail(segments, index));
+        }
+
+        String lastSegment = segments.get(segments.size() - 1);
+        try {
+            currentDir.resolve(lastSegment);
+        } catch (Exception ex) {
+            return resolveSanitizedDisplayTail(currentDir, lastSegment);
+        }
+        String sanitizedLastSegment = sanitizeWindowsDisplayFileName(lastSegment);
+        if (sanitizedLastSegment == null || sanitizedLastSegment.equals(lastSegment)) {
+            return null;
+        }
+        return currentDir.resolve(sanitizedLastSegment).normalize();
+    }
+
+    private String joinRequestedAssetTail(List<String> segments, int startIndex) {
+        StringBuilder builder = new StringBuilder();
+        for (int index = startIndex; index < segments.size(); index++) {
+            if (builder.length() > 0) {
+                builder.append('/');
+            }
+            builder.append(segments.get(index));
+        }
+        return builder.toString();
+    }
+
+    private Path resolveSanitizedDisplayTail(Path currentDir, String displayTail) {
+        String sanitizedTail = sanitizeWindowsDisplayFileName(displayTail);
+        if (currentDir == null || sanitizedTail == null) {
+            return null;
+        }
+        return currentDir.resolve(sanitizedTail).normalize();
+    }
+
+    private String sanitizeWindowsDisplayFileName(String rawName) {
+        String candidate = trimToNullSafe(rawName);
+        if (candidate == null) {
+            return null;
+        }
+        StringBuilder safe = new StringBuilder(candidate.length());
+        for (int index = 0; index < candidate.length(); index++) {
+            char current = candidate.charAt(index);
+            if (current == '<' || current == '>' || current == ':' || current == '"' || current == '/'
+                    || current == '\\' || current == '|' || current == '?' || current == '*') {
+                safe.append('_');
+                continue;
+            }
+            if (Character.isISOControl(current)) {
+                continue;
+            }
+            safe.append(current);
+        }
+        String normalized = safe.toString().trim();
+        normalized = normalized.replaceAll("[.\\s]+$", "");
+        return normalized.isBlank() ? null : normalized;
     }
 
     private Path resolveTaskRootDir(TaskView task) throws IOException {
@@ -4132,6 +4463,62 @@ public class MobileMarkdownController {
         }
     }
 
+    private boolean deletePersistedTaskState(String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null || taskStateRepository == null) {
+            return false;
+        }
+        return taskStateRepository.deleteTask(normalizedTaskId);
+    }
+
+    private PythonGrpcClient.ReleaseResourcesResult releasePythonTaskResources(String taskId) {
+        PythonGrpcClient.ReleaseResourcesResult fallback = new PythonGrpcClient.ReleaseResourcesResult();
+        fallback.success = false;
+        fallback.message = "";
+        if (pythonGrpcClient == null) {
+            return fallback;
+        }
+        try {
+            return pythonGrpcClient.releaseCVResources(taskId);
+        } catch (Exception ex) {
+            logger.warn("release python task resources skipped: taskId={} err={}", taskId, ex.getMessage());
+            fallback.message = ex.getMessage() != null ? ex.getMessage() : "";
+            return fallback;
+        }
+    }
+
+    private boolean scheduleDeferredTaskCleanup(String taskId, StorageDeleteResult storageDelete, TaskEntry runtimeTask) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null || storageDelete == null || taskCleanupIndexService == null || storageDelete.taskRoot == null) {
+            return false;
+        }
+        String taskTypeHint = (runtimeTask != null && runtimeTask.bookOptions != null) ? "BOOK" : "VIDEO";
+        try {
+            boolean scheduled = taskCleanupIndexService.scheduleImmediateCleanupForTask(
+                    normalizedTaskId,
+                    storageDelete.taskRoot.toString(),
+                    taskTypeHint
+            );
+            if (scheduled) {
+                logger.info(
+                        "scheduled deferred storage cleanup: taskId={} taskRoot={} err={}",
+                        normalizedTaskId,
+                        storageDelete.taskRoot,
+                        storageDelete.message
+                );
+            }
+            return scheduled;
+        } catch (Exception ex) {
+            logger.warn(
+                    "schedule deferred storage cleanup failed: taskId={} taskRoot={} err={}",
+                    normalizedTaskId,
+                    storageDelete.taskRoot,
+                    ex.getMessage()
+            );
+            return false;
+        }
+    }
+
     private StorageDeleteResult deleteStorageTaskByTaskId(String taskId) {
         StorageDeleteResult result = new StorageDeleteResult();
         String normalizedTaskId = trimToNullSafe(taskId);
@@ -4180,13 +4567,15 @@ public class MobileMarkdownController {
             if (!target.startsWith(storageRoot)) {
                 continue;
             }
+            result.storageKey = storageKey;
+            result.taskRoot = target;
             if (!Files.exists(target)) {
                 storageTaskCacheService.evictTaskByStorageKey(storageKey);
                 continue;
             }
             existsOnDisk = true;
             try {
-                result.deletedEntries += deletePathRecursively(target, storageRoot);
+                result.deletedEntries += deletePathRecursivelyWithRetry(target, storageRoot);
                 result.deleted = true;
                 storageTaskCacheService.evictTaskByStorageKey(storageKey);
             } catch (IOException ex) {
@@ -4198,6 +4587,7 @@ public class MobileMarkdownController {
                 );
                 result.success = false;
                 result.message = "delete storage task directory failed";
+                result.lastError = ex.getMessage();
                 return result;
             }
         }
@@ -4205,6 +4595,27 @@ public class MobileMarkdownController {
         result.found = foundInCache || existsOnDisk;
         storageTaskCacheService.evictTaskByTaskId(normalizedTaskId);
         return result;
+    }
+
+    private int deletePathRecursivelyWithRetry(Path target, Path taskRoot) throws IOException {
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            try {
+                return deletePathRecursively(target, taskRoot);
+            } catch (IOException ex) {
+                lastError = ex;
+                if (attempt >= 4) {
+                    break;
+                }
+                try {
+                    Thread.sleep(150L * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw ex;
+                }
+            }
+        }
+        throw lastError != null ? lastError : new IOException("delete path recursively failed");
     }
 
     private String resolveStorageDeleteKey(String taskId) {
@@ -5738,6 +6149,10 @@ public class MobileMarkdownController {
         public Map<String, Object> anchors;
     }
 
+    public static class TaskTerminalReconcileRequest {
+        public List<String> taskIds;
+    }
+
     public static class AnchorSyncRequest {
         public String path;
         public String mainNotePath;
@@ -5840,7 +6255,12 @@ public class MobileMarkdownController {
         private boolean deleted;
         private int deletedEntries;
         private String message;
+        private String storageKey;
+        private String lastError;
+        private Path taskRoot;
     }
+
+    private record TaskViewCollectionSnapshot(List<TaskView> tasks, boolean resyncRequired) {}
 
     private static class TaskView {
         private String taskId;
@@ -5851,6 +6271,7 @@ public class MobileMarkdownController {
         private Instant createdAt;
         private Instant lastOpenedAt;
         private Instant completedAt;
+        private Instant runtimeUpdatedAt;
         private Instant metaUpdatedAt;
         private String resultPath;
         private boolean markdownAvailable;

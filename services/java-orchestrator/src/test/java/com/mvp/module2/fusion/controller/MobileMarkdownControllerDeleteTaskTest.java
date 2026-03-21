@@ -2,6 +2,19 @@ package com.mvp.module2.fusion.controller;
 
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.service.StorageTaskCacheService;
+import com.mvp.module2.fusion.grpc.PythonGrpcClient;
+import com.mvp.module2.fusion.service.TaskCleanupIndexService;
+import com.mvp.module2.fusion.service.TaskStateRepository;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileLock;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
 
@@ -21,10 +34,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MobileMarkdownControllerDeleteTaskTest {
 
+    @TempDir
+    Path tempDir;
+
     @Test
     void deleteMissingTaskShouldBeIdempotent() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
         TaskQueueManager queueManager = new TaskQueueManager();
+        injectField(queueManager, "taskStateRepository", mock(TaskStateRepository.class));
         StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
@@ -41,6 +58,7 @@ class MobileMarkdownControllerDeleteTaskTest {
     void deleteRunningTaskShouldCancelTask() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
         TaskQueueManager queueManager = new TaskQueueManager();
+        injectField(queueManager, "taskStateRepository", mock(TaskStateRepository.class));
         StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
@@ -67,6 +85,7 @@ class MobileMarkdownControllerDeleteTaskTest {
     void deleteStorageTaskShouldRemoveStorageDirectory() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
         TaskQueueManager queueManager = new TaskQueueManager();
+        injectField(queueManager, "taskStateRepository", mock(TaskStateRepository.class));
         StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
@@ -104,6 +123,61 @@ class MobileMarkdownControllerDeleteTaskTest {
                             });
                 }
             }
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void deleteLockedStorageTaskShouldFallbackToDeferredCleanup() throws Exception {
+        MobileMarkdownController controller = new MobileMarkdownController();
+        TaskQueueManager queueManager = new TaskQueueManager();
+        injectField(queueManager, "taskStateRepository", mock(TaskStateRepository.class));
+        StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
+        TaskCleanupIndexService cleanupService = mock(TaskCleanupIndexService.class);
+        TaskStateRepository taskStateRepository = mock(TaskStateRepository.class);
+        PythonGrpcClient pythonGrpcClient = mock(PythonGrpcClient.class);
+        injectField(controller, "taskQueueManager", queueManager);
+        injectField(controller, "storageTaskCacheService", storageCache);
+        injectField(controller, "taskCleanupIndexService", cleanupService);
+        injectField(controller, "taskStateRepository", taskStateRepository);
+        injectField(controller, "pythonGrpcClient", pythonGrpcClient);
+
+        Path storageRoot = tempDir.resolve("var").resolve("storage").resolve("storage");
+        Files.createDirectories(storageRoot);
+        injectField(controller, "configuredStorageRoot", storageRoot.toString());
+
+        String taskId = "VT_delete_locked_001";
+        String storageKey = "ut_delete_locked_001";
+        Path targetDir = storageRoot.resolve(storageKey);
+        Path walPath = targetDir.resolve("intermediates").resolve("rt").resolve("runtime_state.db-wal");
+        Files.createDirectories(walPath.getParent());
+        Files.writeString(walPath, "wal");
+
+        StorageTaskCacheService.CachedTask cachedTask = new StorageTaskCacheService.CachedTask();
+        cachedTask.taskId = taskId;
+        cachedTask.storageKey = storageKey;
+        storageCache.put(cachedTask);
+
+        when(taskStateRepository.deleteTask(taskId)).thenReturn(true);
+        when(cleanupService.scheduleImmediateCleanupForTask(eq(taskId), anyString(), eq("VIDEO"))).thenReturn(true);
+        PythonGrpcClient.ReleaseResourcesResult releaseResult = new PythonGrpcClient.ReleaseResourcesResult();
+        releaseResult.success = true;
+        releaseResult.message = "released";
+        when(pythonGrpcClient.releaseCVResources(taskId)).thenReturn(releaseResult);
+
+        try (RandomAccessFile fileHandle = new RandomAccessFile(walPath.toFile(), "rw");
+             FileLock ignored = fileHandle.getChannel().lock()) {
+            ResponseEntity<Map<String, Object>> response = controller.cancelRuntimeTask(taskId);
+
+            assertEquals(200, response.getStatusCode().value());
+            assertNotNull(response.getBody());
+            assertEquals(true, response.getBody().get("success"));
+            assertEquals("DELETED_PENDING_CLEANUP", response.getBody().get("status"));
+            assertEquals(true, response.getBody().get("persistedStateDeleted"));
+            assertEquals(false, response.getBody().get("storageDeleted"));
+            assertEquals(true, response.getBody().get("cleanupPending"));
+            verify(cleanupService).scheduleImmediateCleanupForTask(eq(taskId), anyString(), eq("VIDEO"));
+            verify(pythonGrpcClient).releaseCVResources(taskId);
         }
     }
 

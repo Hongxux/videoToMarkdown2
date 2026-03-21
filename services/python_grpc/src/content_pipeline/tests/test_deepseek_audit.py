@@ -47,7 +47,12 @@ def test_append_deepseek_call_record_writes_input_output_pair(tmp_path):
     payload = json.loads(audit_path.read_text(encoding="utf-8"))
 
     assert payload["total_calls"] == 1
+    assert payload["overview"]["total_calls"] == 1
+    assert payload["overview"]["failed_calls"] == 0
     assert len(payload["records"]) == 1
+    assert len(payload["compact_records"]) == 1
+    assert any(item["kind"] == "system_message" for item in payload["shared_texts"])
+    assert audit_path.with_suffix(".md").exists()
 
     record = payload["records"][0]
     assert record["input"]["model"] == "deepseek-chat"
@@ -180,3 +185,5 @@ def test_deepseek_audit_uses_actual_qwen_model_for_fallback_pricing(tmp_path):
     assert record["cost_estimate"]["resolved_model_key"] == "qwen-plus"
     assert record["cost_estimate"]["currency"] == "CNY"
     assert record["cost_estimate"]["total_cost"] > 0
+    assert payload["overview"]["failed_calls"] == 1
+    assert any(item["type"] == "failed_calls" for item in payload["problem_summary"])

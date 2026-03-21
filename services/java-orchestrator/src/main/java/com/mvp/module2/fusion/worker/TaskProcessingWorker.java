@@ -30,6 +30,7 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
@@ -342,6 +343,11 @@ public class TaskProcessingWorker {
     }
 
     private boolean prepareProbeStage(TaskEntry task) {
+        TaskProbeService.ProbeOutcome cachedProbeOutcome = resolveCachedProbeOutcome(task);
+        if (cachedProbeOutcome != null) {
+            logger.info("Reuse cached probe payload and skip fresh probe: taskId={} videoUrl={}", task.taskId, task.videoUrl);
+            return applyForegroundProbeOutcome(task, cachedProbeOutcome);
+        }
         if (shouldProbeInBackground(task)) {
             return detachProbeFromCriticalPath(task);
         }
@@ -472,6 +478,27 @@ public class TaskProcessingWorker {
         return titleUpdated || payloadUpdated;
     }
 
+    // probe_payload 只会在成功探测后落库或合并，因此重试命中非空 payload 时可直接复用。
+    // 这样能避免人工修复后的重复 GetVideoInfo，同时保持标题和探测元数据与上次成功结果一致。
+    private TaskProbeService.ProbeOutcome resolveCachedProbeOutcome(TaskEntry task) {
+        if (task == null || task.probePayload == null || task.probePayload.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> cachedPayload = new LinkedHashMap<>(task.probePayload);
+        String preferredTitle = firstNonBlank(
+                TaskProbeService.formatProbePayloadTitle(cachedPayload),
+                task.title
+        );
+        if (!preferredTitle.isBlank()) {
+            cachedPayload.put("title", preferredTitle);
+        }
+        return TaskProbeService.ProbeOutcome.success(
+                preferredTitle,
+                "复用缓存探测结果，开始处理",
+                cachedPayload
+        );
+    }
+
     private void handleDedupedTask(
             TaskEntry task,
             TaskDeduplicationService.NormalizedTaskInput normalizedTaskInput,
@@ -556,15 +583,28 @@ public class TaskProcessingWorker {
             if (!decisionRef.compareAndSet(TaskWatchdog.Decision.none(), decision)) {
                 return;
             }
+            boolean interruptOnRestart = decision.action() == TaskWatchdog.Action.RESTART
+                    && watchdog.shouldInterruptOnRestart(decision.stage());
             if (decision.action() == TaskWatchdog.Action.RESTART) {
-                String message = String.format(
-                        "阶段长时间无进展，准备重启子步骤（阶段=%s，重启=%d/%d）",
-                        decision.stage(),
-                        decision.stageRestartCount(),
-                        watchdog.maxRestartPerStage()
-                );
-                logger.warn("[{}] {}", task.taskId, message);
-                webSocketHandler.broadcastTaskUpdate(task.taskId, "PROCESSING", task.progress, message, null);
+                if (interruptOnRestart) {
+                    String message = String.format(
+                            "阶段长时间无进展，准备重启子步骤（阶段=%s，重启=%d/%d）",
+                            decision.stage(),
+                            decision.stageRestartCount(),
+                            watchdog.maxRestartPerStage()
+                    );
+                    logger.warn("[{}] {}", task.taskId, message);
+                    webSocketHandler.broadcastTaskUpdate(task.taskId, "PROCESSING", task.progress, message, null);
+                } else {
+                    logger.info(
+                            "[{}] Watchdog idle strike deferred for heartbeat-strong stage: stage={} restart={}/{}",
+                            task.taskId,
+                            decision.stage(),
+                            decision.stageRestartCount(),
+                            watchdog.maxRestartPerStage()
+                    );
+                    return;
+                }
             } else if (decision.action() == TaskWatchdog.Action.FAIL) {
                 logger.error("[{}] {}", task.taskId, decision.reason());
                 webSocketHandler.broadcastTaskUpdate(
@@ -574,15 +614,6 @@ public class TaskProcessingWorker {
                         "任务长时间无进展，准备终止当前任务",
                         null
                 );
-            }
-            if (decision.action() == TaskWatchdog.Action.RESTART
-                    && !watchdog.shouldInterruptOnRestart(decision.stage())) {
-                logger.info(
-                        "[{}] Watchdog restart deferred for heartbeat-strong stage: stage={}",
-                        task.taskId,
-                        decision.stage()
-                );
-                return;
             }
             ownerThread.interrupt();
         }, watchdog.pollIntervalMs(), watchdog.pollIntervalMs(), TimeUnit.MILLISECONDS);
@@ -659,17 +690,30 @@ public class TaskProcessingWorker {
             );
         }
         TaskRuntimeRecoveryService.ResumeDecision resumeDecision = resolveVideoResumeDecision(task, outputDir);
-        if (resumeDecision == null || firstNonBlank(resumeDecision.resumeFromStage(), "download").equals("download")) {
-            return executeVideoPipelineFromDownload(task, outputDir);
-        }
         VideoProcessingOrchestrator.IOPhaseResult recoveredIoResult =
                 buildRecoveredIoPhaseResult(task, outputDir, resumeDecision);
+        String requestedStartStage = firstNonBlank(
+                resumeDecision != null ? resumeDecision.resumeFromStage() : "",
+                "download"
+        );
+        String resolvedStartStage = firstNonBlank(
+                orchestrator.reconcileRecoveredRuntimeContext(
+                        task.taskId,
+                        recoveredIoResult,
+                        requestedStartStage,
+                        recoveredIoResult.timeouts
+                ),
+                requestedStartStage
+        );
+        if ("download".equalsIgnoreCase(resolvedStartStage)) {
+            return executeVideoPipelineFromDownload(task, firstNonBlank(recoveredIoResult.outputDir, outputDir));
+        }
         syncRecoveredOutputDir(task, recoveredIoResult.outputDir);
         syncRecoveredTaskTitle(task, firstNonBlank(
-                resumeDecision.findText("video_title"),
+                resumeDecision != null ? resumeDecision.findText("video_title") : "",
                 recoveredIoResult.metricsVideoTitle
         ));
-        return executeRecoveredVideoPipeline(task, recoveredIoResult, resumeDecision);
+        return executeRecoveredVideoPipeline(task, recoveredIoResult, resolvedStartStage);
     }
 
     private VideoProcessingOrchestrator.ProcessingResult executeVideoPipelineFromDownload(
@@ -688,9 +732,9 @@ public class TaskProcessingWorker {
     private VideoProcessingOrchestrator.ProcessingResult executeRecoveredVideoPipeline(
             TaskEntry task,
             VideoProcessingOrchestrator.IOPhaseResult ioResult,
-            TaskRuntimeRecoveryService.ResumeDecision resumeDecision
+            String startStage
     ) throws Exception {
-        String startStage = firstNonBlank(resumeDecision != null ? resumeDecision.resumeFromStage() : "", "download");
+        ioResult.recoveryStartStage = startStage;
         return switch (startStage) {
             case "transcribe" -> {
                 VideoProcessingOrchestrator.IOPhaseResult transcribed =
@@ -707,6 +751,7 @@ public class TaskProcessingWorker {
             case "phase2a" -> executeVideoPhase2WithPermit(task.taskId, ioResult);
             case "asset_extract_java" -> executeVideoAssetExtractStageWithPermit(task.taskId, ioResult);
             case "phase2b" -> executeVideoPhase2BStageWithPermit(task.taskId, ioResult);
+            case "completed" -> orchestrator.processVideoFromRecoveredOutputs(task.taskId, ioResult);
             default -> executeVideoPipelineFromDownload(task, firstNonBlank(ioResult.outputDir, task.outputDir));
         };
     }
@@ -741,43 +786,48 @@ public class TaskProcessingWorker {
         ioResult.taskId = task.taskId;
         ioResult.videoUrl = task.videoUrl;
         ioResult.outputDir = firstNonBlank(
-                resumeDecision.findText("output_dir"),
+                resumeDecision != null ? resumeDecision.findText("output_dir") : "",
                 task.outputDir,
                 outputDir
         );
         ioResult.videoPath = firstNonBlank(
-                resumeDecision.findText("video_path"),
+                resumeDecision != null ? resumeDecision.findText("video_path") : "",
                 task.videoUrl
         );
-        ioResult.videoDuration = Math.max(1.0d, resumeDecision.findDouble("duration_sec", "video_duration"));
+        ioResult.videoDuration = Math.max(
+                1.0d,
+                resumeDecision != null ? resumeDecision.findDouble("duration_sec", "video_duration") : 0.0d
+        );
         ioResult.downloadedFromUrl = isHttpUrl(task.videoUrl);
         ioResult.cleanupSourcePath = ioResult.downloadedFromUrl ? ioResult.videoPath : "";
         ioResult.pipelineStartTimeMs = System.currentTimeMillis();
         ioResult.metricsOutputDir = ioResult.outputDir;
         ioResult.metricsVideoPath = ioResult.videoPath;
         ioResult.metricsInputVideoUrl = task.videoUrl;
-        ioResult.metricsVideoTitle = resumeDecision.findText("video_title");
-        ioResult.recoveryStartStage = resumeDecision.resumeFromStage();
-        ioResult.subtitlePath = resumeDecision.findText("subtitle_path");
-        ioResult.phase2aSemanticUnitsPath = resumeDecision.findText(
-                "semantic_units_path",
-                "phase2a_semantic_units_path"
-        );
+        ioResult.metricsVideoTitle = resumeDecision != null ? resumeDecision.findText("video_title") : "";
+        ioResult.recoveryStartStage = resumeDecision != null ? resumeDecision.resumeFromStage() : "download";
+        ioResult.subtitlePath = resumeDecision != null ? resumeDecision.findText("subtitle_path") : "";
+        ioResult.phase2aSemanticUnitsPath = resumeDecision != null
+                ? resumeDecision.findText("semantic_units_path", "phase2a_semantic_units_path")
+                : "";
 
         PythonGrpcClient.DownloadResult downloadResult = new PythonGrpcClient.DownloadResult();
         downloadResult.success = true;
         downloadResult.videoPath = ioResult.videoPath;
         downloadResult.durationSec = ioResult.videoDuration;
         downloadResult.videoTitle = ioResult.metricsVideoTitle;
-        downloadResult.resolvedUrl = firstNonBlank(resumeDecision.findText("resolved_url"), task.videoUrl);
-        downloadResult.sourcePlatform = resumeDecision.findText("source_platform");
-        downloadResult.canonicalId = resumeDecision.findText("canonical_id");
-        downloadResult.contentType = resumeDecision.findText("content_type");
+        downloadResult.resolvedUrl = firstNonBlank(
+                resumeDecision != null ? resumeDecision.findText("resolved_url") : "",
+                task.videoUrl
+        );
+        downloadResult.sourcePlatform = resumeDecision != null ? resumeDecision.findText("source_platform") : "";
+        downloadResult.canonicalId = resumeDecision != null ? resumeDecision.findText("canonical_id") : "";
+        downloadResult.contentType = resumeDecision != null ? resumeDecision.findText("content_type") : "";
         ioResult.downloadResult = downloadResult;
 
-        String step2JsonPath = resumeDecision.findText("step2_json_path");
-        String step6JsonPath = resumeDecision.findText("step6_json_path");
-        String sentenceTimestampsPath = resumeDecision.findText("sentence_timestamps_path");
+        String step2JsonPath = resumeDecision != null ? resumeDecision.findText("step2_json_path") : "";
+        String step6JsonPath = resumeDecision != null ? resumeDecision.findText("step6_json_path") : "";
+        String sentenceTimestampsPath = resumeDecision != null ? resumeDecision.findText("sentence_timestamps_path") : "";
         if (!step2JsonPath.isBlank() || !step6JsonPath.isBlank() || !sentenceTimestampsPath.isBlank()) {
             PythonGrpcClient.Stage1Result stage1Result = new PythonGrpcClient.Stage1Result();
             stage1Result.success = true;

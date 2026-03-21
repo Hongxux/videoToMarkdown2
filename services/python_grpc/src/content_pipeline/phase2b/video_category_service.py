@@ -1,7 +1,7 @@
 """
 模块说明：Phase2B 视频级分类服务。
 执行逻辑：
-1) 在 Phase2B 最终产物落盘后，抽取标题、首段正文和大纲组名。
+1) 在 Phase2B 最终产物落盘后，抽取标题、多组正文证据和大纲组名。
 2) 复用 category_classifier prompt 调用 LLM，并通过二次校验压制示例串台。
 3) 立即回写分类路径库、任务级分类结果、video_meta.json 和 var/storage 汇总 JSON。
 实现方式：prompt_loader + llm_gateway + 文件级原子回写。
@@ -35,6 +35,10 @@ _DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 _DEFAULT_CATEGORY_TARGET_LEVEL = 2
 _DEFAULT_CATEGORY_MAX_TARGET_LEVEL = 4
 _DEFAULT_CATEGORY_LEAF_TASK_LIMIT = 10
+_CATEGORY_EVIDENCE_MAX_GROUPS = 8
+_CATEGORY_EVIDENCE_UNITS_PER_GROUP = 2
+_CATEGORY_EVIDENCE_UNIT_CHARS = 320
+_CATEGORY_EVIDENCE_TOTAL_CHARS = 4000
 _CATEGORY_LIBRARY_FILE = "category_paths.txt"
 _TASK_CLASSIFICATION_FILE = "category_classification.json"
 _SUMMARY_JSON_FILE = "category_classification_results.json"
@@ -48,6 +52,8 @@ class VideoCategoryInput:
     title: str
     first_unit_text: str
     group_names: List[str]
+    content_evidence_text: str
+    group_evidence: List[Dict[str, Any]]
 
 
 def _utc_now_iso() -> str:
@@ -125,6 +131,15 @@ def _write_category_library(path: Path, categories: Iterable[str]) -> None:
     )
 
 
+def _compact_evidence_text(value: Any, *, max_chars: int) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
 def _extract_first_unit_text(result_payload: Dict[str, Any]) -> str:
     groups = result_payload.get("knowledge_groups")
     if not isinstance(groups, list):
@@ -155,6 +170,91 @@ def _extract_group_names(result_payload: Dict[str, Any]) -> List[str]:
     )
 
 
+def _extract_group_evidence(result_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    groups = result_payload.get("knowledge_groups")
+    if not isinstance(groups, list):
+        return []
+
+    evidence: List[Dict[str, Any]] = []
+    total_chars = 0
+    for index, group in enumerate(groups, start=1):
+        if not isinstance(group, dict):
+            continue
+        units = group.get("units")
+        if not isinstance(units, list):
+            continue
+        excerpts: List[str] = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            excerpt = _compact_evidence_text(
+                unit.get("body_text") or unit.get("text") or "",
+                max_chars=_CATEGORY_EVIDENCE_UNIT_CHARS,
+            )
+            if not excerpt:
+                continue
+            excerpts.append(excerpt)
+            if len(excerpts) >= _CATEGORY_EVIDENCE_UNITS_PER_GROUP:
+                break
+        if not excerpts:
+            continue
+        group_name = str(group.get("group_name") or "").strip() or f"知识点分组{index}"
+        estimated_chars = len(group_name) + sum(len(item) for item in excerpts)
+        if evidence and total_chars + estimated_chars > _CATEGORY_EVIDENCE_TOTAL_CHARS:
+            break
+        evidence.append(
+            {
+                "group_name": group_name,
+                "unit_excerpts": excerpts,
+            }
+        )
+        total_chars += estimated_chars
+        if len(evidence) >= _CATEGORY_EVIDENCE_MAX_GROUPS:
+            break
+    return evidence
+
+
+def _build_content_evidence_text(group_evidence: Iterable[Dict[str, Any]]) -> str:
+    blocks: List[str] = []
+    for item in group_evidence:
+        group_name = str(item.get("group_name") or "").strip()
+        excerpts = item.get("unit_excerpts")
+        excerpt_text = ""
+        if isinstance(excerpts, list):
+            excerpt_text = " ".join(
+                _compact_evidence_text(excerpt, max_chars=_CATEGORY_EVIDENCE_UNIT_CHARS)
+                for excerpt in excerpts
+                if str(excerpt or "").strip()
+            ).strip()
+        if group_name and excerpt_text:
+            blocks.append(f"{group_name}: {excerpt_text}")
+        elif excerpt_text:
+            blocks.append(excerpt_text)
+        elif group_name:
+            blocks.append(group_name)
+    joined = "\n".join(blocks).strip()
+    if len(joined) <= _CATEGORY_EVIDENCE_TOTAL_CHARS:
+        return joined
+    return joined[: max(0, _CATEGORY_EVIDENCE_TOTAL_CHARS - 3)].rstrip() + "..."
+
+
+def _format_group_evidence_for_prompt(group_evidence: Iterable[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for index, item in enumerate(group_evidence, start=1):
+        group_name = str(item.get("group_name") or "").strip() or f"知识点分组{index}"
+        lines.append(f"{index}. {group_name}")
+        excerpts = item.get("unit_excerpts")
+        if not isinstance(excerpts, list):
+            continue
+        for excerpt_index, excerpt in enumerate(excerpts, start=1):
+            text = _compact_evidence_text(excerpt, max_chars=_CATEGORY_EVIDENCE_UNIT_CHARS)
+            if text:
+                lines.append(f"   - 证据{excerpt_index}: {text}")
+    if not lines:
+        return "(无可用正文证据)"
+    return "\n".join(lines)
+
+
 def _build_video_input(task_dir: Path, title: str = "") -> VideoCategoryInput:
     video_meta_path = task_dir / "video_meta.json"
     result_path = task_dir / "result.json"
@@ -170,16 +270,24 @@ def _build_video_input(task_dir: Path, title: str = "") -> VideoCategoryInput:
     resolved_title = next((item for item in title_candidates if item), "")
     first_unit_text = _extract_first_unit_text(result_payload)
     group_names = _extract_group_names(result_payload)
-    if not resolved_title or not first_unit_text or not group_names:
+    group_evidence = _extract_group_evidence(result_payload)
+    if not group_names and group_evidence:
+        group_names = _normalize_lines(item.get("group_name") for item in group_evidence)
+    content_evidence_text = _build_content_evidence_text(group_evidence)
+    if not first_unit_text:
+        first_unit_text = _compact_evidence_text(content_evidence_text, max_chars=2000)
+    if not resolved_title or not content_evidence_text or not group_names:
         raise ValueError(
             f"分类输入不完整: title={bool(resolved_title)}, "
-            f"first_unit_text={bool(first_unit_text)}, group_names={bool(group_names)}"
+            f"content_evidence_text={bool(content_evidence_text)}, group_names={bool(group_names)}"
         )
     return VideoCategoryInput(
         task_dir=task_dir,
         title=resolved_title,
         first_unit_text=first_unit_text,
         group_names=group_names,
+        content_evidence_text=content_evidence_text,
+        group_evidence=group_evidence,
     )
 
 
@@ -462,6 +570,8 @@ def _write_task_classification(task_input: VideoCategoryInput, classification: D
         "input_snapshot": {
             "first_unit_text": task_input.first_unit_text,
             "group_names": task_input.group_names,
+            "content_evidence_text": task_input.content_evidence_text,
+            "group_evidence": task_input.group_evidence,
         },
         "raw_response": classification.get("raw_response", ""),
         "verified_raw_response": classification.get("verified_raw_response", ""),
@@ -530,15 +640,22 @@ async def _verify_classification(
     normalized_prefix = _normalize_category_path(required_prefix)
     if normalized_prefix:
         prefix_constraint_text = (
-            f"\n5. `category_path` 没有保持在父目录 `{normalized_prefix}` 下进一步细分；"
+            f"\n6. `category_path` 没有保持在父目录 `{normalized_prefix}` 下进一步细分；"
         )
+    group_evidence_text = _format_group_evidence_for_prompt(task_input.group_evidence)
     verify_prompt = f"""请审查下面这个视频分类结果是否严格基于输入事实。
 
 如果候选结果存在任一问题，你必须直接纠正：
-1. `category_path` 与标题、第一段核心正文、大纲组名的核心主题不一致；
-2. `reasoning` 引用了输入中不存在的证据词、示例内容或串台信息；
-3. `is_new` 与当前分类路径库是否包含该 `category_path` 不一致；
-4. `category_path` 不是唯一、互斥，且层级深度小于 `target_level={target_level}` 或大于 `max_target_level={max_target_level}`。{prefix_constraint_text}
+1. `category_path` 没有反映跨多个分组重复出现的核心知识主题；
+2. `category_path` 主要依赖标题、开场首段、单个分组或偶发示例，而不是整片主体内容；
+3. `reasoning` 引用了输入中不存在的证据词、示例内容或串台信息；
+4. `is_new` 与当前分类路径库是否包含该 `category_path` 不一致；
+5. `category_path` 不是唯一、互斥，且层级深度小于 `target_level={target_level}` 或大于 `max_target_level={max_target_level}`。{prefix_constraint_text}
+
+审查时必须遵守：
+- 如果标题、首段和多组正文证据冲突，以多组正文证据为准；
+- `group_names` 只能作为结构线索，不能代替正文证据；
+- 优先复用现有分类路径，不要为同义主题新造近义路径。
 
 你必须自己重新核对，不要盲从候选结果。
 请只输出修正后的合法 JSON。
@@ -546,11 +663,17 @@ async def _verify_classification(
 ## 视频标题
 {task_input.title}
 
-## 第一段核心正文
+## 首段正文（仅作辅助，不能单独决定分类）
 {task_input.first_unit_text}
 
 ## 大纲组名
 {json.dumps(task_input.group_names, ensure_ascii=False)}
+
+## 多组正文证据
+{group_evidence_text}
+
+## 整片内容证据摘要
+{task_input.content_evidence_text}
 
 ## 当前分类路径库（仅展示符合 target_level 和父目录约束的候选路径）
 {json.dumps(prompt_categories, ensure_ascii=False)}
@@ -604,6 +727,8 @@ async def _classify_for_target_level(
             "video_title": task_input.title,
             "first_unit_text": task_input.first_unit_text,
             "group_names": "\n".join(f"- {name}" for name in task_input.group_names),
+            "group_evidence": _format_group_evidence_for_prompt(task_input.group_evidence),
+            "content_evidence_text": task_input.content_evidence_text,
             "categories": "\n".join(prompt_categories),
             "target_level": target_level,
             "max_target_level": max_target_level,

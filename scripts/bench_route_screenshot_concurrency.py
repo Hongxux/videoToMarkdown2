@@ -7,6 +7,7 @@ import functools
 import json
 import os
 import statistics
+import sys
 import threading
 import time
 from collections import Counter, defaultdict
@@ -15,14 +16,36 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import matplotlib
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import psutil
 
 from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
 from services.python_grpc.src.vision_validation.worker import init_cv_worker, run_select_screenshots_for_range_task
 
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt  # noqa: E402
+plt = None
+_MATPLOTLIB_LOAD_ATTEMPTED = False
+
+
+def _load_pyplot():
+    global plt
+    global _MATPLOTLIB_LOAD_ATTEMPTED
+    if _MATPLOTLIB_LOAD_ATTEMPTED:
+        return plt
+    _MATPLOTLIB_LOAD_ATTEMPTED = True
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as loaded_plt  # noqa: E402
+
+        plt = loaded_plt
+    except Exception as exc:  # pragma: no cover - benchmark helper fallback
+        print(f"[bench_route_screenshot_concurrency] matplotlib unavailable, skip charts: {exc}", flush=True)
+        plt = None
+    return plt
 
 
 def _now_iso() -> str:
@@ -51,8 +74,8 @@ def _parse_mode_list(raw: str) -> List[str]:
         token = item.strip().lower()
         if not token:
             continue
-        if token not in {"process_streaming", "legacy_batch"}:
-            raise ValueError(f"mode 仅支持 process_streaming 或 legacy_batch: {token}")
+        if token not in {"process_streaming", "process_batch", "legacy_batch"}:
+            raise ValueError(f"mode 仅支持 process_streaming/process_batch/legacy_batch: {token}")
         values.append(token)
     dedup = sorted(set(values))
     if not dedup:
@@ -160,8 +183,9 @@ def _jsonable(value: Any) -> Any:
 
 
 class _SystemSampler:
-    def __init__(self, interval_sec: float) -> None:
+    def __init__(self, interval_sec: float, extra_metrics_provider=None) -> None:
         self.interval_sec = max(0.2, float(interval_sec))
+        self.extra_metrics_provider = extra_metrics_provider
         self.samples: List[Dict[str, Any]] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -179,30 +203,124 @@ class _SystemSampler:
         return self.samples
 
     def _run(self) -> None:
+        current = psutil.Process()
         psutil.cpu_percent(interval=None)
         while not self._stop.is_set():
             cpu = float(psutil.cpu_percent(interval=self.interval_sec))
             vm = psutil.virtual_memory()
-            self.samples.append(
-                {
-                    "ts": _now_iso(),
-                    "cpu_percent": cpu,
-                    "memory_percent": float(vm.percent),
-                }
-            )
+            current_rss_mb = 0.0
+            child_rss_mb = 0.0
+            process_count = 1
+            try:
+                current_rss_mb = float(current.memory_info().rss) / (1024.0 * 1024.0)
+                children = current.children(recursive=True)
+                process_count = 1 + len(children)
+                for child in children:
+                    try:
+                        child_rss_mb += float(child.memory_info().rss) / (1024.0 * 1024.0)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                process_count = 0
+
+            sample = {
+                "ts": _now_iso(),
+                "cpu_percent": cpu,
+                "memory_percent": float(vm.percent),
+                "process_tree_rss_mb": current_rss_mb + child_rss_mb,
+                "child_rss_mb": child_rss_mb,
+                "process_count": process_count,
+            }
+            if self.extra_metrics_provider is not None:
+                try:
+                    extra_metrics = self.extra_metrics_provider() or {}
+                except Exception as exc:
+                    extra_metrics = {"metrics_provider_error": str(exc)}
+                if isinstance(extra_metrics, dict):
+                    sample.update(_jsonable(extra_metrics))
+            self.samples.append(sample)
 
 
 def _summarize_system_samples(samples: List[Dict[str, Any]]) -> Dict[str, float]:
     if not samples:
-        return {"cpu_mean": 0.0, "cpu_p95": 0.0, "mem_percent_mean": 0.0}
+        return {
+            "cpu_mean": 0.0,
+            "cpu_p95": 0.0,
+            "mem_percent_mean": 0.0,
+            "process_tree_rss_mb_mean": 0.0,
+            "process_tree_rss_mb_peak": 0.0,
+            "child_rss_mb_mean": 0.0,
+            "child_rss_mb_peak": 0.0,
+            "process_count_mean": 0.0,
+            "process_count_peak": 0.0,
+            "scheduler_outstanding_peak": 0.0,
+            "executor_outstanding_peak": 0.0,
+            "executor_inflight_peak": 0.0,
+            "unit_queue_depth_peak": 0.0,
+            "result_queue_depth_peak": 0.0,
+        }
 
     cpu_values = [float(item["cpu_percent"]) for item in samples]
     mem_values = [float(item["memory_percent"]) for item in samples]
+    process_tree_rss_values = [float(item.get("process_tree_rss_mb", 0.0)) for item in samples]
+    child_rss_values = [float(item.get("child_rss_mb", 0.0)) for item in samples]
+    process_count_values = [float(item.get("process_count", 0.0)) for item in samples]
+    scheduler_outstanding_values = [float(item.get("scheduler_outstanding", 0.0)) for item in samples]
+    executor_outstanding_values = [float(item.get("executor_outstanding", 0.0)) for item in samples]
+    executor_inflight_values = [float(item.get("executor_inflight", 0.0)) for item in samples]
+    unit_queue_values = [float(item.get("unit_queue_depth", 0.0)) for item in samples]
+    result_queue_values = [float(item.get("result_queue_depth", 0.0)) for item in samples]
     return {
         "cpu_mean": float(statistics.fmean(cpu_values)),
         "cpu_p95": _percentile(cpu_values, 95),
         "mem_percent_mean": float(statistics.fmean(mem_values)),
+        "process_tree_rss_mb_mean": float(statistics.fmean(process_tree_rss_values)),
+        "process_tree_rss_mb_peak": max(process_tree_rss_values) if process_tree_rss_values else 0.0,
+        "child_rss_mb_mean": float(statistics.fmean(child_rss_values)),
+        "child_rss_mb_peak": max(child_rss_values) if child_rss_values else 0.0,
+        "process_count_mean": float(statistics.fmean(process_count_values)),
+        "process_count_peak": max(process_count_values) if process_count_values else 0.0,
+        "scheduler_outstanding_peak": max(scheduler_outstanding_values) if scheduler_outstanding_values else 0.0,
+        "executor_outstanding_peak": max(executor_outstanding_values) if executor_outstanding_values else 0.0,
+        "executor_inflight_peak": max(executor_inflight_values) if executor_inflight_values else 0.0,
+        "unit_queue_depth_peak": max(unit_queue_values) if unit_queue_values else 0.0,
+        "result_queue_depth_peak": max(result_queue_values) if result_queue_values else 0.0,
     }
+
+
+def _build_runtime_metrics() -> Dict[str, float]:
+    return {
+        "scheduler_outstanding": 0.0,
+        "executor_outstanding": 0.0,
+        "executor_inflight": 0.0,
+        "unit_queue_depth": 0.0,
+        "result_queue_depth": 0.0,
+    }
+
+
+def _snapshot_runtime_metrics(metrics: Dict[str, float]) -> Dict[str, float]:
+    return {
+        "scheduler_outstanding": float(metrics.get("scheduler_outstanding", 0.0)),
+        "executor_outstanding": float(metrics.get("executor_outstanding", 0.0)),
+        "executor_inflight": float(metrics.get("executor_inflight", 0.0)),
+        "unit_queue_depth": float(metrics.get("unit_queue_depth", 0.0)),
+        "result_queue_depth": float(metrics.get("result_queue_depth", 0.0)),
+    }
+
+
+def _refresh_streaming_runtime_metrics(
+    runtime_metrics: Dict[str, float],
+    *,
+    unit_queue: asyncio.Queue,
+    result_queue: asyncio.Queue,
+) -> None:
+    inflight = float(runtime_metrics.get("executor_inflight", 0.0))
+    unit_queue_depth = float(unit_queue.qsize())
+    result_queue_depth = float(result_queue.qsize())
+    runtime_metrics["unit_queue_depth"] = unit_queue_depth
+    runtime_metrics["result_queue_depth"] = result_queue_depth
+    runtime_metrics["executor_outstanding"] = unit_queue_depth + inflight + result_queue_depth
+    runtime_metrics["scheduler_outstanding"] = runtime_metrics["executor_outstanding"]
 
 
 async def _run_process_streaming(
@@ -213,6 +331,7 @@ async def _run_process_streaming(
     queue_size: int,
     coarse_fps: float,
     fine_fps: float,
+    runtime_metrics: Dict[str, float],
 ) -> Tuple[List[Dict[str, Any]], Counter]:
     loop = asyncio.get_running_loop()
     ordered_units = list(enumerate(units))
@@ -224,12 +343,27 @@ async def _run_process_streaming(
     async def _producer() -> None:
         for order_idx, unit in ordered_units:
             await unit_queue.put((order_idx, unit))
+            _refresh_streaming_runtime_metrics(
+                runtime_metrics,
+                unit_queue=unit_queue,
+                result_queue=result_queue,
+            )
         for _ in range(workers):
             await unit_queue.put(None)
+            _refresh_streaming_runtime_metrics(
+                runtime_metrics,
+                unit_queue=unit_queue,
+                result_queue=result_queue,
+            )
 
     async def _consumer(executor: ProcessPoolExecutor) -> None:
         while True:
             item = await unit_queue.get()
+            _refresh_streaming_runtime_metrics(
+                runtime_metrics,
+                unit_queue=unit_queue,
+                result_queue=result_queue,
+            )
             if item is None:
                 unit_queue.task_done()
                 break
@@ -238,6 +372,12 @@ async def _run_process_streaming(
             unit_id = unit["unit_id"]
             start_sec = float(unit["start_sec"])
             end_sec = float(unit["end_sec"])
+            runtime_metrics["executor_inflight"] += 1.0
+            _refresh_streaming_runtime_metrics(
+                runtime_metrics,
+                unit_queue=unit_queue,
+                result_queue=result_queue,
+            )
 
             try:
                 result = await loop.run_in_executor(
@@ -264,8 +404,20 @@ async def _run_process_streaming(
                     "elapsed_ms": 0.0,
                     "error": str(exc),
                 }
+            finally:
+                runtime_metrics["executor_inflight"] = max(0.0, runtime_metrics["executor_inflight"] - 1.0)
+                _refresh_streaming_runtime_metrics(
+                    runtime_metrics,
+                    unit_queue=unit_queue,
+                    result_queue=result_queue,
+                )
 
             await result_queue.put((order_idx, result))
+            _refresh_streaming_runtime_metrics(
+                runtime_metrics,
+                unit_queue=unit_queue,
+                result_queue=result_queue,
+            )
             unit_queue.task_done()
 
     async def _collector(total_count: int) -> Dict[int, Dict[str, Any]]:
@@ -275,6 +427,11 @@ async def _run_process_streaming(
             order_idx, result = await result_queue.get()
             collected[order_idx] = result
             done += 1
+            _refresh_streaming_runtime_metrics(
+                runtime_metrics,
+                unit_queue=unit_queue,
+                result_queue=result_queue,
+            )
             pid = result.get("worker_pid")
             if isinstance(pid, int):
                 pid_counter[pid] += 1
@@ -294,6 +451,68 @@ async def _run_process_streaming(
     for order_idx, _ in ordered_units:
         results.append(collected.get(order_idx, {}))
     return results, pid_counter
+
+
+def _build_process_route_call(
+    *,
+    video_path: str,
+    unit: Dict[str, Any],
+    coarse_fps: float,
+    fine_fps: float,
+):
+    return functools.partial(
+        run_select_screenshots_for_range_task,
+        video_path=video_path,
+        unit_id=unit["unit_id"],
+        start_sec=float(unit["start_sec"]),
+        end_sec=float(unit["end_sec"]),
+        coarse_fps=coarse_fps,
+        fine_fps=fine_fps,
+        stable_islands_override=None,
+    )
+
+
+async def _run_process_batch(
+    *,
+    video_path: str,
+    units: List[Dict[str, Any]],
+    workers: int,
+    coarse_fps: float,
+    fine_fps: float,
+    runtime_metrics: Dict[str, float],
+) -> Tuple[List[Dict[str, Any]], Counter]:
+    loop = asyncio.get_running_loop()
+    pid_counter: Counter = Counter()
+
+    async def _await_single(future) -> Dict[str, Any]:
+        try:
+            return await future
+        finally:
+            runtime_metrics["executor_outstanding"] = max(0.0, runtime_metrics["executor_outstanding"] - 1.0)
+            runtime_metrics["scheduler_outstanding"] = runtime_metrics["executor_outstanding"]
+
+    with ProcessPoolExecutor(max_workers=workers, initializer=init_cv_worker) as executor:
+        tasks = []
+        for unit in units:
+            future = loop.run_in_executor(
+                    executor,
+                    _build_process_route_call(
+                        video_path=video_path,
+                        unit=unit,
+                        coarse_fps=coarse_fps,
+                        fine_fps=fine_fps,
+                    ),
+                )
+            tasks.append(_await_single(future))
+            runtime_metrics["executor_outstanding"] = float(len(tasks))
+            runtime_metrics["scheduler_outstanding"] = runtime_metrics["executor_outstanding"]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    for item in results:
+        pid = item.get("worker_pid")
+        if isinstance(pid, int):
+            pid_counter[pid] += 1
+    return list(results), pid_counter
 
 
 def _select_screenshots_sync(
@@ -385,7 +604,11 @@ async def _run_once(
     fine_fps: float,
     sample_interval_sec: float,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    sampler = _SystemSampler(sample_interval_sec)
+    runtime_metrics = _build_runtime_metrics()
+    sampler = _SystemSampler(
+        sample_interval_sec,
+        extra_metrics_provider=lambda: _snapshot_runtime_metrics(runtime_metrics),
+    )
     started_at = _now_iso()
     sampler.start()
     t0 = time.perf_counter()
@@ -403,6 +626,16 @@ async def _run_once(
                 queue_size=queue_size,
                 coarse_fps=coarse_fps,
                 fine_fps=fine_fps,
+                runtime_metrics=runtime_metrics,
+            )
+        elif mode == "process_batch":
+            results, pid_counter = await _run_process_batch(
+                video_path=video_path,
+                units=units,
+                workers=workers,
+                coarse_fps=coarse_fps,
+                fine_fps=fine_fps,
+                runtime_metrics=runtime_metrics,
             )
         else:
             results, pid_counter = await _run_legacy_batch(
@@ -473,6 +706,14 @@ def _summarize_by_case(run_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         screenshots_values = [float(item["screenshots_total"]) for item in success_rows]
         error_units_values = [float(item["error_units"]) for item in rows]
         pid_counts = [float(item["pid_unique_count"]) for item in rows]
+        scheduler_outstanding_peak_values = [float(item.get("scheduler_outstanding_peak", 0.0)) for item in rows]
+        executor_outstanding_peak_values = [float(item.get("executor_outstanding_peak", 0.0)) for item in rows]
+        executor_inflight_peak_values = [float(item.get("executor_inflight_peak", 0.0)) for item in rows]
+        unit_queue_peak_values = [float(item.get("unit_queue_depth_peak", 0.0)) for item in rows]
+        result_queue_peak_values = [float(item.get("result_queue_depth_peak", 0.0)) for item in rows]
+        rss_peak_values = [float(item.get("process_tree_rss_mb_peak", 0.0)) for item in rows]
+        child_rss_peak_values = [float(item.get("child_rss_mb_peak", 0.0)) for item in rows]
+        process_count_peak_values = [float(item.get("process_count_peak", 0.0)) for item in rows]
         sample = rows[0]
         summary_rows.append(
             {
@@ -493,6 +734,30 @@ def _summarize_by_case(run_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 else 0.0,
                 "error_units_mean": float(statistics.fmean(error_units_values)) if error_units_values else 0.0,
                 "pid_unique_count_mean": float(statistics.fmean(pid_counts)) if pid_counts else 0.0,
+                "scheduler_outstanding_peak_mean": float(statistics.fmean(scheduler_outstanding_peak_values))
+                if scheduler_outstanding_peak_values
+                else 0.0,
+                "executor_outstanding_peak_mean": float(statistics.fmean(executor_outstanding_peak_values))
+                if executor_outstanding_peak_values
+                else 0.0,
+                "executor_inflight_peak_mean": float(statistics.fmean(executor_inflight_peak_values))
+                if executor_inflight_peak_values
+                else 0.0,
+                "unit_queue_depth_peak_mean": float(statistics.fmean(unit_queue_peak_values))
+                if unit_queue_peak_values
+                else 0.0,
+                "result_queue_depth_peak_mean": float(statistics.fmean(result_queue_peak_values))
+                if result_queue_peak_values
+                else 0.0,
+                "process_tree_rss_mb_peak_mean": float(statistics.fmean(rss_peak_values))
+                if rss_peak_values
+                else 0.0,
+                "child_rss_mb_peak_mean": float(statistics.fmean(child_rss_peak_values))
+                if child_rss_peak_values
+                else 0.0,
+                "process_count_peak_mean": float(statistics.fmean(process_count_peak_values))
+                if process_count_peak_values
+                else 0.0,
             }
         )
     return summary_rows
@@ -516,31 +781,13 @@ def _select_recommendation(summary_rows: List[Dict[str, Any]]) -> Dict[str, Any]
     )
     best = ranked[0]
 
-    best_process = None
-    best_legacy = None
-    for row in ranked:
-        if row["mode"] == "process_streaming" and best_process is None:
-            best_process = row
-        if row["mode"] == "legacy_batch" and best_legacy is None:
-            best_legacy = row
-
-    mode_recommend = "process_streaming"
-    mode_reason = "仅发现 process_streaming 样本"
-    if best_process and best_legacy:
-        if float(best_process["throughput_units_per_sec_mean"]) >= float(best_legacy["throughput_units_per_sec_mean"]):
-            mode_recommend = "process_streaming"
-            mode_reason = "吞吐更高或持平"
-        else:
-            mode_recommend = "legacy_batch"
-            mode_reason = "吞吐更高"
-
     return {
         "best_case_id": best["case_id"],
         "best_mode": best["mode"],
         "best_workers": int(best["workers"]),
         "best_queue_size": int(best["queue_size"]),
-        "mode_recommendation": mode_recommend,
-        "mode_reason": mode_reason,
+        "mode_recommendation": best["mode"],
+        "mode_reason": "吞吐更高且时延更低",
         "rule": "success_rate 优先，随后吞吐最大且时延更低",
         "top3": [item["case_id"] for item in ranked[:3]],
     }
@@ -559,6 +806,9 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 
 def _plot_summary(summary_rows: List[Dict[str, Any]], output_png: Path) -> None:
+    pyplot = _load_pyplot()
+    if pyplot is None:
+        return
     if not summary_rows:
         return
 
@@ -569,7 +819,7 @@ def _plot_summary(summary_rows: List[Dict[str, Any]], output_png: Path) -> None:
     errors = [float(item["error_units_mean"]) for item in rows]
     pid_counts = [float(item["pid_unique_count_mean"]) for item in rows]
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig, axes = pyplot.subplots(2, 2, figsize=(16, 10))
 
     ax1 = axes[0][0]
     ax1.bar(labels, elapsed, color="#1f77b4")
@@ -601,7 +851,7 @@ def _plot_summary(summary_rows: List[Dict[str, Any]], output_png: Path) -> None:
 
     fig.tight_layout()
     fig.savefig(output_png, dpi=160)
-    plt.close(fig)
+    pyplot.close(fig)
 
 
 def _write_report(
@@ -628,17 +878,19 @@ def _write_report(
     lines.append("")
     lines.append("## 方法")
     lines.append("- `process_streaming` 模式复刻生产者-消费者队列 + ProcessPool 调度。")
+    lines.append("- `process_batch` 模式复刻同一 ProcessPool worker 函数的一次性批量提交。")
     lines.append("- `legacy_batch` 模式复刻批处理同步截图选择。")
     lines.append("- 组合执行后按吞吐/时延/错误数汇总。")
     lines.append("")
     lines.append("## 汇总")
-    lines.append("| case | runs | success(%) | elapsed_mean(ms) | throughput(units/s) | screenshots_mean | error_units_mean | pid_unique_mean |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| case | runs | success(%) | elapsed_mean(ms) | throughput(units/s) | screenshots_mean | out_peak | rss_peak(MB) | error_units_mean | pid_unique_mean |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in sorted(summary_rows, key=lambda item: float(item["throughput_units_per_sec_mean"]), reverse=True):
         lines.append(
             f"| {row['case_id']} | {int(row['runs'])} | {row['success_rate_percent']:.2f} | "
             f"{row['elapsed_ms_mean']:.2f} | {row['throughput_units_per_sec_mean']:.3f} | "
-            f"{row['screenshots_total_mean']:.2f} | {row['error_units_mean']:.2f} | "
+            f"{row['screenshots_total_mean']:.2f} | {row.get('scheduler_outstanding_peak_mean', 0.0):.2f} | "
+            f"{row.get('process_tree_rss_mb_peak_mean', 0.0):.2f} | {row['error_units_mean']:.2f} | "
             f"{row['pid_unique_count_mean']:.2f} |"
         )
     lines.append("")
@@ -706,7 +958,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
     cases: List[Dict[str, Any]] = []
     for mode in modes:
-        if mode == "legacy_batch":
+        if mode in {"process_batch", "legacy_batch"}:
             for worker in workers:
                 cases.append({"mode": mode, "workers": worker, "queue_size": 1})
         else:
@@ -786,7 +1038,7 @@ def main() -> None:
     parser.add_argument("--output-root", default="var/artifacts/benchmarks", help="产物根目录")
     parser.add_argument("--task-name", default="route_screenshot_concurrency", help="任务名称")
 
-    parser.add_argument("--modes", default="process_streaming", help="模式列表: process_streaming,legacy_batch")
+    parser.add_argument("--modes", default="process_streaming", help="模式列表: process_streaming,process_batch,legacy_batch")
     parser.add_argument("--workers", default="1,2,4,6", help="worker 阶梯")
     parser.add_argument("--queue-sizes", default="4,8,16", help="queue 大小阶梯")
     parser.add_argument("--coarse-fps", type=float, default=2.0, help="粗采样 fps")

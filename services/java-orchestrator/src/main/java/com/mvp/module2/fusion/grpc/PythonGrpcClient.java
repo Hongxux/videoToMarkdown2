@@ -693,6 +693,95 @@ public class PythonGrpcClient {
         );
     }
 
+    public static class RecoverRuntimeContextResult {
+        public boolean success;
+        public String resolvedStartStage;
+        public boolean downloadReady;
+        public String videoPath;
+        public double videoDurationSec;
+        public String videoTitle;
+        public String resolvedUrl;
+        public String sourcePlatform;
+        public String canonicalId;
+        public String contentType;
+        public boolean transcribeReady;
+        public String subtitlePath;
+        public boolean stage1Ready;
+        public String step2JsonPath;
+        public String step6JsonPath;
+        public String sentenceTimestampsPath;
+        public boolean phase2aReady;
+        public String semanticUnitsPath;
+        public boolean phase2bReady;
+        public String markdownPath;
+        public String jsonPath;
+        public int reusedLlmCallCount;
+        public int reusedChunkCount;
+        public String decisionReason;
+        public String errorMsg;
+    }
+
+    public RecoverRuntimeContextResult recoverRuntimeContext(
+            String taskId,
+            String outputDir,
+            String requestedStartStage,
+            String semanticUnitsPath,
+            String requestedVideoPath,
+            String requestedSubtitlePath,
+            int timeoutSec
+    ) {
+        try {
+            logger.info("[{}] Calling RecoverRuntimeContext (requestedStartStage={})", taskId, requestedStartStage);
+
+            RecoverRuntimeContextRequest request = RecoverRuntimeContextRequest.newBuilder()
+                .setTaskId(taskId != null ? taskId : "")
+                .setOutputDir(outputDir != null ? outputDir : "")
+                .setRequestedStartStage(requestedStartStage != null ? requestedStartStage : "")
+                .setSemanticUnitsPath(semanticUnitsPath != null ? semanticUnitsPath : "")
+                .setRequestedVideoPath(requestedVideoPath != null ? requestedVideoPath : "")
+                .setRequestedSubtitlePath(requestedSubtitlePath != null ? requestedSubtitlePath : "")
+                .build();
+
+            RecoverRuntimeContextResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .recoverRuntimeContext(request);
+
+            RecoverRuntimeContextResult result = new RecoverRuntimeContextResult();
+            result.success = response.getSuccess();
+            result.resolvedStartStage = response.getResolvedStartStage();
+            result.downloadReady = response.getDownloadReady();
+            result.videoPath = response.getVideoPath();
+            result.videoDurationSec = response.getVideoDurationSec();
+            result.videoTitle = response.getVideoTitle();
+            result.resolvedUrl = response.getResolvedUrl();
+            result.sourcePlatform = response.getSourcePlatform();
+            result.canonicalId = response.getCanonicalId();
+            result.contentType = response.getContentType();
+            result.transcribeReady = response.getTranscribeReady();
+            result.subtitlePath = response.getSubtitlePath();
+            result.stage1Ready = response.getStage1Ready();
+            result.step2JsonPath = response.getStep2JsonPath();
+            result.step6JsonPath = response.getStep6JsonPath();
+            result.sentenceTimestampsPath = response.getSentenceTimestampsPath();
+            result.phase2aReady = response.getPhase2AReady();
+            result.semanticUnitsPath = response.getSemanticUnitsPath();
+            result.phase2bReady = response.getPhase2BReady();
+            result.markdownPath = response.getMarkdownPath();
+            result.jsonPath = response.getJsonPath();
+            result.reusedLlmCallCount = response.getReusedLlmCallCount();
+            result.reusedChunkCount = response.getReusedChunkCount();
+            result.decisionReason = response.getDecisionReason();
+            result.errorMsg = response.getErrorMsg();
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] RecoverRuntimeContext failed: {}", taskId, e.getStatus());
+            RecoverRuntimeContextResult result = new RecoverRuntimeContextResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
     public static class WatchdogSignalProgress {
         public String schema;
         public String source;
@@ -1446,12 +1535,18 @@ public class PythonGrpcClient {
 
     public MaterialGenerationResult generateMaterialRequests(
             String taskId, List<MaterialGenerationInput> units, String videoPath, int timeoutSec) {
+        return generateMaterialRequests(taskId, units, videoPath, "", timeoutSec);
+    }
+
+    public MaterialGenerationResult generateMaterialRequests(
+            String taskId, List<MaterialGenerationInput> units, String videoPath, String outputDir, int timeoutSec) {
          try {
             logger.info("[{}] GenerateMaterialRequests: {} units", taskId, units.size());
 
             GenerateMaterialRequestsRequest.Builder requestBuilder = GenerateMaterialRequestsRequest.newBuilder()
                 .setTaskId(taskId)
-                .setVideoPath(videoPath);
+                .setVideoPath(videoPath)
+                .setOutputDir(outputDir != null ? outputDir : "");
 
             for (MaterialGenerationInput unit : units) {
                 SemanticUnitForMaterialGeneration.Builder unitBuilder = SemanticUnitForMaterialGeneration.newBuilder()
@@ -1574,8 +1669,13 @@ public class PythonGrpcClient {
 
     public CompletableFuture<MaterialGenerationResult> generateMaterialRequestsAsync(
             String taskId, List<MaterialGenerationInput> units, String videoPath, int timeoutSec) {
+        return generateMaterialRequestsAsync(taskId, units, videoPath, "", timeoutSec);
+    }
+
+    public CompletableFuture<MaterialGenerationResult> generateMaterialRequestsAsync(
+            String taskId, List<MaterialGenerationInput> units, String videoPath, String outputDir, int timeoutSec) {
         return CompletableFuture.supplyAsync(
-            () -> generateMaterialRequests(taskId, units, videoPath, timeoutSec)
+            () -> generateMaterialRequests(taskId, units, videoPath, outputDir, timeoutSec)
         );
     }
 
@@ -1733,38 +1833,38 @@ public class PythonGrpcClient {
         public int freedWorkersCount;
         public float freedMemoryMb;
     }
+
+    public ReleaseResourcesResult releaseCVResources(String taskId) {
+        try {
+            logger.info("[{}] Calling ReleaseCVResources", taskId);
+
+            ReleaseResourcesRequest request = ReleaseResourcesRequest.newBuilder()
+                .setTaskId(taskId != null ? taskId : "")
+                .build();
+
+            ReleaseResourcesResponse response = blockingStub
+                .withDeadlineAfter(5, TimeUnit.SECONDS)
+                .releaseCVResources(request);
+
+            ReleaseResourcesResult result = new ReleaseResourcesResult();
+            result.success = response.getSuccess();
+            result.message = response.getMessage();
+            result.freedWorkersCount = response.getFreedWorkersCount();
+            result.freedMemoryMb = response.getFreedMemoryMb();
+            logger.info("[{}] ReleaseCVResources result: {}", taskId, result.message);
+            return result;
+
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] ReleaseCVResources failed: {}", taskId, e.getStatus());
+            ReleaseResourcesResult result = new ReleaseResourcesResult();
+            result.success = false;
+            result.message = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
     
     public CompletableFuture<ReleaseResourcesResult> releaseCVResourcesAsync(String taskId) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] Calling ReleaseCVResources", taskId);
-                
-                ReleaseResourcesRequest request = ReleaseResourcesRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .build();
-                
-                // Short timeout (5s) as this should be fast
-                ReleaseResourcesResponse response = blockingStub
-                    .withDeadlineAfter(5, TimeUnit.SECONDS)
-                    .releaseCVResources(request);
-                
-                ReleaseResourcesResult result = new ReleaseResourcesResult();
-                result.success = response.getSuccess();
-                result.message = response.getMessage();
-                result.freedWorkersCount = response.getFreedWorkersCount();
-                result.freedMemoryMb = response.getFreedMemoryMb();
-                
-                logger.info("[{}] ReleaseCVResources result: {}", taskId, result.message);
-                return result;
-                
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] ReleaseCVResources failed: {}", taskId, e.getStatus());
-                ReleaseResourcesResult result = new ReleaseResourcesResult();
-                result.success = false;
-                result.message = statusDescriptionOrCode(e);
-                return result;
-            }
-        });
+        return CompletableFuture.supplyAsync(() -> releaseCVResources(taskId));
     }
 
     private String statusDescriptionOrCode(StatusRuntimeException e) {

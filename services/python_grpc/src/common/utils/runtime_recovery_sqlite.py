@@ -104,6 +104,35 @@ class RuntimeRecoverySqliteIndex:
                 cls._shared_instances[cache_key] = instance
             return instance
 
+    @classmethod
+    def release_shared(
+        cls,
+        *,
+        db_path: Optional[str] = None,
+    ) -> bool:
+        resolved_path = Path(db_path).expanduser().resolve() if db_path else resolve_runtime_recovery_db_path()
+        cache_key = str(resolved_path)
+        with cls._shared_instances_lock:
+            instance = cls._shared_instances.pop(cache_key, None)
+        if instance is None:
+            return False
+        instance.close()
+        return True
+
+    @classmethod
+    def release_all_shared(cls) -> int:
+        with cls._shared_instances_lock:
+            instances = list(cls._shared_instances.values())
+            cls._shared_instances.clear()
+        released = 0
+        for instance in instances:
+            try:
+                instance.close()
+                released += 1
+            except Exception:
+                logger.debug("Ignore runtime sqlite shared close failure: path=%s", getattr(instance, "db_path", ""))
+        return released
+
     def __init__(
         self,
         *,
@@ -151,6 +180,8 @@ class RuntimeRecoverySqliteIndex:
         self._process_pid = int(os.getpid())
         self._thread_local = threading.local()
         self._write_lock = threading.Lock()
+        self._read_connections_lock = threading.Lock()
+        self._read_connections: Dict[int, sqlite3.Connection] = {}
         self._write_connection: Optional[sqlite3.Connection] = None
         self._ensure_schema()
 
@@ -169,13 +200,9 @@ class RuntimeRecoverySqliteIndex:
         return connection
 
     def _reset_process_local_state(self) -> None:
+        self._close_all_read_connections()
         self._thread_local = threading.local()
-        if self._write_connection is not None:
-            try:
-                self._write_connection.close()
-            except Exception:
-                pass
-            self._write_connection = None
+        self._invalidate_write_connection()
         self._process_pid = int(os.getpid())
 
     def _ensure_process_local_state(self) -> None:
@@ -199,6 +226,38 @@ class RuntimeRecoverySqliteIndex:
             except Exception:
                 pass
             self._write_connection = None
+
+    def _register_read_connection(self, connection: sqlite3.Connection) -> None:
+        thread_id = threading.get_ident()
+        with self._read_connections_lock:
+            previous = self._read_connections.get(thread_id)
+            self._read_connections[thread_id] = connection
+        if previous is not None and previous is not connection:
+            try:
+                previous.close()
+            except Exception:
+                pass
+
+    def _close_all_read_connections(self) -> int:
+        with self._read_connections_lock:
+            connections = list(self._read_connections.values())
+            self._read_connections.clear()
+        closed = 0
+        for connection in connections:
+            try:
+                connection.close()
+            except Exception:
+                pass
+            else:
+                closed += 1
+        return closed
+
+    def close(self) -> int:
+        self._ensure_process_local_state()
+        closed_read_connections = self._close_all_read_connections()
+        self._thread_local = threading.local()
+        self._invalidate_write_connection()
+        return closed_read_connections
 
     @staticmethod
     def _table_has_column(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
@@ -801,6 +860,7 @@ class RuntimeRecoverySqliteIndex:
         if connection is None:
             connection = self._connect()
             self._thread_local.read_connection = connection
+            self._register_read_connection(connection)
         try:
             return callback(connection)
         except sqlite3.ProgrammingError:
@@ -810,6 +870,7 @@ class RuntimeRecoverySqliteIndex:
                 pass
             connection = self._connect()
             self._thread_local.read_connection = connection
+            self._register_read_connection(connection)
             return callback(connection)
         finally:
             pass

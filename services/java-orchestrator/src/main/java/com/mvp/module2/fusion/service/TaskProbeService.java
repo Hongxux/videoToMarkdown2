@@ -96,12 +96,18 @@ public class TaskProbeService {
             }
             return ProbeOutcome.failure(error);
         }
+        String preferredTitle = formatEpisodeAwareTitle(
+                result.isCollection,
+                normalize(result.videoTitle),
+                result.currentEpisodeIndex,
+                normalize(result.currentEpisodeTitle)
+        );
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("rawInput", normalize(result.rawInput));
         payload.put("resolvedUrl", normalize(result.resolvedUrl));
         payload.put("sourcePlatform", normalize(result.sourcePlatform));
         payload.put("canonicalId", normalize(result.canonicalId));
-        payload.put("title", normalize(result.videoTitle));
+        payload.put("title", preferredTitle);
         payload.put("durationSec", result.durationSec);
         payload.put("isCollection", result.isCollection);
         payload.put("totalEpisodes", result.totalEpisodes);
@@ -113,7 +119,7 @@ public class TaskProbeService {
         payload.put("episodes", result.episodes != null ? result.episodes : List.of());
         payload.put("probeMode", "python-video-info");
         return ProbeOutcome.success(
-                normalize(result.videoTitle),
+                preferredTitle,
                 "任务探测完成，开始进入处理链路",
                 payload
         );
@@ -175,11 +181,88 @@ public class TaskProbeService {
         }
     }
 
+    public static String formatVideoInfoTitle(PythonGrpcClient.VideoInfoResult result) {
+        if (result == null) {
+            return "";
+        }
+        return formatEpisodeAwareTitle(
+                result.isCollection,
+                normalizeText(result.videoTitle),
+                result.currentEpisodeIndex,
+                normalizeText(result.currentEpisodeTitle)
+        );
+    }
+
+    public static String formatProbePayloadTitle(Map<String, Object> payload) {
+        if (payload == null || payload.isEmpty()) {
+            return "";
+        }
+        return formatEpisodeAwareTitle(
+                readProbeBoolean(payload.get("isCollection")),
+                normalizeText(String.valueOf(payload.getOrDefault("title", ""))),
+                readProbeInt(payload.get("currentEpisodeIndex")),
+                normalizeText(String.valueOf(payload.getOrDefault("currentEpisodeTitle", "")))
+        );
+    }
+
+    public static String formatEpisodeAwareTitle(
+            boolean isCollection,
+            String baseTitle,
+            int currentEpisodeIndex,
+            String currentEpisodeTitle
+    ) {
+        String normalizedBaseTitle = normalizeText(baseTitle);
+        String normalizedEpisodeTitle = normalizeText(currentEpisodeTitle);
+        if (!isCollection || currentEpisodeIndex <= 0 || normalizedEpisodeTitle.isEmpty()) {
+            return normalizedBaseTitle;
+        }
+        if (normalizedBaseTitle.isEmpty()) {
+            return normalizedEpisodeTitle;
+        }
+        String suffix = "_p" + currentEpisodeIndex + "_" + normalizedEpisodeTitle;
+        if (normalizedBaseTitle.endsWith(suffix)) {
+            return normalizedBaseTitle;
+        }
+        return normalizedBaseTitle + suffix;
+    }
+
     private String normalize(String value) {
         if (value == null) {
             return "";
         }
         return value.trim();
+    }
+
+    private static String normalizeText(String value) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim();
+        return "null".equalsIgnoreCase(normalized) ? "" : normalized;
+    }
+
+    private static boolean readProbeBoolean(Object value) {
+        if (value instanceof Boolean booleanValue) {
+            return booleanValue;
+        }
+        if (value == null) {
+            return false;
+        }
+        return "true".equalsIgnoreCase(String.valueOf(value).trim());
+    }
+
+    private static int readProbeInt(Object value) {
+        if (value instanceof Number numberValue) {
+            return numberValue.intValue();
+        }
+        if (value == null) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value).trim());
+        } catch (Exception ignored) {
+            return 0;
+        }
     }
 
     public static class ProbeOutcome {

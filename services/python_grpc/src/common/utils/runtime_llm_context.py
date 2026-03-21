@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, Optional
 
@@ -64,7 +65,75 @@ class RuntimeLLMContext:
         )
         self._prefetched_llm_cache: Dict[tuple[str, str, str, str], Dict[str, Any]] = {}
         self._stage_scope_dispatch_summary: Dict[str, Any] = {}
+        # 为什么这样做：任务级 provider 路由属于当前任务的运行时决策，放在同一个上下文里最容易保证并发子调用看到一致状态。
+        self._llm_provider_route_lock = Lock()
+        self._llm_provider_routes: Dict[str, Dict[str, Any]] = {}
         self._prime_stage_entry_dispatch()
+
+    def get_llm_provider_route(self, route_name: str) -> Dict[str, Any]:
+        self._ensure_llm_provider_route_state()
+        normalized_route_name = str(route_name or "").strip()
+        if not normalized_route_name:
+            return {}
+        with self._llm_provider_route_lock:
+            current = self._llm_provider_routes.get(normalized_route_name)
+            return dict(current or {})
+
+    def _ensure_llm_provider_route_state(self) -> None:
+        if not hasattr(self, "_llm_provider_route_lock"):
+            self._llm_provider_route_lock = Lock()
+        if not hasattr(self, "_llm_provider_routes"):
+            self._llm_provider_routes = {}
+
+    def pin_llm_provider_route(
+        self,
+        *,
+        route_name: str,
+        provider: str,
+        source_provider: str = "",
+        reason: str = "",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        self._ensure_llm_provider_route_state()
+        normalized_route_name = str(route_name or "").strip()
+        normalized_provider = str(provider or "").strip()
+        if not normalized_route_name or not normalized_provider:
+            return {}
+
+        extra_payload = dict(extra or {})
+        previous_failures = extra_payload.pop("previous_failures", None)
+        now_ms = int(time.time() * 1000)
+
+        with self._llm_provider_route_lock:
+            current = dict(self._llm_provider_routes.get(normalized_route_name, {}) or {})
+            merged_previous_failures: list[Dict[str, Any]] = [
+                dict(item)
+                for item in list(current.get("previous_failures", []) or [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(previous_failures, list):
+                merged_previous_failures.extend(
+                    dict(item)
+                    for item in previous_failures
+                    if isinstance(item, dict)
+                )
+
+            route_payload: Dict[str, Any] = {
+                "route_name": normalized_route_name,
+                "provider": normalized_provider,
+                "source_provider": str(
+                    source_provider
+                    or current.get("source_provider", "")
+                    or ""
+                ).strip(),
+                "reason": str(reason or current.get("reason", "") or "").strip(),
+                "pinned_at_ms": int(current.get("pinned_at_ms", now_ms) or now_ms),
+                "updated_at_ms": now_ms,
+                "previous_failures": merged_previous_failures,
+            }
+            route_payload.update(extra_payload)
+            self._llm_provider_routes[normalized_route_name] = dict(route_payload)
+            return dict(route_payload)
 
     def _prime_stage_entry_dispatch(self) -> None:
         try:

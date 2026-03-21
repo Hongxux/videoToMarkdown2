@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .client import LLMClient, LLMConfig, LLMResponse
+from .error_utils import format_provider_error
 from services.python_grpc.src.content_pipeline.common.utils import json_payload_repair
 
 
@@ -85,6 +86,14 @@ class ERNIEVisionClient(LLMClient):
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    def _format_provider_error(self, error: Exception) -> str:
+        return format_provider_error(
+            error,
+            base_url=self.config.base_url,
+            model=self.config.model,
+            timeout=self.config.timeout,
+        )
     
     def _encode_image(self, image_path: str) -> str:
         """
@@ -171,8 +180,8 @@ class ERNIEVisionClient(LLMClient):
                 raw_response=data
             )
             
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"ERNIE API error: {e.response.status_code} - {e.response.text}")
+        except Exception as error:
+            raise RuntimeError(f"ERNIE API error: {self._format_provider_error(error)}") from error
     
     async def complete_with_image(
         self,
@@ -257,8 +266,8 @@ class ERNIEVisionClient(LLMClient):
                 raw_response=data
             )
             
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"ERNIE Vision API error: {e.response.status_code} - {e.response.text}")
+        except Exception as error:
+            raise RuntimeError(f"ERNIE Vision API error: {self._format_provider_error(error)}") from error
     
     async def complete_with_images(
         self,
@@ -336,8 +345,8 @@ class ERNIEVisionClient(LLMClient):
                 raw_response=data
             )
             
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"ERNIE Vision API error: {e.response.status_code} - {e.response.text}")
+        except Exception as error:
+            raise RuntimeError(f"ERNIE Vision API error: {self._format_provider_error(error)}") from error
     
     async def complete_json(
         self,

@@ -3,6 +3,9 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 
 from services.python_grpc.src.common.utils.runtime_llm_context import activate_runtime_llm_context
@@ -136,6 +139,27 @@ def test_complete_text_result_cache_hits(monkeypatch):
     assert r1.content == "cached"
     assert r2.content == "cached"
     assert calls["n"] == 1
+
+
+def test_complete_text_formats_empty_transport_error(monkeypatch):
+    client = _make_client()
+    request = httpx.Request("POST", "https://api.example.com/chat/completions")
+
+    async def fake_post_with_retry(_payload):
+        raise httpx.ConnectError("", request=request)
+
+    monkeypatch.setattr(client, "_post_with_retry", fake_post_with_retry)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(client.complete("hello"))
+
+    error_text = str(exc_info.value)
+    assert "DeepSeek API error:" in error_text
+    assert "ConnectError" in error_text
+    assert "message=<empty>" in error_text
+    assert "request=POST https://api.example.com/chat/completions" in error_text
+    assert "base_url=https://api.example.com" in error_text
+    assert "model=deepseek-chat" in error_text
 
 
 def test_complete_json_persists_runtime_identity_metadata(tmp_path, monkeypatch):

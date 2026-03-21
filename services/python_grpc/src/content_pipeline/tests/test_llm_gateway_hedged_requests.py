@@ -1,9 +1,19 @@
 import asyncio
+import shutil
+from pathlib import Path
 
 import pytest
 
+from services.python_grpc.src.common.utils.runtime_llm_context import activate_runtime_llm_context
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import VisionAIClient
+
+
+def _prepare_workspace_tmp_dir(name: str) -> Path:
+    target = Path("var") / name
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def test_deepseek_hedge_uses_second_and_cancels_slow_primary(monkeypatch):
@@ -718,6 +728,226 @@ def test_deepseek_complete_text_retries_four_times_before_qwen_fallback(monkeypa
     assert fallback_client.calls == 1
     assert sleep_calls == [2.0, 4.0, 8.0, 16.0]
     assert llm_gateway._DEEPSEEK_FAST_FALLBACK_OPEN is True
+
+
+def test_deepseek_complete_text_pins_current_task_to_qwen_after_first_failure(monkeypatch):
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_HEDGE_ENABLED", False)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_FAST_FALLBACK_OPEN", False)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_MODEL", "qwen-plus")
+    monkeypatch.setattr(
+        llm_gateway,
+        "_DEEPSEEK_QWEN_FALLBACK_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV", "DASHSCOPE_API_KEY")
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_API_KEY", "")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-test-key")
+
+    sleep_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(llm_gateway.asyncio, "sleep", _fake_sleep)
+
+    class _PrimaryFailingClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_text(
+            self,
+            prompt: str,
+            system_message: str = None,
+            need_logprobs: bool = False,
+            disable_inflight_dedup: bool = False,
+        ):
+            self.calls += 1
+            _ = (prompt, system_message, need_logprobs, disable_inflight_dedup)
+            raise RuntimeError("Connection error.")
+
+    class _FallbackClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_text(
+            self,
+            prompt: str,
+            system_message: str = None,
+            need_logprobs: bool = False,
+            disable_inflight_dedup: bool = False,
+        ):
+            self.calls += 1
+            _ = (system_message, need_logprobs, disable_inflight_dedup)
+            return f"qwen::{prompt}", {"model": "qwen-plus"}, None
+
+    primary_client = _PrimaryFailingClient()
+    fallback_client = _FallbackClient()
+
+    def _fake_get_deepseek_client(
+        api_key=None,
+        base_url="",
+        model="",
+        temperature=0.3,
+        enable_logprobs=None,
+        cache_enabled=None,
+        inflight_dedup_enabled=None,
+    ):
+        _ = (temperature, enable_logprobs, cache_enabled, inflight_dedup_enabled)
+        assert api_key == "dashscope-test-key"
+        assert base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert model == "qwen-plus"
+        return fallback_client
+
+    monkeypatch.setattr(llm_gateway, "get_deepseek_client", _fake_get_deepseek_client)
+
+    output_dir = _prepare_workspace_tmp_dir("tmp_pytest_llm_gateway_task_route_text")
+
+    async def _run():
+        with activate_runtime_llm_context(
+            stage="phase2b_markdown",
+            output_dir=str(output_dir),
+            task_id="task-text-route",
+        ) as runtime_context:
+            first_text, first_meta, _ = await llm_gateway.deepseek_complete_text(
+                prompt="hello-one",
+                system_message="system",
+                client=primary_client,
+                model="deepseek-chat",
+            )
+            second_text, second_meta, _ = await llm_gateway.deepseek_complete_text(
+                prompt="hello-two",
+                system_message="system",
+                client=primary_client,
+                model="deepseek-chat",
+            )
+            route_snapshot = runtime_context.get_llm_provider_route(
+                llm_gateway._DEEPSEEK_RUNTIME_PROVIDER_ROUTE_NAME,
+            )
+            return first_text, first_meta, second_text, second_meta, route_snapshot
+
+    first_text, first_meta, second_text, second_meta, route_snapshot = asyncio.run(_run())
+
+    assert first_text == "qwen::hello-one"
+    assert second_text == "qwen::hello-two"
+    assert first_meta["model"] == "qwen-plus"
+    assert second_meta["model"] == "qwen-plus"
+    assert route_snapshot["provider"] == "qwen"
+    assert primary_client.calls == 5
+    assert fallback_client.calls == 2
+    assert sleep_calls == [2.0, 4.0, 8.0, 16.0]
+
+
+def test_deepseek_complete_json_pins_current_task_to_qwen_after_first_failure(monkeypatch):
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_HEDGE_ENABLED", False)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_FAST_FALLBACK_OPEN", False)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_MODEL", "qwen-plus")
+    monkeypatch.setattr(
+        llm_gateway,
+        "_DEEPSEEK_QWEN_FALLBACK_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV", "DASHSCOPE_API_KEY")
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_API_KEY", "")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-test-key")
+
+    sleep_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(llm_gateway.asyncio, "sleep", _fake_sleep)
+
+    class _PrimaryFailingClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_json(
+            self,
+            prompt: str,
+            system_message: str = None,
+            need_logprobs: bool = False,
+            max_tokens: int = None,
+            disable_inflight_dedup: bool = False,
+        ):
+            self.calls += 1
+            _ = (prompt, system_message, need_logprobs, max_tokens, disable_inflight_dedup)
+            raise RuntimeError("Connection error.")
+
+    class _FallbackClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_json(
+            self,
+            prompt: str,
+            system_message: str = None,
+            need_logprobs: bool = False,
+            max_tokens: int = None,
+            disable_inflight_dedup: bool = False,
+        ):
+            self.calls += 1
+            _ = (system_message, need_logprobs, max_tokens, disable_inflight_dedup)
+            return {"provider": "qwen", "prompt": prompt}, {"model": "qwen-plus"}, None
+
+    primary_client = _PrimaryFailingClient()
+    fallback_client = _FallbackClient()
+
+    def _fake_get_deepseek_client(
+        api_key=None,
+        base_url="",
+        model="",
+        temperature=0.3,
+        enable_logprobs=None,
+        cache_enabled=None,
+        inflight_dedup_enabled=None,
+    ):
+        _ = (temperature, enable_logprobs, cache_enabled, inflight_dedup_enabled)
+        assert api_key == "dashscope-test-key"
+        assert base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert model == "qwen-plus"
+        return fallback_client
+
+    monkeypatch.setattr(llm_gateway, "get_deepseek_client", _fake_get_deepseek_client)
+
+    output_dir = _prepare_workspace_tmp_dir("tmp_pytest_llm_gateway_task_route_json")
+
+    async def _run():
+        with activate_runtime_llm_context(
+            stage="phase2a_semantic",
+            output_dir=str(output_dir),
+            task_id="task-json-route",
+        ) as runtime_context:
+            first_json, first_meta, _ = await llm_gateway.deepseek_complete_json(
+                prompt="hello-json-one",
+                system_message="system",
+                max_tokens=64,
+                client=primary_client,
+                model="deepseek-chat",
+            )
+            second_json, second_meta, _ = await llm_gateway.deepseek_complete_json(
+                prompt="hello-json-two",
+                system_message="system",
+                max_tokens=64,
+                client=primary_client,
+                model="deepseek-chat",
+            )
+            route_snapshot = runtime_context.get_llm_provider_route(
+                llm_gateway._DEEPSEEK_RUNTIME_PROVIDER_ROUTE_NAME,
+            )
+            return first_json, first_meta, second_json, second_meta, route_snapshot
+
+    first_json, first_meta, second_json, second_meta, route_snapshot = asyncio.run(_run())
+
+    assert first_json == {"provider": "qwen", "prompt": "hello-json-one"}
+    assert second_json == {"provider": "qwen", "prompt": "hello-json-two"}
+    assert first_meta["model"] == "qwen-plus"
+    assert second_meta["model"] == "qwen-plus"
+    assert route_snapshot["provider"] == "qwen"
+    assert primary_client.calls == 5
+    assert fallback_client.calls == 2
+    assert sleep_calls == [2.0, 4.0, 8.0, 16.0]
 
 
 def test_deepseek_dynamic_delay_uses_video_and_step6_context():

@@ -204,6 +204,9 @@ content_pipeline:
     # 是否在结构化前，基于图片描述做正文增量补全
     # 当前默认关闭；可被环境变量 MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT 覆盖
     enable_img_desc_text_augment: false  # 当前真实链路仅 abstract 可能命中，先下线空转分支以降低噪音与无效调用
+    # Supplemental images fallback output switch
+    # Default off; env MODULE2_ENABLE_SUPPLEMENTAL_IMAGES overrides
+    enable_supplemental_images: false
   phase2b:
     concrete_ai_vision:
       # concrete 截图在 Phase2B 是否启用 AI Vision 校验（含人物占比预过滤、PP-Structure 预处理）

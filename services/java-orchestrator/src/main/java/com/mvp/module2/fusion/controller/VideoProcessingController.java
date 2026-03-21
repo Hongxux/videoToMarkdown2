@@ -10,6 +10,7 @@ import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
 import com.mvp.module2.fusion.service.Phase2bArticleLinkService;
+import com.mvp.module2.fusion.service.TaskProbeService;
 import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -582,6 +583,7 @@ public class VideoProcessingController {
             persistCollectionInfo(collectionId, result);
         }
 
+        String preferredTitle = TaskProbeService.formatVideoInfoTitle(result);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("success", true);
         payload.put("rawInput", rawInput);
@@ -592,7 +594,7 @@ public class VideoProcessingController {
         payload.put("canonicalId", result.canonicalId != null ? result.canonicalId : "");
         payload.put("collectionId", collectionId);
         payload.put("rawEncodingKey", buildRawEncodingKey(result));
-        payload.put("title", result.videoTitle != null ? result.videoTitle : "");
+        payload.put("title", preferredTitle);
         payload.put("durationSec", result.durationSec);
         payload.put("isCollection", result.isCollection);
         payload.put("totalEpisodes", normalizedTotalEpisodes);
@@ -698,6 +700,10 @@ public class VideoProcessingController {
             return Optional.empty();
         }
         Map<String, Object> payload = new LinkedHashMap<>(payloadOpt.get());
+        String formattedTitle = TaskProbeService.formatProbePayloadTitle(payload);
+        if (!formattedTitle.isBlank()) {
+            payload.put("title", formattedTitle);
+        }
         payload.put("success", true);
         payload.put("rawInput", rawInput);
         payload.put("normalizedVideoInput", normalizedInput);

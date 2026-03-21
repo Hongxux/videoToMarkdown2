@@ -1,5 +1,410 @@
 ﻿# 错误修正记录
 
+## 2026-03-21 Phase2B 视频分类 prompt 变量未渲染且证据过早收敛，导致分类误判
+- Date:
+  - 2026-03-21
+- Symptom:
+  - `Phase2B` 结束后的视频分类结果容易被标题或开场首段带偏，分类路径与整片主体内容不一致。
+  - 同一视频即使 `result.json` 已经落盘，分类阶段仍表现得像“只看了开头几句就下结论”。
+  - 排查 prompt 实参后发现，分类链路里模型实际看到的是字面量占位符：
+    - `{video_title}`
+    - `{first_unit_text}`
+    - `{group_names}`
+    - 而不是真实内容。
+- Root cause:
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/category_classifier/user.md` 使用了 `{{video_title}}` 这类双大括号占位符。
+  - 但 `prompt_loader.render_prompt(...)` 底层使用的是 Python `str.format(...)`；在这套语义下，双大括号会被转义成字面量 `{video_title}`，不会注入变量值。
+  - 同时 `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py` 之前只抽取：
+    - `title`
+    - `first_unit_text`
+    - `group_names`
+  - 即使分类发生在 `AssembleRichText` 之后，传给模型的证据仍然只是“首段快照”，没有利用整片 `knowledge_groups` 的多组正文事实。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/category_classifier/user.md`
+    - 将分类 prompt 的占位符统一改为 `str.format(...)` 可渲染的单大括号形式。
+    - 补充“不要只看标题/开头，要优先依据多组正文证据”的决策约束。
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/category_classifier/system.md`
+    - 增加证据优先级规则，明确标题、首段和 `group_name` 只作为线索，不能替代整片正文证据。
+  - `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`
+    - 新增多组正文证据抽取与整片内容证据摘要。
+    - 分类 prompt 与二次校验 prompt 都改为基于整片证据，而不是只看首段正文。
+    - 任务级 `category_classification.json` 的 `input_snapshot` 也同步落盘 `content_evidence_text` 与 `group_evidence`，便于后续审计。
+  - `services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py`
+    - 新增回归测试，锁定分类 prompt 必须真正注入变量值。
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+    - 新增回归测试，锁定分类 prompt 必须携带多组正文证据，而不是保留原始占位符。
+- Verification:
+  - `python -X utf8 -m py_compile services/python_grpc/src/content_pipeline/phase2b/video_category_service.py services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+  - 仓库内执行临时 Python 验证脚本，确认：
+    - 分类 prompt 已注入真实标题与正文证据
+    - 多组正文证据进入 `classify_phase2b_output(...)`
+    - `category_classification.json` 正常落盘 `group_evidence`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是走 `render_prompt(...)` 的 prompt 文件，必须补充“变量已实际渲染”的回归测试，不能只检查模板文件存在。
+  - 以后凡是“分类/路由/判定”类阶段，如果输入源已经拥有整片 `result_document`，禁止再退化为“只取首段正文”的早收敛快照。
+  - 对存在字面量双大括号需求的 prompt，必须与“需要模板替换的占位符”显式分离，不能混用同一语义。
+
+## 2026-03-19 Phase2A 语义分割长调用期间状态文案暴露内部 checkpoint，导致用户误判卡在 Stage1
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 任务实际已经进入 `Phase2A`，并且正在等待首个语义分割 LLM 调用返回。
+  - 但任务列表 / WebSocket 推送里仍可能展示：
+    - `Stage1 completed`
+    - 或 `Phase2A running (phase2a_segmentation_running)`
+  - 结果是操作者只能看到内部 checkpoint 名，无法直接判断“LLM 调用已发出，当前只是等待模型返回”，容易误以为任务还卡在上一阶段。
+- Root cause:
+  - Python `AnalyzeSemanticUnits(...)` 已经在语义分割前发出了 `checkpoint=phase2a_segmentation_running` 的 watchdog 心跳。
+  - Java `WatchdogSignalCodec.sanitizeForUser(...)` 对 running 态只做了通用拼接：
+    - `Phase2A running (phase2a_segmentation_running)`
+  - 这条链路把内部实现名直接泄漏成用户文案，没有把“已开始 LLM 调用、正在等待结果”翻译成可操作的状态说明。
+  - 同时 `phase2a` 本身已被配置为 `heartbeat-strong stage`，soft heartbeat 会持续保活；问题核心不在 watchdog 超时，而在用户可见状态语义不完整。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/WatchdogSignalCodec.java`
+    - 为 `phase2a + phase2a_segmentation_running` 增加用户态文案映射：
+      - `已开始 Phase2A 语义分割 LLM 调用，正在等待结果...`
+    - 其他 checkpoint 仍保持原有通用回退逻辑，避免误伤现有排障语义。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/watchdog/WatchdogSignalCodecTest.java`
+    - 新增回归测试，锁定：
+      - 语义分割长调用会显示明确等待文案
+      - 其他 checkpoint 仍保持原始通用文案
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=WatchdogSignalCodecTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后任何 watchdog checkpoint 若会直接透传到用户界面，必须先判断它是否属于“内部实现名”还是“用户可执行状态”。
+  - 对长耗时 LLM 调用，优先暴露“调用已开始 / 正在等待结果 / 正在重试”这类状态语义，而不是直接暴露内部 checkpoint token。
+
+## 2026-03-19 分集视频探测标题缺少当前分集信息，导致任务名和 probe 标题无法区分具体分 P
+- Date:
+  - 2026-03-19
+- Symptom:
+  - Bilibili 等分集视频在 probe 成功后，标题仍只显示合集总标题。
+  - 具体表现为：
+    - probe 接口返回的 `title` 没带当前分集信息
+    - 任务标题更新后仍只显示总标题
+    - 命中旧缓存 probe 时，也会继续复用没有分集后缀的旧标题
+  - 结果是同一合集的不同分 P 在任务列表里难以区分。
+- Root cause:
+  - `TaskProbeService.probeTask(...)` 之前直接把 `result.videoTitle` 当成 `preferredTitle` 和 payload `title`。
+  - 代码虽然已经拿到了：
+    - `isCollection`
+    - `currentEpisodeIndex`
+    - `currentEpisodeTitle`
+  - 但这些字段没有参与标题拼装。
+  - 同时，缓存 probe 复用链路此前只信任 payload 里的 `title` 原值，因此旧缓存标题也不会在重试时自动修正。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskProbeService.java`
+    - 新增统一标题格式化 helper。
+    - 当探测结果属于合集且存在当前分集时，标题统一格式化为：
+      - `视频名称_p{currentEpisodeIndex}_{currentEpisodeTitle}`
+    - 新鲜 probe 的 `preferredTitle` 与 payload `title` 都改为使用该格式化结果。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 缓存 probe 复用时不再直接信任旧的 payload `title`。
+    - 改为根据 `isCollection/currentEpisodeIndex/currentEpisodeTitle` 重新计算一次标题，并回写到缓存 payload。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+    - 对外 probe 接口的 fresh response 与 cache-hit response 都统一走同一套标题格式化逻辑。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - 以后凡是 probe 结果已经携带“合集 + 当前分集”语义时，任务展示标题必须在 probe 阶段一次性格式化，不能把拼接职责分散到前端、缓存读口和任务恢复链路。
+  - 对缓存类字段，后续补展示修复时必须同时检查：
+    - 新写入路径是否已修
+    - 旧缓存复用路径是否会继续带出错误旧值
+
+## 2026-03-19 `GenerateMaterialRequests` 协议缺少 `output_dir`，恢复后仍可能沿漂移的 `video_path` 回写 Phase2A 产物
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 前面 Stage1 / Analyze / Assemble / VL 入口已经改成优先信任 `output_dir`，但 `GenerateMaterialRequests` 这条旧入口仍然只接收：
+    - `task_id`
+    - `units`
+    - `video_path`
+  - 一旦重启恢复后 Java 侧回传的是原始 URL、旧宿主路径或已经漂移的 `video_path`，Python `GenerateMaterialRequests(...)` 就会继续：
+    - 用错误 `video_path` 推导 `output_dir`
+    - 用错误任务目录去读 `step2/step6/sentence_timestamps` runtime 投影
+    - 用错误任务目录去回写 `semantic_units_phase2a.json`
+  - 结果是前面阶段已经恢复到正确任务目录，素材请求生成阶段却又沿旧路径偏航，阶段交接重新断裂。
+- Root cause:
+  - `contracts/proto/video_processing.proto` 的 `GenerateMaterialRequestsRequest` 没有 `output_dir` 字段，协议层缺少任务目录这个稳定锚点。
+  - Java `VideoProcessingOrchestrator -> PythonGrpcClient -> Python GenerateMaterialRequests` 调用链因此只能继续传 `video_path`。
+  - Python 侧 `GenerateMaterialRequests(...)` 内部仍直接执行：
+    - `video_path = _ensure_local_video_in_storage(request.video_path)`
+    - `output_dir = _normalize_output_dir(video_path)`
+  - 这和 Stage1 修复前是同一类问题：恢复态仍把可漂移的 `video_path` 当阶段入口真源，而不是优先使用 `output_dir`。
+- Fix:
+  - `contracts/proto/video_processing.proto`
+    - 给 `GenerateMaterialRequestsRequest` 新增 `output_dir = 4`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - `generateMaterialRequests(...)` / `generateMaterialRequestsAsync(...)` 新增 `outputDir` 入参，并回填到 gRPC request。
+    - 保留旧重载，兼容未改调用点。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 旧素材请求调用改为显式传入当前任务 `outputDir`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `GenerateMaterialRequests(...)` 改为复用统一 `_resolve_stage_entry_paths(...)`。
+    - 优先使用 `request.output_dir` 作为任务真源目录，并从 `output_dir/video_meta.json` 恢复本地 `video_path`。
+    - Phase2A `semantic_units` 回写不再重新按 `video_path` 推导目录，而是继续沿解析后的 `output_dir` 落盘。
+  - `services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py`
+    - 新增回归测试，锁定 `GenerateMaterialRequests` 对 Stage1 runtime/sqlite 的读取必须绑定 `request.output_dir`。
+- Verification:
+  - `powershell -ExecutionPolicy Bypass -File scripts/build/generate_grpc.ps1`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py`
+  - `pytest services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py -q --basetemp var/tmp_pytest_stage_entry_path_resolution`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后只要某个阶段会访问任务目录内的 `runtime/sqlite/video_meta/subtitles/intermediates`，协议就必须显式携带 `output_dir`，不能再只传 `video_path`。
+  - 以后评审阶段交接接口时，必须同时检查：
+    - 热路径主真源是不是 runtime/sqlite？
+    - 恢复锚点是不是 `output_dir`？
+    - 文件路径是否只是兼容兜底，而不是重新上升为主协议？
+
+## 2026-03-19 人工修复后重试仍重复触发 `GetVideoInfo`，导致已有 probe 结果未被直接复用
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 用户在人工修复后点击重试，日志仍会再次出现：
+    - `Calling GetVideoInfo: https://www.bilibili.com/video/...`
+  - 即使同一任务此前已经成功拿到过 `probePayload`，重试后仍会重新执行一次视频探测。
+  - 这会让人误以为系统没有保留探测结果，且把“阶段恢复”和“探测重跑”混在一起，增加排障噪音。
+- Root cause:
+  - `TaskQueueManager.retryTaskTransition(...)` 会保留 `probePayload`，并没有把历史探测结果清掉。
+  - 但 `TaskProcessingWorker.processTask(...)` 在每次任务重新进入执行面时，都会先走 `prepareProbeStage(...)`。
+  - 旧实现里 `prepareProbeStage(...)` 只区分：
+    - 前台同步 probe
+    - HTTP 任务后台异步 probe
+  - 它没有在进入这两个分支之前检查任务是否已经带有可复用的 `probePayload`。
+  - 结果就是：
+    - 阶段恢复链路确实会根据 runtime stage snapshot 选择 `resumeFromStage`
+    - 但这个判断发生在 probe 之后
+    - 因此人工修复后的任务虽然能从 `transcribe/stage1/phase2a/...` 继续，却仍会先多打一轮 `GetVideoInfo`
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 在 `prepareProbeStage(...)` 开头新增缓存探测复用分支。
+    - 当任务已持有非空 `probePayload` 时，直接构造本地 `ProbeOutcome`：
+      - 复用已有 payload
+      - 复用 payload 中的 `title` 作为优先标题
+      - 直接执行 `PROBING -> PROCESSING`
+    - 命中缓存后不再调用 `taskProbeService.probeTask(...)`，从而跳过新的 `GetVideoInfo`。
+  - 这样人工修复/失败重试/重启恢复后的任务，只要之前已经成功探测过，就会直接复用缓存 probe。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - 以后凡是“任务元信息探测”已经有持久化快照的链路，重试入口必须先判断是否能复用，再决定是否重探测。
+  - 阶段恢复和 probe 不是一回事：
+    - 阶段恢复决定从哪里继续执行
+    - probe 负责补视频元数据
+  - 两者若分别演进，必须在入口处明确短路条件，避免再次出现“恢复能跳阶段，但仍先多打一轮远端探测”的结构性回归。
+
+## 2026-03-19 `sentence_timestamps` 仍被当成 Stage1 文件交接真源，导致成功后误告警，且旧入口会错过 runtime/sqlite 恢复
+- Date:
+  - 2026-03-19
+- Symptom:
+  - Stage1 已经完成，且 runtime cache 明确记录了 `sentence_timestamps=69`，日志却仍然打印：
+    - `sentence_timestamps.json not found at ...`
+  - 这会制造“Stage1 时间戳产物丢失”的假象，误导排障方向。
+  - 进一步排查发现，旧的 `GenerateMaterialRequests` 入口仍直接硬读：
+    - `intermediates/step2_correction_output.json`
+    - `intermediates/step6_merge_cross_output.json`
+    - `intermediates/sentence_timestamps.json`
+  - 一旦 Stage1 已经按新架构切到“正常运行内存态交接、恢复从 sqlite/runtime projector 恢复”，这个旧入口就会继续沿错误文件真源找数据。
+- Root cause:
+  - `ProcessStage1(...)` 里残留了一段死分支：
+    - `if False and os.path.exists(local_sentence_ts):`
+  - 这意味着无论 runtime cache 里是否已经有 `sentence_timestamps`，代码都会继续走“找不到文件”的旧分支，并打印误告警。
+  - 架构上，`sentence_timestamps` 本应与 `step2/step6` 一样：
+    - 热路径：运行态内存直接交接
+    - 恢复路径：从 `RuntimeRecoveryStore / Stage1 runtime projector / sqlite` 恢复
+  - 但旧代码仍把 `sentence_timestamps.json` 当成主真源之一，形成“runtime 真源”和“旧文件真源”的边界混杂。
+- Fix:
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `ProcessStage1(...)`
+      - 删除对死分支的实际依赖。
+      - 当 Stage1 runtime views 已经包含 `sentence_timestamps` 时，不再继续按缺失文件告警。
+      - 继续保持 `sentence_timestamps_path` 默认空值，与 `step2/step6` 的运行态交接口径一致；仅在兼容旧文件存在时才回填 legacy 路径。
+    - `GenerateMaterialRequests(...)`
+      - 新增 `runtime_stage1_outputs = self._get_stage1_runtime_outputs(output_dir)`。
+      - 优先从 Stage1 runtime projector 读取：
+        - `step2_subtitles`
+        - `step6_paragraphs`
+        - `sentence_timestamps`
+      - 仅当 runtime 投影缺失时，才回退到 `intermediates/*.json` 旧文件路径。
+      - 这样旧入口也与 `AnalyzeSemanticUnits(...)` 对齐，不再绕过 sqlite/runtime 恢复边界。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是 Stage1 产物已经切到“热路径运行态 + 恢复走 runtime/sqlite projector”的字段，禁止再把 legacy 文件重新提升为主交接协议。
+  - 以后评审阶段交接代码时，必须先问清楚：
+    - 这个字段的主真源是不是 runtime/sqlite？
+    - 这个文件路径是不是只用于兼容兜底？
+  - 旧入口（如 `GenerateMaterialRequests`）只要还依赖 `intermediates/*.json`，就必须同步补 runtime projector 读口，避免新旧架构长期并存。
+
+## 2026-03-19 重启恢复后阶段入口仍信任原始 `video_path`，导致 Stage1/Phase2A/Phase2B 会沿错误任务路径重算
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 重启恢复后，任务目录其实已经恢复正确，但阶段入口仍可能拿到旧的 `request.video_path`。
+  - 真实样本里：
+    - `VT_1773845825834_1`
+      - `task_metrics` 记录的 `output_dir` 是 `D:\videoToMarkdownTest2\var\storage\storage\d4acf74068a5fbb25798dc38f1c5ea08`
+      - 同目录 `video_meta.json` 里的 `video_path` 已经是本地文件 `...\video.mp4`
+      - 但 Stage1 真正执行时仍使用 `video_path=https://www.bilibili.com/video/BV1k8411r7E4`
+      - 最终直接触发 `Video file not found`
+    - `VT_1773845845646_2`
+      - 同类重启恢复场景下，Stage1 再次进入 `step1_validate`
+      - 说明恢复定位没有稳定绑定到任务目录内的本地产物
+  - 这类问题在 Stage1 表现为“错误地重跑校验/LLM”，在 Phase2A/Phase2B/VL 则会继续放大成找不到 stage1 产物、语义单元或原视频。
+- Root cause:
+  - `contracts/proto/video_processing.proto` 的 `Stage1Request / AnalyzeRequest / AssembleRequest / VLAnalysisRequest` 都显式带了 `output_dir`，但 Python gRPC 阶段入口长期忽略它。
+  - `ProcessStage1(...)`、`AnalyzeSemanticUnits(...)`、`AssembleRichText(...)`、`AnalyzeWithVL(...)` 都优先执行：
+    - `_ensure_local_video_in_storage(request.video_path)`
+    - `output_dir = _normalize_output_dir(video_path)`
+  - 这意味着一旦重启恢复后上游回传的是原始 URL、旧宿主路径或失效路径，阶段入口就会：
+    - 重新按错误 `video_path` 计算任务目录
+    - 继续信任错误 `video_path`
+    - 进而错过 `output_dir` 下已存在的 `video_meta.json / subtitles.txt / runtime_state.db`
+  - 本质上这是“阶段入口真源选择错误”：恢复场景里更稳定的真源应是 `output_dir`，而不是可漂移的 `video_path`。
+- Fix:
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增统一阶段入口路径解析 helper：
+      - 有 `request.output_dir` 时，优先把它当作任务真源目录
+      - 优先从 `output_dir/video_meta.json` 恢复本地 `video_path`
+      - `subtitle_path` 缺失或失效时，回退到 `output_dir/subtitles.txt`
+    - 将该 helper 接入：
+      - `ProcessStage1(...)`
+      - `AnalyzeSemanticUnits(...)`
+      - `AssembleRichText(...)`
+      - `AnalyzeWithVL(...)`
+    - 新增路径来源日志，显式记录 `output_dir_source / video_path_source / subtitle_path_source`，便于后续排障确认恢复链到底用了哪一层真源。
+  - `services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py`
+    - 新增回归测试，锁定：
+      - `output_dir + video_meta.json` 必须优先恢复本地 `video_path`
+      - `ProcessStage1` 在 `request.video_path` 为 URL 时，运行态 payload 必须改用任务目录内本地视频
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py`
+  - `pytest services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py -q --basetemp var/tmp_pytest_stage_entry_path_resolution`
+    - 当前本机结果：`skipped`，原因是测试环境缺少 `grpc` Python 包，无法直接导入 `grpc_service_impl`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是阶段 RPC 协议已经显式携带 `output_dir`，恢复场景下必须优先以 `output_dir` 为任务真源，禁止继续只凭 `video_path` 反推任务目录。
+  - 以后凡是“任务目录内已有 `video_meta.json / subtitles.txt / runtime_state.db`”的阶段入口，都必须先做任务内产物恢复，再决定是否回退到原始请求字段。
+  - 代码评审时必须检查“是否把 URL/宿主绝对路径当恢复真源”，避免同类问题在 Stage1 修完后又在 Phase2A/Phase2B/VL 里重新出现。
+
+## 2026-03-19 LLM provider 包装层与聚合层在空消息异常下吞掉诊断语义
+- Date:
+  - 2026-03-19
+- Symptom:
+  - Python transcript 链路里，`DeepSeek` 之外的 `ERNIE/ERNIE Vision` 仍存在同类风险：当 `httpx.ConnectError("")`、`TimeoutException`、`RemoteProtocolError("")` 这类异常消息为空时，外层包装容易退化成只有 provider 名称的弱信息。
+  - Java `DeepSeekAdvisorService` 在对 `LlmGateway` / provider 异常做二次包装时，`resolveAdvisorFailureMessage(...)` 只提取“最后一个非空 message”；如果 cause 链都是空消息，最终会把错误压成空串。`BookMarkdownService` / `BookEnhancedPipelineService` 这类会把 `errorMessage` 回传给上层的结果对象，也存在同类风险。
+  - `Phase2b provider chain failed: ` 这一支此前直接拼 `ex.getMessage()`，同样可能留下无诊断价值的尾部空白。
+- Root cause:
+  - Python transcript LLM 客户端的错误格式化没有收敛成共享能力，`DeepSeekClient` 已修，但 `vision.py` 仍停留在局部实现，无法稳定覆盖 transport 异常与空消息异常。
+  - Java 侧 `LlmGateway` 自己具备异常链描述能力，但 `DeepSeekAdvisorService` 没有复用，而是重新实现了一个“只取最后非空 message”的弱版本；book 链路的结果对象也只保留 `error.getMessage()` 或类名。
+  - 这属于跨层语义丢失：底层异常对象里还有类型、cause、请求上下文，但包装层只带走了 `message`，而 `message` 恰好可能为空。
+- Fix:
+  - `services/python_grpc/src/transcript_pipeline/llm/error_utils.py`
+    - 新增 transcript LLM 共享错误格式化工具，统一保留异常类型、`message=<empty>`、request method/url、HTTP status/body、`base_url`、`model`、`timeout`。
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+    - 改为复用共享格式化工具，避免 `DeepSeek` 与其他 provider 继续各自漂移。
+  - `services/python_grpc/src/transcript_pipeline/llm/vision.py`
+    - `complete(...)`、`complete_with_image(...)`、`complete_with_images(...)` 统一改为用共享格式化工具包装异常；空消息 transport error 不再退化成弱信息。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/llm/LlmErrorDescriber.java`
+    - 新增 Java 侧共享异常描述器，统一输出 `ExceptionType (message-or-<empty>)` 的 cause 链。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/llm/LlmGateway.java`
+    - 统一复用 `LlmErrorDescriber`，包括 provider retry/degrade 日志与 delta callback failure 日志。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - `resolveAdvisorFailureMessage(...)` 改为复用 `LlmErrorDescriber`。
+    - `Phase2b provider chain failed` 改为输出完整异常描述，而不再只拼 `ex.getMessage()`。
+  - 回归测试：
+    - `services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py`
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/DeepSeekAdvisorServiceTest.java`
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/llm/LlmGatewayTest.java`
+- Verification:
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/llm/error_utils.py services/python_grpc/src/transcript_pipeline/llm/deepseek.py services/python_grpc/src/transcript_pipeline/llm/vision.py services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py`
+  - `python -m pytest services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py::test_complete_text_formats_empty_transport_error services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py::test_complete_formats_empty_transport_error services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py::test_complete_json_parses_repaired_payload -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=DeepSeekAdvisorServiceTest,LlmGatewayTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是 provider/client 包装层要提升异常语义，禁止再手写“只拼 `message`”的局部实现；应复用共享错误格式化器。
+  - 以后凡是上层 service 需要把下层异常二次包装为业务异常，或把错误写入结果对象/API 响应，至少保留异常类型与 cause 链，不能只取“最后一个非空 message”或单层 `getMessage()`。
+  - 以后修这类问题，回归至少覆盖两种样本：
+    - 空消息 transport error
+    - 多层 cause 链但每层 message 都为空的包装异常
+
+## 2026-03-18 watchdog 停监控时把线程中断误判成 WebSocket 发送故障，导致无效告警与误关会话
+- Date:
+  - 2026-03-18
+- Symptom:
+  - 日志出现：
+    - `CloseStatus[code=1006, reason=The current thread was interrupted while waiting for a blocking send to complete]`
+    - `Error sending websocket message, closing session`
+  - 异常栈落在：
+    - `TaskProgressWatchdogBridge.runGrpcMonitorLoop(...)`
+    - `TaskWebSocketHandler.sendRawMessage(...)`
+    - Tomcat `WsRemoteEndpointImplBase.sendMessageBlock(...)`
+  - 这类日志常出现在任务取消、阶段切换或 watchdog 停监控附近，表现为“监控线程准备退出时，正好撞上一次阻塞发送”。
+- Root cause:
+  - `TaskProgressWatchdogBridge.stopMonitor(...)` 会通过 `interrupt()` 尽快停掉 watchdog 监控线程，这是当前 gRPC 阻塞流的既有停止协议。
+  - Tomcat 的阻塞式 WebSocket 发送在检测到线程已被中断时，会抛出带 `InterruptedException` 根因的 `IOException`。
+  - `TaskWebSocketHandler.sendRawMessage(...)` 之前把所有发送异常都归类成真实发送失败，并执行：
+    - `warn` 级别告警
+    - `closeSessionSilently(..., 4001)`
+  - 结果是“线程被要求停止”这种正常控制流，被误投影成“连接发送故障”，既污染日志，也可能把本来健康的会话提前关闭。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+    - `sendRawMessage(...)` 发送前先识别当前线程是否已中断；若已中断，直接跳过本次消息。
+    - 新增中断型发送异常识别：只要异常链里存在 `InterruptedException`，或消息文本命中 Tomcat 的 blocking-send interrupted 文案，就恢复线程中断标记并跳过发送，不再关闭 session。
+    - `sendPayloadToSessions(...)` 在循环内感知线程中断，避免同一条已取消的监控线程继续向多个 session 扩散发送。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandlerRecoveryStatusTest.java`
+    - 新增回归测试，锁定“阻塞发送因线程中断失败时，不得关闭底层 session，且必须保留线程中断标记”。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -Dtest=TaskWebSocketHandlerRecoveryStatusTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是通过 `interrupt()` 停止后台监控/轮询线程的链路，都必须先区分“控制流中断”与“真实 I/O 故障”，禁止统一按错误告警处理。
+  - WebSocket 推送层遇到 `InterruptedException` 时，默认策略应是“恢复中断并放弃本次发送”，而不是“关闭连接并升级为 transport failure”。
+  - 新增任何 watchdog/streaming 停机路径时，至少补一条回归测试，验证线程中断不会误伤用户在线会话。
+
+## 2026-03-18 Stage1 `step1_validate` 命中空消息 httpx 异常时，DeepSeek 错误被包装成空串
+- Date:
+  - 2026-03-18
+- Symptom:
+  - Stage1 在 `step1_validate` 阶段多次失败，步骤日志只留下 `RuntimeError: DeepSeek API error:`，而 pipeline 聚合错误同样只剩空消息。
+  - 同一批失败里 `llm_calls=0`、`token_usage.step1_validate=0`，外层无法判断到底是鉴权失败、网络异常、协议异常还是 endpoint 配置问题。
+  - 这会把本来应该几分钟内能定位的 provider 故障，扩大成“只能重试、无法归因”的盲排障。
+- Root cause:
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+    的 `DeepSeekClient.complete()` 在调用 `_post_with_retry(...)` 失败时，统一使用
+    `f"DeepSeek API error: {error}"` 包装异常。
+  - 部分 `httpx` 传输层异常（例如空消息 `ConnectError("")`、`RemoteProtocolError("")`、某些 timeout/request error）在 `str(error)` 后可能得到空字符串。
+  - 结果是 provider 包装层把最关键的诊断信息直接吞掉了：异常类型、请求 URL、HTTP 状态码、响应体、`base_url`、`model` 等上下文都没有向上游传递。
+- Fix:
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+    - 新增 DeepSeek 请求异常格式化逻辑，统一保留：
+      - 异常类型
+      - `message=<empty>` 标记
+      - request method/url
+      - HTTP status / reason / response body（若有）
+      - `base_url`、`model`、`timeout`
+    - `complete()` 在 `_post_with_retry(...)` 失败时，改为使用上述格式化结果包装 `RuntimeError`，避免空消息异常继续向 `step1_validate` / pipeline / runtime failure 链路传播。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+    - 新增回归测试，锁定“底层 `httpx.ConnectError('')` 即使消息为空，外层错误文本仍必须包含异常类型与请求上下文”。
+- Verification:
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py -q --basetemp var/tmp_pytest_deepseek_error_text`
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/llm/deepseek.py services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是 provider 包装层把底层异常提升为业务错误，禁止直接依赖 `str(error)` 作为唯一错误语义；至少必须保留异常类型与请求上下文。
+  - 以后所有 `httpx`/网络客户端包装器都要补一条“空消息 transport error 仍然可诊断”的回归测试，避免再次出现 `DeepSeek API error:` 这类空壳错误。
+
 ## 2026-03-18 `UNKNOWN` 存储任务被前端误显示为“排队中”，同时任务列表丢失原始失败根因
 - Date:
   - 2026-03-18
@@ -11445,6 +11850,573 @@
     - 返回结构化 `OOM` 文本时的降并发重试
     - 只返回 `process pool terminated abruptly` 时的降并发重试
   - 以后凡是把异常压成字符串的聚合层代码，都必须保留“空消息异常的类型信息”，否则 `MemoryError` 这类关键语义会在日志看起来像空值，分类器也会被误导。
+
+## 2026-03-19 版本迭代后 `phase2a resume` 因缺少 `stage1Result` 提前失败，未进入 Python runtime 恢复链
+- Symptom:
+  - 任务日志报错：`Stage1 result is invalid for phase2a resume`。
+  - 故障出现在 `TaskProcessingWorker -> VideoProcessingOrchestrator.processVideoPhase2Resume(...)`，恢复链在 Java 侧提前终止，没有进入 Python 侧已经具备的 Stage1/Phase2A runtime projector。
+  - 结果上，老版本产物虽然仍在 `runtime_state.db`，但任务却无法自动回退到安全重建路径，也无法复用已提交的 `llm_call/chunk`。
+- Root Cause:
+  - Java 恢复入口依赖 `ResumeDecision -> buildRecoveredIoPhaseResult(...)` 从阶段摘要中拼 `ioResult.stage1Result`；只要摘要字段里没有足够信息，`stage1Result` 就保持为 `null`。
+  - `processVideoPhase2Resume(...)` 在调用 `AnalyzeSemanticUnits` 之前，先做 `ioResult.stage1Result == null || !success` 硬校验；这条校验发生得比 Python runtime projector 更早，导致 SQLite 中明明存在可复用事实也没有机会参与恢复决策。
+  - 恢复决策的职责边界放错了：产物语义与兼容性判断本应由 Python runtime 仓库负责，Java 不适合只凭阶段摘要静态推断。
+- Fix:
+  - 新增 `RecoverRuntimeContext` RPC，由 Python 按 runtime cache / SQLite projection 返回：
+    - `resolved_start_stage`
+    - `stage1_ready`
+    - `phase2a_ready`
+    - `semantic_units_path`
+    - `reused_llm_call_count / reused_chunk_count`
+  - Java 在 `processVideoPhase2Resume(...)` 开头先调用 `reconcileRecoveredPhase2Context(...)`：
+    - 若 Python 认定 `stage1_ready=true`，即使当前没有 `stage1Result`，也自动补一个可恢复占位对象；
+    - 若 Python 认定 `phase2a` 已可复用，则直接前推到 `asset_extract_java`；
+    - 若仓库不足以支撑 `phase2a`，则安全回退到 `stage1` 重建。
+  - 这样恢复入口不再被“摘要对象是否完整”绑死，而是由 Python 基于真实仓库状态做最终裁决。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_recover_runtime_context.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=VideoProcessingOrchestratorPhase2RecoveryTest,TaskProcessingWorkerRecoveryStatusTest" test -q`
+- Prevention:
+  - 以后凡是阶段恢复依赖 Python 产物语义的链路，恢复起点裁决必须由 Python runtime 仓库返回显式结果，禁止 Java 只靠阶段摘要对象做硬判定。
+  - 以后 Java 在进入某阶段前的“对象非空校验”，必须先确认该对象是否可由下游 runtime projector 或 SQLite projection 延迟补齐；若可以，必须先走恢复 RPC，再决定是否报错。
+  - 以后恢复相关改动必须至少覆盖三类回归：
+    - `stage1` 不可用时回退 `stage1`
+    - `stage1` 可用时继续 `phase2a`
+    - `phase2a` 可用时直接跳过重复分割
+
+## 2026-03-19 同类风险扩展：`transcribe/stage1` 也会被 Java 侧前置非空校验提前截断
+- Symptom:
+  - 除 `phase2a resume` 外，`processVideoTranscribePhase(...)` 也会先要求 `videoPath` 非空，`processVideoStage1Phase(...)` 也会先要求 `subtitlePath` 非空。
+  - 如果恢复场景里这些路径只存在于 `video_meta.json`、transcribe runtime repository 或任务目录默认位置，Java 会在调用 Python 之前先报参数缺失。
+- Root Cause:
+  - Java 恢复链把“输入路径是否存在”当成静态摘要字段来处理；而 Python 侧实际已经有 `stage entry path` 解析、`video_meta.json` 恢复、transcribe runtime subtitle materialize 等能力。
+  - 这同样是职责边界错误：路径补齐属于 Python runtime 仓库的恢复语义，不应由 Java 只凭当前 `IOPhaseResult` 的瞬时字段做最终判定。
+- Fix:
+  - `RecoverRuntimeContext` 扩展为统一返回 `video_path/subtitle_path` 与 `download_ready/transcribe_ready`。
+  - `TaskProcessingWorker` 在进入 `transcribe/stage1` 恢复分支前先调用 Python 恢复裁决，再决定是否继续当前阶段、跳过到下一阶段或回退到 download。
+- Prevention:
+  - 以后凡是恢复链中的 `video_path/subtitle_path/semantic_units_path` 可由 Python runtime 仓库或任务目录默认约定恢复的，都必须先经过 Python 恢复 RPC，再做 Java 侧参数非空校验。
+  - 以后恢复测试除了 `phase2` 外，还必须覆盖：
+    - `download/transcribe` 已完成但 `stage1` 缺失时返回 `stage1`
+    - `subtitle` 需要由 transcribe runtime materialize 的场景
+    - `asset_extract_java.outputs_ready` 时直接前推到 `phase2b`
+
+## 2026-03-19 DeepSeek `Connection error` 连续触发连接池重建，同任务未能固定切换到 Qwen
+- Symptom:
+  - 同一任务里连续出现以下日志：
+    - `LLM API call failed: Connection error.`
+    - `Connection pool closed via manager`
+    - `Connection pool rebuilt: max_connections=20, max_keepalive=10, http2=True, compression=gzip+br`
+    - `[LLM-retry] qwen_fallback_text failed, retry 2/4 scheduled. provider=Qwen/qwen-plus, wait=4.0s, error=Connection error.`
+  - 现象上，即便某一次已经进入 `deepseek -> qwen` 降级链，后续新的 LLM 请求仍会再次先触发一次 DeepSeek 调用，再次经历 `Connection error -> close pool -> rebuild pool`。
+  - 这会放大错误噪声、拉长单任务时延，并让“首个 provider 已明显不可用”的场景继续消耗连接池重建与重试预算。
+- Root Cause:
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+    - `LLMClient.complete_text/complete_json` 把 `APIConnectionError / APITimeoutError / httpx.NetworkError` 统一视为可重试网络错误。
+    - 每次命中这类错误后，都会执行 `_reset_pool_on_error()`，主动关闭全局 `AdaptiveConnectionPoolManager`；下次请求再经 `get_client()` 重建连接池，所以日志里会成对出现 `closed via manager` 与 `rebuilt`。
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 外层 `deepseek_complete_text/json` 还有一层 provider 级重试（默认 `4` 次），与 `LLMClient` 内层 tenacity（`3` 次尝试）叠加后，会把一次上游连接失败放大成多次重试与多轮连接池重建。
+    - 旧实现的 `_DEEPSEEK_FAST_FALLBACK_OPEN` 只是进程级布尔开关，只能把后续 DeepSeek 的“外层重试次数”降到 `0`，并不能把“当前任务后续所有 LLM 调用的 provider 选择”固定到 `qwen`。
+    - 因此，同一任务内后续新的 `deepseek_complete_text/json` 请求仍会先触发一次 DeepSeek，再在失败后临时回退到 Qwen。
+  - 结合当前日志，没有出现 `PoolTimeout / pool exhausted` 分支，说明这次问题的主因不是本地连接池耗尽，也不是“旧连接未关闭”导致的资源泄漏；更像是上游 DeepSeek 链路的 TCP/TLS/DNS/对端断连等网络层失败，被 SDK 统一包装成了笼统的 `Connection error.`。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_llm_context.py`
+    - 为 `RuntimeLLMContext` 增加任务级 provider 路由状态与原子读写方法，作为“当前任务已切换 provider”的统一真相源。
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 新增 `deepseek_primary` 任务级路由。
+    - 当 `deepseek_complete_text/json` 首次因 DeepSeek 网络失败进入 Qwen 降级时，原子地把当前任务的 `deepseek_primary` 固定到 `qwen`，并把前序失败记录写入路由快照。
+    - 同任务后续新的 `deepseek_complete_text/json` 请求先读取该路由；若已固定到 `qwen`，则直接走 Qwen，不再先触发一次 DeepSeek。
+    - 保留原有 `_DEEPSEEK_FAST_FALLBACK_OPEN` 作为“无任务上下文时”的兼容兜底，不打破已有进程级降级语义。
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - 新增 `text/json` 两条回归，锁定“首次 DeepSeek 失败后，当前任务后续请求不再触发 DeepSeek”。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_llm_context.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是“任务内 provider 不可用后应整体切路由”的场景，优先把决策状态放进 `RuntimeLLMContext` 这类任务级上下文，禁止只靠进程级布尔开关凑合。
+  - 以后排查 `Connection error.` 时，先区分“上游连通性失败”与“本地池耗尽”：
+    - 若日志出现 `PoolTimeout / pool exhausted`，优先看本地并发与池容量。
+    - 若只有 `Connection error.` 且伴随 `closed/rebuilt`，优先看上游网络/TLS/代理/运营商链路，以及是否存在重复重试放大。
+  - 以后任何“关闭连接池后立刻重试”的恢复机制，都要同步审视是否缺少“任务级路由固定”或“故障窗口熔断”，否则日志噪声与重建成本会被重复放大。
+
+## 2026-03-19 恢复上下文已裁决但 Java 仍保留 URL 占位与空 `Stage1Result` 产物
+- Symptom:
+  - Python 已经通过 `RecoverRuntimeContext` 判定 `download/stage1` 可复用，但 Java 侧仍可能保留：
+    - `ioResult.videoPath = videoUrl`
+    - `downloadResult.videoPath = videoUrl`
+    - `cleanupSourcePath = videoUrl`
+    - `Stage1Result` 只有 `success=true` 的占位对象，没有 `step2_json_path/step6_json_path`
+  - 在这种状态下，恢复链虽然“看起来已经跳过前置阶段”，但真正进入 `asset_extract_java` 的 legacy analysis 回退流时，仍可能拿不到稳定的 Step2/Step6 输入。
+- Root Cause:
+  - Java 以前把 URL 也当作“非空有效值”，用 `firstNonBlank(...)` 优先保留旧值；这会把 Python 返回的本地视频路径挡住。
+  - `RecoverRuntimeContext` 之前只返回 ready 标志，没有把 `download` 元数据和 Stage1 物化路径一并返回，导致 Java 只能补一个语义不完整的占位对象。
+- Fix:
+  - `RecoverRuntimeContextResponse` 增加 `download` 元数据与 `step2_json_path/step6_json_path`。
+  - Python 在恢复时直接从 Stage1 runtime projection 物化 `step2/step6/sentence_timestamps`。
+  - Java 在消费恢复结果时，把“HTTP URL 占位”视为待替换值，优先改写成 Python 返回的本地视频路径，并完整回填 `DownloadResult/Stage1Result`。
+  - `reconcileRecoveredRuntimeContext(...)` 增加 `timeoutCalculator` 空保护，避免 helper 在恢复补上下文阶段再引入新的 NPE。
+- Prevention:
+  - 以后恢复 RPC 只要返回的是“后续阶段要直接执行”的裁决，就必须同时返回该阶段的最小充分上下文，不能只返回布尔 ready 标志。
+  - 以后 Java 侧凡是 `videoPath/cleanupSourcePath/downloadResult.videoPath` 这类字段，遇到 HTTP URL 占位时必须允许被 runtime 恢复出的本地路径覆盖。
+  - 以后涉及恢复的测试必须显式覆盖：
+    - 当前对象字段里已有 URL 占位值；
+    - Python 返回本地路径后 Java 必须覆盖；
+    - `asset_extract_java` 回退流需要 `step2/step6` 时能直接取到恢复物化产物。
+## 2026-03-19 浏览器重连后，非终态任务列表快照可能停留在旧阶段，导致进行中任务看不到当前 checkpoint
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 浏览器主任务流断线重连后，`COMPLETED/FAILED` 终态通常能恢复，但 `PROCESSING/PROBING/QUEUED` 这类非终态任务可能仍停留在断线前的旧快照。
+  - 用户看到的直接现象是：
+    - 任务仍显示“进行中”，但阶段提示没有推进到当前 `stage/checkpoint`
+    - 任务卡片继续展示旧的 `statusMessage`
+    - WebSocket 重连成功后，页面没有立刻拿到“此时此刻”的运行阶段
+- Root cause:
+  - 浏览器重连后的非终态对账依赖 `/api/mobile/tasks/changes`，而不是逐条重放 `taskUpdate`。
+  - 该增量接口此前的 `computeTaskSyncVersion(...)` 只比较：
+    - `createdAt`
+    - `completedAt`
+    - `lastOpenedAt`
+    - `metaUpdatedAt`
+    - `costUpdatedAt`
+  - 运行态任务在 `progress/status/statusMessage/checkpoint` 变化时，虽然 `task_runtime_state.updated_at` 已经写库，但并没有进入任务列表同步游标。
+  - 结果是：
+    - 任务实际已进入新阶段
+    - 但增量接口不会把它判定为 changed
+    - 前端重连后继续沿用断线前的旧任务对象
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+    - 给 `TaskEntry` 增加 `updatedAt` 运行态时间戳。
+    - 每次 `persistTaskState(...) / persistAcceptedTaskState(...)` 前都更新该字段。
+    - 从持久化记录恢复任务时，继续把 `updatedAt` 映射回运行态任务。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `TaskView` 新增 `runtimeUpdatedAt`。
+    - `/api/mobile/tasks` 与 `/api/mobile/tasks/changes` 的列表项增加 `runtimeUpdatedAt` 输出。
+    - `computeTaskSyncVersion(...)` 现在优先把 `runtimeUpdatedAt` 纳入同步版本，确保进行中任务的阶段推进也会被视为变更。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+    - `taskUpdate/taskTerminalEvent` 快照补发 `runtimeUpdatedAt`，统一 WebSocket 与 REST 的快照字段语义。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 前端任务列表同步游标 `inferTaskListSyncVersion(...)` 增加 `runtimeUpdatedAt`。
+    - `mergeLiveTaskUpdateIntoState(...)` 开始保留 `runtimeUpdatedAt/recovery*` 字段。
+    - 当 `statusMessage` 缺失时，任务卡片会回退到 `recoveryStage/recoveryCheckpoint` 生成阶段提示，避免快照里已有阶段字段却仍显示泛化文案。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=D:\videoToMarkdownTest2\.m2\repository" -Dtest=MobileMarkdownControllerRecoveryStatusTest test -q`
+    - 当前在 sandbox 中失败，原因是本地 Maven 缓存缺少 `jedis/netty-common` 的 POM，离线环境无法补齐依赖；不是本次代码编译错误。
+- Prevention:
+  - 以后凡是“非终态只做快照级对账”的链路，变更游标必须绑定运行态 durable 时间戳，不能只依赖 `created/completed/meta/cost` 这类低频字段。
+  - 任务卡片的阶段提示不能只信任 `statusMessage`；后端一旦已经提供 `stage/checkpoint` 快照，前端必须有明确的 fallback 展示策略。
+## 2026-03-19 `VideoMetaService` 读取 `video_meta.json` 失败时日志只剩路径，无法区分瞬时文件替换与真实解析异常
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 控制面日志出现：
+    - `read video metadata failed: d:\videoToMarkdownTest2\var\storage\storage\...\video_meta.json err=d:\videoToMarkdownTest2\var\storage\storage\...\video_meta.json`
+  - `err=` 后面只剩文件路径，没有异常类型，也没有真正的异常语义。
+  - 这会让排障者无法判断是：
+    - 文件在并发替换窗口中瞬时消失
+    - JSON 损坏
+    - 权限异常
+    - 其他 IO 故障
+- Root cause:
+  - `VideoMetaService.readOrCreateNode(...)` 之前统一执行：
+    - `logger.warn("read video metadata failed: {} err={}", metaPath, ex.getMessage())`
+  - 当底层异常是 `FileNotFoundException/NoSuchFileException` 时，`ex.getMessage()` 往往只返回路径本身。
+  - 同时，`video_meta.json` 的写入走 `video_meta.json.tmp -> move(REPLACE_EXISTING)`，在 Windows 上读线程可能恰好撞到替换窗口，触发一次瞬时缺文件。
+  - 结果是：
+    - 原本可容忍的并发读写窗口
+    - 被记录成一条没有诊断信息的 warn
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoMetaService.java`
+    - 读取从 `readTree(file)` 改为 `Files.readAllBytes(...) + readTree(bytes)`，统一异常形态。
+    - 对 `NoSuchFileException/FileNotFoundException` 增加一次轻量重试。
+    - 若重试后仍是瞬时缺文件，降级为 `debug`，按空节点处理，不再制造误导性 warn。
+    - 对真正的读取/写入异常，日志改为：
+      - `path`
+      - `exception type`
+      - `sanitized message`
+    - 避免以后再出现“只剩路径，看不出根因”的日志。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoMetaServiceTest.java`
+    - 新增坏 JSON 场景回归，锁定读取失败时仍返回空节点/空快照，不把调用链打崩。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是控制面读取任务目录内 JSON 元数据的地方，日志必须至少带：
+    - 文件路径
+    - 异常类型
+    - 规整后的异常消息
+  - 对“原子替换写 + 频繁读”的文件，必须明确区分：
+    - 瞬时并发窗口
+    - 真实数据损坏
+  - 不能把两者都打成同级别 warn。
+## 2026-03-19 删除后重新提交同一视频时命中残留持久化状态，任务被误判去重且不会再下发到 Python
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 移动端对同一视频执行“重新提交”后，后端日志通常停在：
+    - `Processing task: <taskId>`
+    - `Task removed from runtime map: <taskId>`
+  - 后续不会继续进入下载/处理链，Python 端也收不到新的 gRPC/执行请求。
+  - 前端视角像是“任务提交后卡住”，但实际上新任务已经在 Java 侧被直接短路。
+- Root cause:
+  - “重新提交”前端实现是：
+    - 先调用 `DELETE /api/mobile/tasks/{taskId}` 删除旧任务
+    - 再调用普通 submit 接口重新建一个新任务
+  - 旧删除链只清理了：
+    - `TaskQueueManager` 运行态 map
+    - `var/storage` 下的任务目录/缓存
+  - 但没有删除 `task_runtime_state` 中的持久化任务记录。
+  - `TaskProcessingWorker` 在处理新任务时会调用：
+    - `TaskDeduplicationService.findReusablePersistedTask(...)`
+  - 该查询仍然能命中刚刚被“删除”的旧任务，于是新任务被标记为 `DEDUPED`，随后 `removeTask(...)` 移出运行态，导致后续链路不会再触发 Python。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java`
+    - 新增 `deleteTask(String taskId)`，支持按任务 ID 删除 `task_runtime_state` 残留记录。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `DELETE /api/mobile/tasks/{taskId}` 在运行态删除和存储删除之后，继续删除持久化任务状态。
+    - 响应体新增 `persistedStateDeleted`，显式区分“是否清理了持久化状态”。
+    - 当只有持久化状态残留时，不再误报 `ALREADY_DELETED`，而是返回 `DELETED`。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerDeleteTaskPersistenceTest.java`
+    - 新增回归用例，覆盖：
+      - 已完成任务删除时会同步删除持久化状态
+      - 仅剩持久化状态时，删除接口仍会执行真实清理而不是返回“已删除”
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+    - 当前失败，失败点位于现有未完成改动：
+      - `TaskWebSocketHandler.java` 访问 `TaskWebSocketHeartbeatCoordinator.SessionRuntimeState` 私有字段
+    - 不是本次删除链修复引入的编译错误。
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -Dtest=MobileMarkdownControllerDeleteTaskPersistenceTest test -q`
+    - 当前在 sandbox 离线环境失败，原因是无法从 Maven Central 拉取 `io.netty:netty-common:4.1.100.Final`。
+- Prevention:
+  - 以后凡是“删除后允许重新提交”的链路，删除语义必须覆盖三层状态：
+    - 运行态内存对象
+    - 磁盘产物/缓存
+    - 去重所依赖的持久化索引或状态表
+  - 任何去重能力只要依赖 durable 状态，就必须把“显式删除”纳入同一生命周期设计；否则就会出现“界面上删了，去重上没删”的幽灵任务。
+## 2026-03-19 最终产物已存在时恢复仍重复进入 `phase2b` 组装
+- Symptom:
+  - 即使任务目录里 `markdown/json` 最终产物已经存在，恢复链也只会把起点推到 `phase2b`，然后再次调用 `AssembleRichText`。
+  - 这会重复触发最后一段装配、watchdog 和 metrics 收尾，属于纯重复工作。
+- Root Cause:
+  - `RecoverRuntimeContext` 之前只判断到 `asset_extract_java.outputs_ready`，没有继续读取 `phase2b_runtime_repository`。
+  - Java 恢复执行器也只有 `transcribe/stage1/phase2a/asset_extract_java/phase2b` 分支，没有“最终产物可直接完成”的 case。
+- Fix:
+  - Python 新增 `phase2b` 最终产物检查，若 `markdown_path` 真实存在，则把恢复起点解析为 `completed`。
+  - Java 新增 `completed` 分支，直接复用恢复出的 `markdown/json` 生成成功结果，不再重跑 assemble。
+- Prevention:
+  - 以后恢复图设计必须一直推到“最后一个还需要执行的阶段”，不能把“最后一个阶段已完成但仍再跑一次”当作默认行为。
+  - 以后只要某阶段已经产出最终对外交付物，就应在恢复 RPC 里显式暴露“可直接完成”的能力，而不是只暴露“从该阶段重跑”。
+## 2026-03-19 `MobileMarkdownController` 读取书籍章节显示名时把 `/` 当成 Windows 路径分隔符，导致 `InvalidPathException`
+- Date:
+  - 2026-03-19
+- Symptom:
+  - 移动端打开按章节拆分的 markdown 时，若标题包含 `/` 等 Windows 非法文件名字符，接口 `/api/mobile/tasks/{taskId}/markdown/by-path` 会抛出 `java.nio.file.InvalidPathException`。
+  - 典型示例：`有序集合（Sorted Set / ZSET）.md`
+- Root cause:
+  - `BookMarkdownService.sanitizeLeafMarkdownFileName(...)` 落盘时会把 `/` 替换为 `_`，真实文件名实际是 `有序集合（Sorted Set _ ZSET）.md`。
+  - `MobileMarkdownController.resolveAssetTargetPath(...)` 之前只做了前导斜杠剥离，随后直接把展示名传给 `Path.resolve(...)`。
+  - 写入侧和读取侧没有共享同一套命名收敛规则，导致“展示名”和“落盘路径”语义漂移。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 路径解析改为两阶段：
+      - 先按真实相对路径解析。
+      - 若已存在目录前缀之后的尾段无法继续按目录解释，则把剩余尾段按 Windows 落盘规则收敛成单个文件名再定位。
+    - 对 `getTaskMarkdownByRelativePath`、`inspectTaskPersonalizationCache`、`updateTaskMarkdown`、`getTaskAsset` 的路径校验增加 `target == null` 防护，避免非法路径再次打穿到 `Path.resolve(...)`。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerMarkdownPersonalizationDisabledTest.java`
+    - 增加根目录别名和已有目录前缀别名两条回归测试，覆盖中文标题带 `/` 的场景。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerMarkdownPersonalizationDisabledTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是“展示名允许人类可读符号、落盘名必须满足 Windows 文件系统约束”的链路，都必须显式区分：
+    - 展示名
+    - 相对路径
+    - 落盘文件名
+  - 读取侧不得直接把展示名喂给 `Path.resolve(...)`；必须与写入侧共享同一套命名收敛规则，或者至少补一层兼容映射。
+## 2026-03-20 B 站重复投稿被陈旧 `COMPLETED` 记录拦截，且失败任务在列表中隐身
+- Date:
+  - 2026-03-20
+- Symptom:
+  - 同一个 B 站分 P 链接再次提交时，后端没有真正启动新任务，而是很快把新任务标成 `DEDUPED`。
+  - 被指向的旧任务虽然在 `task_runtime_state` 里是 `COMPLETED`，但对应 markdown/输出目录已经不存在，移动端列表里也看不到可读任务。
+  - 失败任务因为没有 markdown，在 `onlyMultiSegment=true` 的任务列表请求里也会被静默过滤，用户只能感知到“后端不接任务”。
+- Root cause:
+  - `TaskDeduplicationService` 之前只根据持久化状态做复用判断，只要旧记录不是 `FAILED/CANCELLED/DEDUPED/MANUAL_RETRY_REQUIRED/FATAL`，就会被视为可复用任务。
+  - 这导致“状态还是 `COMPLETED`，但产物目录已经被清理或丢失”的陈旧记录仍然参与 dedup，新的真实重跑请求被错误短路。
+  - `MobileMarkdownController.listTasks(...)` 在 `onlyMultiSegment=true` 时会直接过滤掉所有不可读 markdown 的任务，没有给 `FAILED/MANUAL_RETRY_REQUIRED/FATAL` 留例外通道。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskDeduplicationService.java`
+    - dedup 不再只看状态，新增“完成态产物可读性”校验。
+    - 只有旧记录仍处于 `QUEUED/PROBING/PROCESSING`，或者 `COMPLETED` 且 markdown/输出目录真实存在时，才允许复用。
+    - 对产物缺失的陈旧 `COMPLETED` 记录直接跳过，让新投稿真正进入执行链。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java`
+    - 提供可枚举的 reusable 候选列表，供 dedup 服务逐条校验，而不是只取数据库最新一条就直接命中。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `onlyMultiSegment=true` 时，对 `FAILED/MANUAL_RETRY_REQUIRED/FATAL` 状态放行，不再因为“无 markdown”而整条任务消失。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskDeduplicationServiceTest.java`
+    - 增加回归测试，覆盖：
+      - 陈旧 `COMPLETED` 记录会被 dedup 跳过
+      - 真实存在 markdown 的 `COMPLETED` 记录仍可复用
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerTaskListDeduplicateTest.java`
+    - 增加失败任务在 `onlyMultiSegment=true` 列表中仍可见的回归测试。
+- Prevention:
+  - 以后凡是“去重命中历史任务”的链路，必须同时验证：
+    - 状态是否合法复用
+    - 产物是否仍然存在
+    - 展示层是否还能把命中的旧任务暴露给用户
+  - 任何 `COMPLETED` 状态都不能默认等价于“结果仍可交付”；只有状态和产物同时成立，才允许短路重跑。
+
+## 2026-03-20 Bilibili 禁止 `aria2c` 失败后降级到 yt-dlp 内置下载器
+- Date:
+  - 2026-03-20
+- Symptom:
+  - 下载链路里外部下载器失败后的降级逻辑原本是按“错误类型”统一判断，存在把 Bilibili 的 `aria2c` 失败继续切换到 yt-dlp 内置下载器的分支空间。
+  - 这与目标策略不一致：
+    - Bilibili 保留 `aria2c` 的并发与重试能力，不做内置下载器降级。
+    - YouTube 即使配置了 `external_downloader`，也只使用 yt-dlp 内置下载器。
+- Root cause:
+  - 下载器选择与降级逻辑之前主要围绕“错误关键词”展开，没有把“站点策略”提升为一等决策条件。
+  - 从职责上看：
+    - Bilibili 的瓶颈更偏传输层，`aria2c` 的分片、并发和自带重试更有价值。
+    - YouTube 的稳定性更依赖 yt-dlp 的 extractor、player client、Cookie、POT Provider 链路，外部下载器不应介入。
+- Fix:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_is_bilibili_url(...)`，把站点识别显式收敛进下载策略。
+    - 在 `aria2c -> yt-dlp` 降级分支增加 `not self._is_bilibili_url(url)` 保护，明确禁止 Bilibili 触发该降级。
+    - 对 Bilibili 的 `aria2c` 默认追加 `--disable-ipv6=true`（若用户未显式配置），规避部分双栈网络下 `bilivideo` CDN 命中不可达 IPv6 路由的问题。
+    - 保留 YouTube 现有策略：`external_downloader` 不对 YouTube 生效。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增回归测试，锁定：
+      - YouTube 在配置 `external_downloader` 时仍不会透传给 yt-dlp。
+      - Bilibili 遇到 `ERROR: aria2c exited with code 1` 时不会自动降级到 yt-dlp 内置下载器。
+      - Bilibili 走 `aria2c` 时默认会注入 `--disable-ipv6=true`。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+  - 手工脚本验证：
+    - YouTube 配置 `external_downloader` 时，最终传给 yt-dlp 的 options 不包含 `external_downloader` / `external_downloader_args`。
+    - Bilibili 命中 `ERROR: aria2c exited with code 1` 时，仅发生一次 `aria2c` 路径调用并直接报错，不切到 yt-dlp 内置下载器。
+    - Bilibili 走 `aria2c` 成功路径时，最终传给 yt-dlp 的 `external_downloader_args.default` 包含 `--disable-ipv6=true`。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - 以后凡是“下载器选择 / 降级”策略，都必须先回答职责边界问题：这是站点问题、鉴权问题，还是传输层问题，不能只靠扩大错误关键词匹配。
+  - 任何外部下载器相关变更都必须至少补两类回归：
+    - 站点选择是否正确
+    - 失败后的降级是否符合该站点策略
+
+## 2026-03-20 DashScope 短视频触发 `400 invalid_parameter_error` 后被错误重试
+- Date:
+  - 2026-03-20
+- Symptom:
+  - Phase2A 的 VL 分析在调用 DashScope 视频模态时，短视频片段会返回：
+    - `400 invalid_parameter_error`
+    - `The video file is too short.`
+  - 旧链路没有把它识别为参数型业务错误，导致同一请求继续按通用失败重试，日志持续出现：
+    - `VL API call failed (attempt n/7)`
+    - 退避等待不断拉长，并占用并发槽位。
+- Root cause:
+  - `VLVideoAnalyzer._call_vl_api()` 之前把 provider 返回的异常基本统一纳入重试路径，缺少“不可重试参数错误”和“可本地降级短视频”的分流。
+  - `VLVideoAnalyzer._build_messages()` 在 DashScope 端默认优先走视频模态（`temp_url` / `data_uri_video`），短视频命中 provider 最小时长限制后，虽然错误语义已经非常明确，但本地没有利用这个语义做 transport 降级。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 新增异常文本/状态码聚合辅助逻辑，识别 `400 invalid_parameter_error / invalid_request_error`。
+    - 新增 DashScope 短视频错误识别：当 provider 明确返回 `The video file is too short.` 时，将本次 VL 请求从视频模态立即切换到 `keyframes`，避免继续提交同类无效视频请求。
+    - 将 `400` 参数型错误归为不可重试，直接止损，不再继续指数退避。
+    - 在 JSON 解析重试时保留已生效的 `keyframes` 强制路由，避免短视频降级后又被后续重建消息逻辑切回视频模态。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增回归测试，锁定：
+      - 短视频 `400` 会先记录失败，再自动降级到 `keyframes` 并成功返回。
+      - 非短视频场景下的 `400 invalid_parameter_error` 不再重试，也不会继续 sleep/backoff。
+    - 同步修正已有 VL 离线路径测试桩，使其与当前方法签名保持一致。
+- Verification:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "call_vl_api or dashscope_offline_task_uses_openai_batch_with_5s_poll"`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - 以后凡是 provider 已明确返回“参数不满足要求”的错误，都必须优先判断是否应：
+    - 直接降级 transport
+    - 直接判为不可重试
+    - 而不是默认进入统一退避逻辑。
+  - 所有“视频模态 -> 关键帧模态”的降级策略都必须补两类回归：
+    - provider 参数错误是否能触发正确降级
+    - 降级后的后续重建消息/重试逻辑是否会错误回切原 transport
+
+## 2026-03-20 Stage1 heartbeat-strong 阶段误报“准备重启子步骤”
+- Date:
+  - 2026-03-20
+- Symptom:
+  - `stage1` 期间经常先出现：
+    - `阶段长时间无进展，准备重启子步骤（阶段=stage1，重启=1/2）`
+  - 但几十秒后任务又会继续进入：
+    - `正在进行语义单元分析... (35%)`
+  - 结果是用户看到的是“好像已经准备重启”，而真实执行却是同一轮 Stage1 正常完成后继续推进。
+- Root cause:
+  - Python Stage1 的文件心跳写入位置是 `intermediates/stage1_watchdog_heartbeat.json`。
+  - Java 通用桥 `TaskProgressWatchdogBridge` 的文件兜底此前只读取 `intermediates/task_watchdog_heartbeat.json`，导致 `stage1` 在 gRPC stream 暂时无信号时缺少正确文件回补。
+  - 同时 `TaskProcessingWorker.runWithWatchdog(...)` 先广播了 `准备重启子步骤`，然后才检查 `watchdog.shouldInterruptOnRestart(stage1)`。
+  - 由于 `stage1` 已被配置为 `heartbeat-strong stage`，该分支多数情况下只会 defer restart，不会真的 interrupt；因此用户文案和真实动作发生错位。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/watchdog/TaskProgressWatchdogBridge.java`
+    - 对 `stage1` 切换到专用 heartbeat 文件兜底：`stage1_watchdog_heartbeat.json`。
+    - 把 watchdog gRPC stream 默认 `call-timeout` 提高到 `35s`，避免比 `idle-timeout=25s` 更早超时重连。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 将 `准备重启子步骤` 的广播延后到 `interruptOnRestart=true` 之后。
+    - 对 `heartbeat-strong stage` 改为仅记录内部 defer 日志，不再向用户广播假重启信息。
+  - 新增回归测试：
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/watchdog/TaskProgressWatchdogBridgeStage1FileFallbackTest.java`
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerWatchdogDeferredRestartTest.java`
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=TaskProcessingWorkerWatchdogDeferredRestartTest,TaskProgressWatchdogBridgeStage1FileFallbackTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后任何 watchdog 用户态提示都必须先校验“是否已经发生真实动作”，禁止把内部候选决策直接透传为前端状态。
+  - 以后任何带阶段专用 heartbeat 文件的链路，都必须在 Java 侧桥接层按 stage 做文件路径分流，不能默认所有阶段共用同一 heartbeat 文件名。
+
+## 2026-03-20 任务列表会显示 UNKNOWN 异常残留任务
+- Date:
+  - 2026-03-20
+- Symptom:
+  - 移动端任务列表里会出现状态为 `UNKNOWN` 的“异常残留”任务。
+  - 这类任务没有可读 markdown，也没有实际运行中的 runtime owner，但会持续占据列表位置，用户误以为它仍然是可操作任务。
+- Root cause:
+  - `StorageTaskCacheService` 会把“目录存在、无 success 标记、也无 markdown”的存储目录识别为 `UNKNOWN`。
+  - `MobileMarkdownController.listTasks()` 和 `listTaskChanges()` 之前会直接把这类缓存任务并入列表视图，没有先判断它是否只是孤儿残留目录。
+  - 删除链路虽然已经具备 `deleteStorageTaskByTaskId(...)`、`deletePersistedTaskState(...)` 和 cleanup index 清理能力，但列表聚合链路没有复用这些能力做前置收口。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 在任务列表聚合阶段新增孤儿残留识别：仅当存储任务满足 `UNKNOWN + 无 markdown + 无 runtime owner` 时，才判定为异常残留。
+    - 复用既有删除链路清理存储目录、持久化状态和 cleanup index，并在本次聚合中直接跳过该任务，避免继续返回到前端。
+    - 当增量变更接口在本次扫描中发生了残留清理时，返回 `resyncRequired=true`，让前端回退到全量刷新，避免旧列表状态继续保留已删除任务。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerResidualTaskCleanupTest.java`
+    - 新增回归测试锁定两条边界：
+      - 孤儿 `UNKNOWN` 残留会被删除且不会出现在任务列表。
+      - 正在处理中的 runtime shadow 不会被误删。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerResidualTaskCleanupTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后任何“存储扫描 -> 列表聚合”的链路，都必须先区分“真实历史任务”和“孤儿目录残留”，禁止把 `UNKNOWN` 目录直接上送到用户界面。
+  - 以后凡是后端在增量查询期间主动清理了列表项，都必须同时给前端一个明确的 resync 信号，避免客户端本地状态继续持有已删除任务。
+
+## 2026-03-20 删除任务时 `runtime_state.db-wal` 被 Python runtime store 持有，导致前端误报“故事加载失败”
+- Date:
+  - 2026-03-20
+- Symptom:
+  - 移动端/网页端在“重新提交原任务”或显式删除任务时，前端提示：
+    - `故事加载失败：delete storage task directory failed`
+  - 后端日志进一步显示：
+    - `runtime_state.db-wal: 另一个程序正在使用此文件，进程无法访问。`
+  - 即使任务本身已经完成，删除 storage 目录仍会因为 `intermediates/rt/runtime_state.db-wal` 被占用而返回 500。
+- Root cause:
+  - Python gRPC 侧把 `RuntimeRecoveryStore` 缓存到 servicer 级 `_runtime_recovery_stores`，并通过 `RuntimeRecoverySqliteIndex.shared(...)` 复用同一个 SQLite WAL 索引实例。
+  - `RuntimeRecoverySqliteIndex` 内部长期持有 `_write_connection`，任务完成后并不会自动按 task 维度关闭。
+  - Java `MobileMarkdownController.cancelRuntimeTask(...)` 之前直接执行：
+    - `removeTask -> deleteStorageTaskByTaskId -> deletePersistedTaskState`
+  - 这条链没有先通知 Python 释放 runtime SQLite 句柄，也没有把“删除失败但任务已逻辑删除”的场景降级为后台清理，因此 Windows 文件锁被直接放大成用户可见失败。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - 为共享 SQLite 索引新增显式释放能力：
+      - `release_shared(...)`
+      - `release_all_shared(...)`
+      - `close()`
+    - 追加读连接注册表，确保释放时不仅关闭写连接，也会关闭当前进程中缓存的读连接。
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - 新增 `close()`，把 task 级 runtime store 的关闭职责显式暴露出来。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_release_runtime_recovery_stores(task_id=...)`，按 task 定位并驱逐 servicer 缓存中的 runtime store。
+    - 扩展 `ReleaseCVResources(...)`：除了旧的 CV 缓存清理外，还会关闭对应 task 的 runtime SQLite store。
+    - gRPC 服务关闭时补一轮全局 runtime store 释放，避免进程退出前遗留 WAL 句柄。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 新增同步 `releaseCVResources(taskId)` 封装，便于删除链在同一请求里先释放 Python 句柄。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 删除任务前先调用 Python `ReleaseCVResources(taskId)`。
+    - storage 目录删除改为短重试，给刚释放的 SQLite/WAL 句柄留出回收窗口。
+    - 若重试后仍删不掉，则不再返回 500，而是：
+      - 继续删除持久化任务状态；
+      - 通过 `TaskCleanupIndexService.scheduleImmediateCleanupForTask(...)` 把目录放入立即清理队列；
+      - 向前端返回 `DELETED_PENDING_CLEANUP`，避免再显示“故事加载失败”。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskCleanupIndexService.java`
+    - 新增“立即清理”入口，允许删除链把被锁目录转入后台 cleanup queue，而不是依赖定时 TTL 清理。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerDeleteTaskTest.java`
+    - 增加 Windows 文件锁回归：锁住 `runtime_state.db-wal` 后，删除接口必须返回 `DELETED_PENDING_CLEANUP`。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskCleanupIndexServiceTest.java`
+    - 增加立即清理任务入队回归。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_sqlite.py services/python_grpc/src/common/utils/runtime_recovery_store.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=TaskCleanupIndexServiceTest,MobileMarkdownControllerDeleteTaskTest,MobileMarkdownControllerDeleteTaskPersistenceTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后任何“按任务删除 storage 目录”的链路，都必须先释放 Python 侧对该任务 runtime SQLite/WAL 的持有，不能假设“任务完成 == 句柄已关闭”。
+  - 以后凡是用户显式删除任务的链路，都必须支持“逻辑删除成功、物理清理延后”的状态，禁止把目录清理失败直接映射成内容加载失败。
+  - 所有 runtime SQLite shared cache 都必须具备显式 `close/release` 能力，否则 Windows 文件锁问题会持续回流到用户侧。
+
+## 2026-03-21 自动语种探测会把中文主体视频误锁为英文
+- Date:
+  - 2026-03-21
+- Symptom:
+  - 当 `whisper.language=auto` 时，部分“片头是英文/双语提示，主体内容是中文”的视频，会在转录前被提前锁成 `en`。
+  - 一旦锁成英文，后续所有 segment 都沿用固定 `language=en`，中文主体的转录准确率明显下降。
+- Root cause:
+  - `parallel_transcription._detect_language_by_probe(...)` 之前只截取音频开头一段做一次 probe。
+  - 旧逻辑把这次单点 probe 的 `zh/en` 结果直接升级成全局硬约束，没有验证该结果是否能代表中后段主体内容。
+  - probe 之前没有先做 VAD 过滤，片头静音、背景音乐、简短英文开场白都会放大开头窗口的偏差。
+- Fix:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 新增 `_build_language_probe_windows(...)`，把探测预算拆成头/中/尾多个窗口，不再只看开头。
+    - 新增 `_pick_stable_language_from_probe_samples(...)`，基于窗口投票、有效语音时长和 `language_probability` 判断是否足够稳定。
+    - probe 调用改为 `vad_filter=True`，优先在去静音后的有效语音上做语言判断。
+    - 仅当所有有效窗口都稳定指向同一种语言时才固定语言；只要 `zh/en` 混合出现，或窗口冲突、置信不足、样本不足，就保留 `auto`，让后续 segment 继续自适应检测。
+    - 新增 `_format_language_probe_samples(...)`，把窗口详情写入日志，便于定位“是哪一段把语种带偏”。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+    - 新增“英文片头 + 中文主体”回归，锁定混合语种必须保持 `auto`。
+    - 新增“单窗口证据不够强时必须保持 auto”回归。
+    - 新增 probe 必须使用多窗口 + `vad_filter=True` 的回归。
+- Verification:
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后任何 `auto -> 固定语种` 的升级，都必须先验证“证据是否覆盖主体内容”，且不得在 `zh/en` 混合窗口上强行拍成单语。
+  - 语种探测类策略必须同时记录窗口级证据和置信度，否则线上出现“中文被锁英文”时无法快速判断是片头偏差、静音干扰还是模型波动。
+
+## 2026-03-21 WebSocket 重连后页面未对账到任务终态
+- Date:
+  - 2026-03-21
+- Symptom:
+  - 页面日志已经出现 `WebSocket connected: user=..., session=...`，说明重连成功。
+  - 但页面里的任务仍停留在旧状态，后端持久态中已经 `COMPLETED` 的任务没有在 Web 页面显示完成。
+- Root cause:
+  - `taskTerminalEvent` 在前端的处理顺序是“先 merge 到内存，再 ACK”。
+  - 当终态消息在页面隐藏状态下到达时，`mergeLiveTaskUpdateIntoState(...)` 会更新 `state.tasks`，但因为 `document.hidden=true` 不会立刻 `renderTaskList()`。
+  - 页面恢复可见后，旧的恢复策略只会在“仍存在进行中任务”时触发列表刷新；如果任务已经在隐藏期间变成 `COMPLETED/FAILED/CANCELLED`，恢复路径反而不会再重绘，导致出现“消息已 ACK，但页面仍显示旧状态”。
+  - 另外，WebSocket `recoveryConnect` 后若确实漏过终态消息，旧逻辑缺少“按任务粒度的终态补账”，只能在增量刷新和全量刷新之间二选一。
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 新增 `taskTerminalReconcilePending` 标记。
+    - 当终态消息在页面隐藏时到达，只标记“终态待对账/待重绘”，不做整页刷新。
+    - 页面 `visibilitychange/pageshow` 恢复时，只执行终态限定对账；若内存里已经是正确终态，则仅补做渲染。
+    - WebSocket `recoveryConnect` 成功后，只针对本地仍非终态的任务做终态补账，不再整页 `reloadTaskList(...)`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 新增 `/api/mobile/tasks/reconcile-terminal`。
+    - 仅接收当前页传入的 `taskIds`，只返回其中已进入 `COMPLETED/FAILED/CANCELLED` 的任务快照，避免全量任务列表回流。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是“终态消息到达时页面可能不可见”的链路，都必须区分“状态已 merge”与“DOM 已重绘”，禁止把 ACK 成功误当作页面已完成对账。
+  - 以后若只希望做终态限定对账，必须满足两个条件：
+    - 前端能准确枚举本地仍非终态的 `taskId`
+    - 后端提供按 `taskId` 回查终态快照的轻量接口
 
 ## 2026-03-21 Phase2B concrete/process 媒体锚点被结构化结果覆盖，导致最终 Markdown 丢图或残留假链接
 - Date:

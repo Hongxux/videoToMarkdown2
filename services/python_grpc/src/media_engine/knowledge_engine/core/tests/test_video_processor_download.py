@@ -222,6 +222,32 @@ class _YoutubeDLDurationAwareSuccessStub:
         output_path.write_bytes(b"video")
 
 
+class _YoutubeDLAria2ExitCodeFallbackStub:
+    calls = []
+
+    def __init__(self, opts):
+        self._opts = dict(opts)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def extract_info(self, _url, download=False):
+        _ = download
+        return {"duration": 7200.0}
+
+    def download(self, _urls):
+        type(self).calls.append(dict(self._opts))
+        if self._opts.get("external_downloader"):
+            raise Exception("ERROR: aria2c exited with code 1")
+        outtmpl = self._opts["outtmpl"]
+        output_path = Path(outtmpl.replace("%(ext)s", "mp4"))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"video")
+
+
 def test_download_applies_cookie_auth_options(monkeypatch, tmp_path):
     cookie_file = tmp_path / "cookies.txt"
     cookie_file.write_text("# Netscape HTTP Cookie File", encoding="utf-8")
@@ -265,6 +291,49 @@ def test_download_youtube_enables_player_client_chain(monkeypatch, tmp_path):
     player_clients = youtube_args.get("player_client")
     assert isinstance(player_clients, list)
     assert player_clients[:3] == ["web_safari", "tv_downgraded", "web"]
+
+
+def test_download_youtube_skips_external_downloader_even_when_configured(monkeypatch, tmp_path):
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLSuccessStub)
+
+    aria2c_path = tmp_path / "aria2c.exe"
+    aria2c_path.write_text("", encoding="utf-8")
+
+    processor = video_mod.VideoProcessor(
+        external_downloader=str(aria2c_path),
+        external_downloader_args=["--split=16"],
+    )
+    video_path = processor.download(
+        url="https://www.youtube.com/watch?v=YFjfBk8HI5o",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert "external_downloader" not in _YoutubeDLSuccessStub.last_opts
+    assert "external_downloader_args" not in _YoutubeDLSuccessStub.last_opts
+
+
+def test_download_bilibili_aria2c_disables_ipv6_by_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLSuccessStub)
+
+    aria2c_path = tmp_path / "aria2c.exe"
+    aria2c_path.write_text("", encoding="utf-8")
+
+    processor = video_mod.VideoProcessor(
+        external_downloader=str(aria2c_path),
+        external_downloader_args=["--split=16"],
+    )
+    video_path = processor.download(
+        url="https://www.bilibili.com/video/BV1n9CwYoEro",
+        output_dir=str(tmp_path / "bilibili"),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    args_map = _YoutubeDLSuccessStub.last_opts["external_downloader_args"]
+    assert "--split=16" in args_map["default"]
+    assert "--disable-ipv6=true" in args_map["default"]
 
 
 def test_download_fallback_to_explicit_format_id(monkeypatch, tmp_path):
@@ -639,6 +708,32 @@ def test_download_retries_without_proxy_when_gateway_502(monkeypatch, tmp_path):
     last_call = _YoutubeDLProxy502RetryStub.calls[-1]
     assert first_call.get("proxy") == "http://127.0.0.1:7897"
     assert "proxy" not in last_call
+
+
+def test_download_bilibili_keeps_aria2c_strategy_when_exit_code_is_truncated(monkeypatch, tmp_path):
+    _YoutubeDLAria2ExitCodeFallbackStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLAria2ExitCodeFallbackStub)
+
+    aria2c_path = tmp_path / "aria2c.exe"
+    aria2c_path.write_text("", encoding="utf-8")
+
+    processor = video_mod.VideoProcessor(
+        external_downloader=str(aria2c_path),
+        external_downloader_args=["--split=16"],
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        processor.download(
+            url="https://www.bilibili.com/video/BV1n9CwYoEro",
+            output_dir=str(tmp_path / "download"),
+            filename="video",
+        )
+
+    assert "aria2c exited with code 1" in str(exc_info.value)
+    assert len(_YoutubeDLAria2ExitCodeFallbackStub.calls) == 1
+    first_call = _YoutubeDLAria2ExitCodeFallbackStub.calls[0]
+    assert "external_downloader" in first_call
+    assert "external_downloader_args" in first_call
+    assert "--disable-ipv6=true" in first_call["external_downloader_args"]["default"]
 
 
 def test_download_proxy_connection_error_has_specific_hint(monkeypatch, tmp_path):

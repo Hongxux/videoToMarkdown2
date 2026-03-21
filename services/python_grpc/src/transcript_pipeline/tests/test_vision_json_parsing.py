@@ -2,6 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
@@ -71,3 +72,28 @@ def test_complete_json_raises_value_error_on_invalid_json(monkeypatch):
         asyncio.run(client.complete_json("only json"))
 
     assert "Failed to parse JSON" in str(exc_info.value)
+
+
+def test_complete_formats_empty_transport_error(monkeypatch):
+    client = _make_client()
+    request = httpx.Request("POST", "https://api.example.com")
+
+    class _DummyAsyncClient:
+        async def post(self, *_args, **_kwargs):
+            raise httpx.ConnectError("", request=request)
+
+    async def fake_get_client():
+        return _DummyAsyncClient()
+
+    monkeypatch.setattr(client, "_get_client", fake_get_client)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(client.complete("hello"))
+
+    error_text = str(exc_info.value)
+    assert "ERNIE API error:" in error_text
+    assert "ConnectError" in error_text
+    assert "message=<empty>" in error_text
+    assert "request=POST https://api.example.com" in error_text
+    assert "base_url=https://api.example.com" in error_text
+    assert "model=ernie-4.0-vision" in error_text

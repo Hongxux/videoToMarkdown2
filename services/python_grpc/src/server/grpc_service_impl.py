@@ -288,6 +288,7 @@ from services.python_grpc.src.common.utils.runtime_llm_context import activate_r
 from services.python_grpc.src.common.utils.stage_artifact_paths import (
     phase2a_semantic_units_candidates as helper_phase2a_semantic_units_candidates,
     phase2a_semantic_units_path as helper_phase2a_semantic_units_path,
+    stage1_sentence_timestamps_candidates as helper_stage1_sentence_timestamps_candidates,
 )
 from services.python_grpc.src.server.runtime_stage_state import (
     RuntimeStageSession,
@@ -308,6 +309,12 @@ from services.python_grpc.src.server.phase2b_runtime_repository import (
     build_phase2b_runtime_repository,
     get_phase2b_repository_views,
     update_phase2b_repository_views,
+)
+from services.python_grpc.src.server.runtime_recovery_context import (
+    RuntimeRecoveryContext,
+    RuntimeRecoveryResolver,
+    RuntimeRecoveryResolverCallbacks,
+    load_phase2b_runtime_outputs_from_store as runtime_load_phase2b_runtime_outputs_from_store,
 )
 from services.python_grpc.src.server.runtime_stage_repository import RuntimeStageRepositoryRegistry
 from services.python_grpc.src.server.stage1_runtime_repository import (
@@ -1106,36 +1113,7 @@ def _load_phase2a_semantic_units_payload_from_store(output_dir: str, *, task_id:
 
 
 def _load_phase2b_runtime_outputs_from_store(output_dir: str, *, task_id: str = "") -> Optional[Dict[str, Any]]:
-    normalized_output_dir = str(output_dir or "").strip()
-    if not normalized_output_dir:
-        return None
-    try:
-        store = RuntimeRecoveryStore(
-            output_dir=normalized_output_dir,
-            task_id=task_id or Path(normalized_output_dir).name,
-            storage_key=Path(normalized_output_dir).name,
-        )
-        restored = store.load_latest_committed_chunk_payload(
-            stage="phase2b",
-            chunk_id="phase2b.document_assemble.wave_0001",
-        )
-        if not isinstance(restored, dict):
-            return None
-        result_payload = dict(restored.get("result_payload", {}) or {})
-        markdown_path = str(result_payload.get("markdown_path", "") or "").strip()
-        json_path = str(result_payload.get("json_path", "") or "").strip()
-        title = str(result_payload.get("title", "") or "").strip()
-        if not markdown_path and not json_path:
-            return None
-        return {
-            "markdown_path": markdown_path,
-            "json_path": json_path,
-            "title": title,
-            "reused": True,
-        }
-    except Exception as error:
-        logger.warning("Load phase2b runtime outputs failed: output_dir=%s err=%s", normalized_output_dir, error)
-        return None
+    return runtime_load_phase2b_runtime_outputs_from_store(output_dir, task_id=task_id)
 
 
 def _persist_phase2a_semantic_units_payload(output_dir: str, payload: Any, *, task_id: str = "") -> List[str]:
@@ -2201,20 +2179,28 @@ def _upsert_video_meta_topic_fields(
 
 
 def _read_video_meta_title(task_dir: str) -> str:
-    if not task_dir:
+    payload = _read_video_meta_payload(task_dir)
+    if not payload:
         return ""
-    meta_path = os.path.join(task_dir, "video_meta.json")
+    return _normalize_video_title(str(payload.get("title", "") or ""))
+
+
+def _read_video_meta_payload(task_dir: str) -> Dict[str, Any]:
+    normalized_task_dir = str(task_dir or "").strip()
+    if not normalized_task_dir:
+        return {}
+    meta_path = os.path.join(normalized_task_dir, "video_meta.json")
     if not os.path.exists(meta_path):
-        return ""
+        return {}
     try:
         with open(meta_path, "r", encoding="utf-8") as file_obj:
             payload = json.load(file_obj)
     except Exception as exc:
-        logger.warning(f"Failed to read video_meta title from {meta_path}: {exc}")
-        return ""
+        logger.warning(f"Failed to read video_meta.json from {meta_path}: {exc}")
+        return {}
     if not isinstance(payload, dict):
-        return ""
-    return _normalize_video_title(str(payload.get("title", "") or ""))
+        return {}
+    return dict(payload)
 
 
 def _is_placeholder_assemble_title(raw_title: str) -> bool:
@@ -2297,6 +2283,108 @@ def _normalize_local_video_path(video_path: str) -> str:
             path = f"//{parsed.netloc}{path}"
         return os.path.abspath(path)
     return os.path.abspath(video_path)
+
+
+_TASK_VIDEO_FILE_EXTENSIONS = {
+    ".mp4",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".avi",
+    ".webm",
+    ".flv",
+    ".ts",
+}
+
+
+def _resolve_task_local_video_path(task_dir: str) -> str:
+    normalized_task_dir = os.path.abspath(str(task_dir or "").strip()) if task_dir else ""
+    if not normalized_task_dir or not os.path.isdir(normalized_task_dir):
+        return ""
+
+    candidate_paths: List[str] = []
+    meta_payload = _read_video_meta_payload(normalized_task_dir)
+    meta_video_path = str(meta_payload.get("video_path", "") or "").strip()
+    if meta_video_path:
+        candidate_paths.append(_normalize_local_video_path(meta_video_path))
+
+    try:
+        for child in Path(normalized_task_dir).iterdir():
+            if not child.is_file():
+                continue
+            if child.suffix.lower() not in _TASK_VIDEO_FILE_EXTENSIONS:
+                continue
+            candidate_paths.append(str(child.resolve()))
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    for candidate in candidate_paths:
+        normalized_candidate = os.path.normcase(os.path.normpath(str(candidate or "").strip()))
+        if not normalized_candidate or normalized_candidate in seen:
+            continue
+        seen.add(normalized_candidate)
+        if os.path.exists(candidate):
+            return str(Path(candidate).resolve())
+    return ""
+
+
+def _resolve_stage_entry_paths(
+    *,
+    requested_video_path: str,
+    requested_output_dir: str = "",
+    requested_subtitle_path: str = "",
+) -> Dict[str, str]:
+    normalized_output_dir = os.path.abspath(str(requested_output_dir or "").strip()) if requested_output_dir else ""
+    output_dir_source = "request.output_dir" if normalized_output_dir else "video_path_hash"
+
+    resolved_video_path = ""
+    video_path_source = "request.video_path"
+    if normalized_output_dir:
+        restored_video_path = _resolve_task_local_video_path(normalized_output_dir)
+        if restored_video_path:
+            resolved_video_path = restored_video_path
+            video_path_source = "output_dir/video_meta.json"
+
+    normalized_requested_video_path = str(requested_video_path or "").strip()
+    if not resolved_video_path and normalized_requested_video_path and not _is_http_url(normalized_requested_video_path):
+        normalized_local_video_path = _normalize_local_video_path(normalized_requested_video_path)
+        if os.path.exists(normalized_local_video_path):
+            resolved_video_path = _ensure_local_video_in_storage(normalized_local_video_path)
+            video_path_source = "request.video_path"
+
+    if not resolved_video_path:
+        resolved_video_path = _ensure_local_video_in_storage(normalized_requested_video_path)
+
+    if not normalized_output_dir:
+        normalized_output_dir = _normalize_output_dir(resolved_video_path or normalized_requested_video_path)
+
+    default_subtitle_path = os.path.join(normalized_output_dir, "subtitles.txt") if normalized_output_dir else ""
+    requested_subtitle_exists = False
+    normalized_requested_subtitle_path = ""
+    if requested_subtitle_path:
+        normalized_requested_subtitle_path = os.path.abspath(str(requested_subtitle_path or "").strip())
+        requested_subtitle_exists = os.path.exists(normalized_requested_subtitle_path)
+
+    resolved_subtitle_path = ""
+    subtitle_path_source = "request.subtitle_path" if requested_subtitle_exists else "output_dir/subtitles.txt"
+    if default_subtitle_path and os.path.exists(default_subtitle_path):
+        resolved_subtitle_path = default_subtitle_path
+    elif requested_subtitle_exists:
+        resolved_subtitle_path = normalized_requested_subtitle_path
+    elif default_subtitle_path:
+        resolved_subtitle_path = default_subtitle_path
+    else:
+        resolved_subtitle_path = normalized_requested_subtitle_path
+
+    return {
+        "video_path": str(resolved_video_path or ""),
+        "video_path_source": video_path_source,
+        "subtitle_path": str(resolved_subtitle_path or ""),
+        "subtitle_path_source": subtitle_path_source,
+        "output_dir": str(normalized_output_dir or ""),
+        "output_dir_source": output_dir_source,
+    }
 
 
 def _get_primary_storage_root() -> str:
@@ -3228,6 +3316,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         self._phase2a_ref_cache: Dict[str, Dict[str, Any]] = {}
         self._runtime_recovery_store_lock = threading.Lock()
         self._runtime_recovery_stores: Dict[str, RuntimeRecoveryStore] = {}
+        self._runtime_recovery_resolver_lock = threading.Lock()
+        self._runtime_recovery_resolver: Optional[RuntimeRecoveryResolver] = None
 
         # LLM 分类并发探测器：AIMD 逐步加压，遇到失败回退
         self._classify_concurrency_limiter = ServerAdaptiveConcurrencyLimiter(
@@ -3334,6 +3424,47 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 registry = RuntimeStageRepositoryRegistry()
                 self._runtime_stage_repository_registry = registry
         return registry
+
+    def _get_runtime_recovery_resolver(self) -> RuntimeRecoveryResolver:
+        resolver = getattr(self, "_runtime_recovery_resolver", None)
+        if isinstance(resolver, RuntimeRecoveryResolver):
+            return resolver
+        bootstrap_lock = getattr(self, "_runtime_recovery_resolver_lock", None)
+        if bootstrap_lock is None:
+            bootstrap_lock = threading.Lock()
+            self._runtime_recovery_resolver_lock = bootstrap_lock
+        with bootstrap_lock:
+            resolver = getattr(self, "_runtime_recovery_resolver", None)
+            if not isinstance(resolver, RuntimeRecoveryResolver):
+                callbacks = RuntimeRecoveryResolverCallbacks(
+                    resolve_stage_entry_paths=_resolve_stage_entry_paths,
+                    read_video_meta_payload=_read_video_meta_payload,
+                    normalize_video_title=_normalize_video_title,
+                    first_non_blank=_first_non_blank,
+                    safe_float=_safe_float,
+                    get_runtime_recovery_store=lambda *, output_dir, task_id: self._get_runtime_recovery_store(
+                        output_dir=output_dir,
+                        task_id=task_id,
+                    ),
+                    get_stage1_runtime_outputs=lambda output_dir: self._get_stage1_runtime_outputs(output_dir),
+                    get_transcribe_runtime_outputs=lambda **kwargs: self._get_transcribe_runtime_outputs(**kwargs),
+                    materialize_subtitle_from_transcribe_runtime=lambda **kwargs: self._materialize_subtitle_from_transcribe_runtime(**kwargs),
+                    get_phase2a_runtime_semantic_units=lambda output_dir, semantic_units_path="": self._get_phase2a_runtime_semantic_units(
+                        output_dir,
+                        semantic_units_path=semantic_units_path,
+                    ),
+                    get_phase2b_runtime_outputs=lambda output_dir, deep_copy=True: self._get_phase2b_runtime_outputs(
+                        output_dir,
+                        deep_copy=deep_copy,
+                    ),
+                    build_stage1_runtime_outputs_fingerprint=_build_stage1_runtime_outputs_fingerprint,
+                    load_stage1_output_list=_load_stage1_output_list,
+                    write_resource_meta=_write_resource_meta,
+                    file_signature=_file_signature,
+                )
+                resolver = RuntimeRecoveryResolver(callbacks=callbacks, log=logger)
+                self._runtime_recovery_resolver = resolver
+        return resolver
 
     @staticmethod
     def _build_transcribe_runtime_repository_id(output_dir: str) -> str:
@@ -3927,6 +4058,30 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         )
         return copy.deepcopy(cache_entry)
 
+    def _resolve_download_recovery_metadata(
+        self,
+        *,
+        output_dir: str,
+        task_id: str,
+        resolved_video_path: str,
+    ) -> Dict[str, Any]:
+        return self._get_runtime_recovery_resolver().resolve_download_recovery_metadata(
+            output_dir=output_dir,
+            task_id=task_id,
+            resolved_video_path=resolved_video_path,
+        )
+
+    def _materialize_stage1_recovery_artifacts(
+        self,
+        *,
+        output_dir: str,
+        runtime_state: Optional[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        return self._get_runtime_recovery_resolver().materialize_stage1_recovery_artifacts(
+            output_dir=output_dir,
+            runtime_state=runtime_state,
+        )
+
     def _clear_phase2a_runtime_cache(self, output_dir: str) -> None:
         """任务完成后清理指定 output_dir 的 Phase2A 运行态缓存。"""
         normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
@@ -4176,6 +4331,142 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             strip_unit_group_fields=True,
         )
 
+    def _normalize_vl_concrete_segments(
+        self,
+        raw_segments: Any,
+    ) -> List[Dict[str, Any]]:
+        """将 concrete 单元的原始 VL 结果规整成稳定的 canonical segments。"""
+        if not isinstance(raw_segments, list):
+            return []
+
+        normalized_segments: List[Dict[str, Any]] = []
+        for index, segment in enumerate(raw_segments, start=1):
+            if not isinstance(segment, dict):
+                continue
+            segment_id = int(
+                _safe_float(
+                    segment.get("segment_id", segment.get("id", index)),
+                    float(index),
+                )
+            )
+            if segment_id <= 0:
+                segment_id = index
+            main_content = str(segment.get("main_content", "") or "").strip()
+            if not main_content:
+                continue
+            normalized_segments.append(
+                {
+                    "segment_id": segment_id,
+                    "segment_description": str(
+                        segment.get(
+                            "segment_description",
+                            segment.get("step_description", ""),
+                        )
+                        or ""
+                    ).strip(),
+                    "main_content": main_content,
+                    "clip_start_sec": _safe_float(segment.get("clip_start_sec", 0.0), 0.0),
+                    "clip_end_sec": _safe_float(segment.get("clip_end_sec", 0.0), 0.0),
+                    "instructional_keyframes": list(segment.get("instructional_keyframes", []) or []),
+                }
+            )
+        normalized_segments.sort(key=lambda item: int(_safe_float(item.get("segment_id", 0), 0.0)))
+        return normalized_segments
+
+    def _apply_streamed_vl_unit_output_to_semantic_nodes(
+        self,
+        *,
+        unit_output: Dict[str, Any],
+        units_map: Dict[str, Dict[str, Any]],
+        persist_units_map: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        将单个 unit 的 VL 后处理结果即时投影回 semantic_units。
+
+        为什么这样做：
+        1. concrete 的 canonical main_content 已在 unit 级后处理完成，不应该再被整批 concrete 阻塞。
+        2. 这里只回写“单元级稳定字段”，避免和全局截图优化阶段互相覆盖。
+        """
+        summary = {
+            "unit_id": "",
+            "route_patch_updated": 0,
+            "concrete_main_content_updated": 0,
+            "normalized_segments": [],
+            "final_main_content": "",
+        }
+        if not isinstance(unit_output, dict):
+            return summary
+
+        unit_id = str(unit_output.get("unit_id", "") or "").strip()
+        summary["unit_id"] = unit_id
+        if not unit_id:
+            return summary
+
+        target_nodes: List[Dict[str, Any]] = []
+        seen_target_ids: set[int] = set()
+        for node_map in (units_map, persist_units_map):
+            node = node_map.get(unit_id)
+            if not isinstance(node, dict):
+                continue
+            node_obj_id = id(node)
+            if node_obj_id in seen_target_ids:
+                continue
+            seen_target_ids.add(node_obj_id)
+            target_nodes.append(node)
+        if not target_nodes:
+            return summary
+
+        metadata = unit_output.get("metadata", {})
+        semantic_unit = metadata.get("semantic_unit", {}) if isinstance(metadata, dict) else {}
+        route_patch_fields = (
+            "knowledge_type",
+            "_vl_analysis_mode_override",
+            "_vl_route_override",
+            "_vl_route_reason",
+            "_vl_no_needed_video",
+            "_vl_no_needed_video_reason",
+        )
+        route_patch_changed = False
+        if isinstance(semantic_unit, dict):
+            for field_name in route_patch_fields:
+                if field_name not in semantic_unit:
+                    continue
+                field_value = copy.deepcopy(semantic_unit.get(field_name))
+                for target_node in target_nodes:
+                    if target_node.get(field_name) == field_value:
+                        continue
+                    target_node[field_name] = copy.deepcopy(field_value)
+                    route_patch_changed = True
+        if route_patch_changed:
+            summary["route_patch_updated"] = 1
+
+        if not bool(unit_output.get("success", False)):
+            return summary
+
+        analysis_mode = str(unit_output.get("analysis_mode", "") or "").strip().lower()
+        if analysis_mode != "concrete":
+            return summary
+
+        normalized_segments = self._normalize_vl_concrete_segments(unit_output.get("raw_response_json", []) or [])
+        final_main_content = "\n\n".join(
+            [
+                str(item.get("main_content", "") or "").strip()
+                for item in normalized_segments
+                if str(item.get("main_content", "") or "").strip()
+            ]
+        ).strip()
+        summary["normalized_segments"] = normalized_segments
+        summary["final_main_content"] = final_main_content
+        if not final_main_content:
+            return summary
+
+        for target_node in target_nodes:
+            target_node["full_text"] = final_main_content
+            target_node["text"] = final_main_content
+            target_node["_vl_concrete_segments"] = copy.deepcopy(normalized_segments)
+        summary["concrete_main_content_updated"] = 1
+        return summary
+
     def _load_semantic_units_from_json_path(self, json_path: str) -> List[Dict[str, Any]]:
         """从 JSON 文件加载语义单元并做结构规范化。"""
         normalized_path = os.path.abspath(str(json_path or "").strip())
@@ -4357,6 +4648,75 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
 
     
+    def _count_reusable_runtime_nodes(
+        self,
+        output_dir: str,
+        task_id: str,
+    ) -> Tuple[int, int]:
+        return self._get_runtime_recovery_resolver().count_reusable_runtime_nodes(
+            output_dir=output_dir,
+            task_id=task_id,
+        )
+
+    def _resolve_runtime_recovery_context(
+        self,
+        *,
+        task_id: str,
+        output_dir: str,
+        requested_start_stage: str,
+        semantic_units_path: str,
+        requested_video_path: str,
+        requested_subtitle_path: str,
+    ) -> RuntimeRecoveryContext:
+        return self._get_runtime_recovery_resolver().resolve_runtime_recovery_context(
+            task_id=task_id,
+            output_dir=output_dir,
+            requested_start_stage=requested_start_stage,
+            semantic_units_path=semantic_units_path,
+            requested_video_path=requested_video_path,
+            requested_subtitle_path=requested_subtitle_path,
+        )
+
+    async def RecoverRuntimeContext(self, request, context):
+        task_id = str(getattr(request, "task_id", "") or "").strip()
+        output_dir = str(getattr(request, "output_dir", "") or "").strip()
+        requested_start_stage = str(getattr(request, "requested_start_stage", "") or "").strip()
+        semantic_units_path = str(getattr(request, "semantic_units_path", "") or "").strip()
+        requested_video_path = str(getattr(request, "requested_video_path", "") or "").strip()
+        requested_subtitle_path = str(getattr(request, "requested_subtitle_path", "") or "").strip()
+        if not output_dir:
+            return video_processing_pb2.RecoverRuntimeContextResponse(
+                success=False,
+                resolved_start_stage=str(requested_start_stage or "").strip(),
+                error_msg="output_dir is required",
+            )
+        try:
+            recovery_context = self._resolve_runtime_recovery_context(
+                task_id=task_id,
+                output_dir=output_dir,
+                requested_start_stage=requested_start_stage,
+                semantic_units_path=semantic_units_path,
+                requested_video_path=requested_video_path,
+                requested_subtitle_path=requested_subtitle_path,
+            )
+            return video_processing_pb2.RecoverRuntimeContextResponse(
+                success=True,
+                **recovery_context.to_response_payload(),
+                error_msg="",
+            )
+        except Exception as error:
+            logger.error(
+                "[%s] RecoverRuntimeContext failed: output_dir=%s error=%s",
+                task_id,
+                output_dir,
+                error,
+            )
+            return video_processing_pb2.RecoverRuntimeContextResponse(
+                success=False,
+                resolved_start_stage=str(requested_start_stage or "").strip(),
+                error_msg=str(error),
+            )
+
     async def HealthCheck(self, request, context):
         """
         执行逻辑：
@@ -6370,14 +6730,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         - Stage1Response（含 step2/step6 路径与 sentence_timestamps）。"""
         task_id = request.task_id
         self._cache_metrics_begin(task_id, "ProcessStage1")
-        # 统一本地视频归档到 storage/{hash}：做什么是保证中间产物同域；为什么是避免路径分散；权衡是可能增加一次复制/链接
-        video_path = _ensure_local_video_in_storage(request.video_path)
-        subtitle_path = os.path.abspath(request.subtitle_path) # Convert to absolute path immediately
+        stage_paths = _resolve_stage_entry_paths(
+            requested_video_path=request.video_path,
+            requested_output_dir=getattr(request, "output_dir", ""),
+            requested_subtitle_path=request.subtitle_path,
+        )
+        video_path = stage_paths["video_path"]
+        subtitle_path = stage_paths["subtitle_path"]
         max_step = request.max_step or 24
-        
-        # 统一输出目录到 storage/{hash}：做什么是聚合任务内恢复与运行时缓存；为什么是后续阶段只依赖同一任务目录；
-        # 权衡是阶段产物默认不再落 intermediates JSON，而是以内存态/SQLite 投影继续流动。
-        output_dir = _normalize_output_dir(video_path)
+        output_dir = stage_paths["output_dir"]
         stage1_runtime_base_payload = {
             "video_path": video_path,
             "video_signature": _file_signature(video_path),
@@ -6422,6 +6783,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             f"[{task_id}] ProcessStage1: max_step={max_step}, output_dir={output_dir}, "
             "flow=step1_validate->step2_correction->step3_merge->step3_5_translate->step4_clean_local->step5_6_dedup_merge"
         )
+        logger.info(
+            f"[{task_id}] ProcessStage1 path resolution: "
+            f"output_dir_source={stage_paths['output_dir_source']}, "
+            f"video_path_source={stage_paths['video_path_source']}, "
+            f"subtitle_path_source={stage_paths['subtitle_path_source']}"
+        )
         
         try:
             self._increment_tasks()
@@ -6453,7 +6820,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
             runtime_stage1_state = self._get_stage1_runtime_outputs(output_dir)
             runtime_stage1_views = get_stage1_repository_views(runtime_stage1_state)
-            local_sentence_ts = ""
+            local_sentence_ts = next(
+                (
+                    candidate_path
+                    for candidate_path in helper_stage1_sentence_timestamps_candidates(output_dir)
+                    if os.path.exists(candidate_path)
+                ),
+                "",
+            )
             need_sentence_ts = not bool(
                 isinstance(runtime_stage1_state, dict)
                 and runtime_stage1_views.get("sentence_timestamps")
@@ -7038,8 +7412,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             intermediates_dir = os.path.join(output_dir, "intermediates")
             os.makedirs(intermediates_dir, exist_ok=True)
             inter_sentence_ts = os.path.join(intermediates_dir, "sentence_timestamps.json")
+            runtime_sentence_timestamps_payload = dict(
+                effective_runtime_stage1_views.get("sentence_timestamps", {}) or {}
+            )
+            if runtime_sentence_timestamps_payload:
+                local_sentence_ts = ""
             sentence_timestamps_path = ""
-            if False and os.path.exists(local_sentence_ts):
+            if runtime_sentence_timestamps_payload:
+                sentence_timestamps_path = ""
+            elif local_sentence_ts and os.path.exists(local_sentence_ts):
                 try:
                     # 复制到 intermediates，供 Phase2A/Phase2B 统一读取
                     import shutil
@@ -7195,8 +7576,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     "step2_signature": {},
                     "step6_json_path": "",
                     "step6_signature": {},
-                    "sentence_timestamps_path": "",
-                    "sentence_timestamps_signature": {},
+                    "sentence_timestamps_path": sentence_timestamps_path,
+                    "sentence_timestamps_signature": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
                     "step2_count": len(list(effective_runtime_stage1_views.get("corrected_subtitles", []) or [])),
                     "step6_count": len(list(effective_runtime_stage1_views.get("pure_text_script", []) or [])),
                     "sentence_timestamps_count": len(dict(effective_runtime_stage1_views.get("sentence_timestamps", {}) or {})),
@@ -7209,7 +7590,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 success=True,
                 step2_json_path="",
                 step6_json_path="",
-                sentence_timestamps_path="",
+                sentence_timestamps_path=sentence_timestamps_path,
                 error_msg=""
             )
             
@@ -7287,14 +7668,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         - AnalyzeResponse（含 screenshot_requests/clip_requests/semantic_units_ref/semantic_units_inline）。"""
         import os  # Explicit local import
         task_id = request.task_id
-        # 统一本地视频归档到 storage/{hash}：做什么是统一 Phase2A 路径；为什么是避免素材找不到；权衡是多一次 I/O
-        video_path = _ensure_local_video_in_storage(request.video_path)
+        stage_paths = _resolve_stage_entry_paths(
+            requested_video_path=request.video_path,
+            requested_output_dir=getattr(request, "output_dir", ""),
+        )
+        video_path = stage_paths["video_path"]
         step2_json_path = os.path.abspath(request.step2_json_path) if request.step2_json_path else "" # Convert to absolute path immediately
         step6_json_path = os.path.abspath(request.step6_json_path) if request.step6_json_path else "" # Convert to absolute path immediately
         sentence_timestamps_path = os.path.abspath(request.sentence_timestamps_path) if request.sentence_timestamps_path else ""
-        
-        # 统一输出目录到 storage/{hash}：做什么是让 Phase2A 产物与后续一致；为什么是减少跨目录查找；权衡是忽略外部路径差异
-        output_dir = _normalize_output_dir(video_path)
+        output_dir = stage_paths["output_dir"]
         phase2a_candidates = _phase2a_semantic_units_candidates(output_dir)
         semantic_units_path = phase2a_candidates[0]
         runtime_stage1_outputs = self._get_stage1_runtime_outputs(output_dir)
@@ -7336,6 +7718,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     sentence_timestamps_path = ""
         
         logger.info(f"[{task_id}] AnalyzeSemanticUnits (Phase2A), output_dir={output_dir}")
+        logger.info(
+            f"[{task_id}] AnalyzeSemanticUnits path resolution: "
+            f"output_dir_source={stage_paths['output_dir_source']}, "
+            f"video_path_source={stage_paths['video_path_source']}"
+        )
         analyze_watchdog = TaskWatchdogSignalWriter(
             task_id=task_id,
             output_dir=output_dir,
@@ -8247,8 +8634,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         3. 第二阶段合并：同类型动作按间隔 < 5s 合并
         4. 全局截图：基于稳定岛范围选择最佳截图"""
         task_id = request.task_id
-        # 统一本地视频归档到 storage/{hash}：做什么是保证素材生成可追溯；为什么是与前序一致；权衡是增加一次拷贝/链接
-        video_path = _ensure_local_video_in_storage(request.video_path)
+        stage_paths = _resolve_stage_entry_paths(
+            requested_video_path=request.video_path,
+            requested_output_dir=getattr(request, "output_dir", ""),
+        )
+        video_path = stage_paths["video_path"]
+        output_dir = stage_paths["output_dir"]
         
         
         try:
@@ -8317,10 +8708,30 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_range_calculator import ScreenshotRangeCalculator
             
             # 初始化组件
-            output_dir = _normalize_output_dir(video_path)
             intermediates_dir = os.path.join(output_dir, "intermediates")
+            logger.info(
+                f"[{task_id}] GenerateMaterialRequests path resolution: "
+                f"output_dir_source={stage_paths['output_dir_source']}, "
+                f"video_path_source={stage_paths['video_path_source']}"
+            )
             
             # 🔑 构造中间文件路径 (用于加载字幕和上下文)
+            runtime_stage1_outputs = self._get_stage1_runtime_outputs(output_dir)
+            runtime_step2_subtitles: Optional[List[Dict[str, Any]]] = None
+            runtime_step6_paragraphs: Optional[List[Dict[str, Any]]] = None
+            runtime_sentence_timestamps: Optional[Dict[str, Dict[str, Any]]] = None
+            if runtime_stage1_outputs:
+                runtime_stage1_views = get_stage1_repository_views(runtime_stage1_outputs)
+                candidate_step2 = runtime_stage1_views.get("step2_subtitles", [])
+                candidate_step6 = runtime_stage1_views.get("step6_paragraphs", [])
+                candidate_sentence_timestamps = runtime_stage1_views.get("sentence_timestamps", {})
+                if isinstance(candidate_step2, list) and candidate_step2:
+                    runtime_step2_subtitles = candidate_step2
+                if isinstance(candidate_step6, list) and candidate_step6:
+                    runtime_step6_paragraphs = candidate_step6
+                if isinstance(candidate_sentence_timestamps, dict) and candidate_sentence_timestamps:
+                    runtime_sentence_timestamps = candidate_sentence_timestamps
+
             step2_path = os.path.join(intermediates_dir, "step2_correction_output.json")
             step6_path = os.path.join(intermediates_dir, "step6_merge_cross_output.json")
             sentence_timestamps_path = os.path.join(intermediates_dir, "sentence_timestamps.json")
@@ -8330,10 +8741,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 video_path=video_path, 
                 output_dir=output_dir,
                 task_id=task_id,
-                step2_path=step2_path,
-                step6_path=step6_path,
-                sentence_timestamps_path=sentence_timestamps_path,
+                step2_path="" if runtime_step2_subtitles else step2_path,
+                step6_path="" if runtime_step6_paragraphs else step6_path,
+                sentence_timestamps_path="" if runtime_sentence_timestamps else sentence_timestamps_path,
                 segmenter=self.resources.semantic_unit_segmenter,
+                step2_subtitles=runtime_step2_subtitles,
+                step6_paragraphs=runtime_step6_paragraphs,
+                sentence_timestamps=runtime_sentence_timestamps,
             )
             # 🚀 Fix: Ensure video_duration is a float
             video_duration = float(request.video_duration) if hasattr(request, 'video_duration') and request.video_duration else 0.0
@@ -8646,7 +9060,6 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 
             # 🚀 V9.0: 更新 Phase2A semantic_units 产物，保持 canonical + legacy 镜像一致。
             try:
-                output_dir = _normalize_output_dir(video_path)
                 semantic_units_candidates = _phase2a_semantic_units_candidates(output_dir)
                 semantic_units_path = next(
                     (path for path in semantic_units_candidates if os.path.exists(path)),
@@ -8845,12 +9258,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
         screenshots_dir = os.path.abspath(request.screenshots_dir) # Convert to absolute path immediately
         clips_dir = os.path.abspath(request.clips_dir) # Convert to absolute path immediately
-        # 统一本地视频归档到 storage/{hash}：做什么是确保最终装配可追溯；为什么是与前序同域；权衡是可能增加一次 I/O
-        video_path = _ensure_local_video_in_storage(request.video_path)
+        stage_paths = _resolve_stage_entry_paths(
+            requested_video_path=request.video_path,
+            requested_output_dir=getattr(request, "output_dir", ""),
+        )
+        video_path = stage_paths["video_path"]
         title = request.title or "视频内容"
-        
-        # 统一输出目录到 storage/{hash}：做什么是让最终产物同域聚合；为什么是便于回放定位；权衡是覆盖调用方传入的 output_dir
-        output_dir = _normalize_output_dir(video_path)
+        output_dir = stage_paths["output_dir"]
         title = _resolve_assemble_document_title(
             request_title=str(getattr(request, "title", "") or ""),
             output_dir=output_dir,
@@ -8880,6 +9294,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         logger.info(f"  → screenshots_dir: {screenshots_dir}")
         logger.info(f"  → clips_dir: {clips_dir}")
         logger.info(f"  → output_dir: {output_dir}")
+        logger.info(
+            f"[{task_id}] AssembleRichText path resolution: "
+            f"output_dir_source={stage_paths['output_dir_source']}, "
+            f"video_path_source={stage_paths['video_path_source']}"
+        )
 
         assemble_watchdog = TaskWatchdogSignalWriter(
             task_id=task_id,
@@ -9566,6 +9985,33 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 return None
             self._runtime_recovery_stores[safe_output_dir] = store
             return store
+
+    def _release_runtime_recovery_stores(self, *, task_id: str = "") -> int:
+        normalized_task_id = str(task_id or "").strip()
+        with self._runtime_recovery_store_lock:
+            if normalized_task_id:
+                matched_items = [
+                    (output_dir, store)
+                    for output_dir, store in self._runtime_recovery_stores.items()
+                    if str(getattr(store, "task_id", "") or "").strip() == normalized_task_id
+                ]
+            else:
+                matched_items = list(self._runtime_recovery_stores.items())
+            for output_dir, _store in matched_items:
+                self._runtime_recovery_stores.pop(output_dir, None)
+
+        released = 0
+        for output_dir, store in matched_items:
+            try:
+                released += int(store.close() or 0)
+            except Exception as error:
+                logger.warning(
+                    "[%s] RuntimeRecoveryStore close failed: output_dir=%s error=%s",
+                    normalized_task_id or "GLOBAL",
+                    output_dir,
+                    error,
+                )
+        return released
 
     def _record_runtime_stage_checkpoint(
         self,
@@ -10841,9 +11287,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         """
         logger.info("===== AnalyzeWithVL Request Received =====")
         task_id = request.task_id
-        # 统一将本地视频归档到 storage/{hash}，确保 VL 阶段与前序阶段落盘同域
-        video_path = _ensure_local_video_in_storage(request.video_path)
-        output_dir = _normalize_output_dir(video_path) if video_path else (request.output_dir or "")
+        stage_paths = _resolve_stage_entry_paths(
+            requested_video_path=request.video_path,
+            requested_output_dir=getattr(request, "output_dir", ""),
+        )
+        video_path = stage_paths["video_path"]
+        output_dir = stage_paths["output_dir"]
         # 统一语义单元持久化路径：以 canonical 路径为主，同时保留 legacy 镜像。
         semantic_units_path = str(helper_phase2a_semantic_units_path(output_dir))
         semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
@@ -10856,6 +11305,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             "semantic_source_case": str(semantic_source_case or ""),
             "vl_model": vl_model_name,
         }
+        logger.info(
+            f"[{task_id}] AnalyzeWithVL path resolution: "
+            f"output_dir_source={stage_paths['output_dir_source']}, "
+            f"video_path_source={stage_paths['video_path_source']}"
+        )
         phase2a_vl_store = self._get_runtime_recovery_store(output_dir=output_dir, task_id=task_id)
         phase2a_material_finalize_scope_ref = ""
         phase2a_material_finalize_scope_id = ""
@@ -13047,6 +13501,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             self.resources.cleanup_cv_validators()
             self.resources.cleanup_visual_extractors()
             self.resources.cleanup_video_tools()
+            released_runtime_store_count = self._release_runtime_recovery_stores(task_id=task_id)
             
             # 强制 GC
             import gc
@@ -13054,8 +13509,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             
             return video_processing_pb2.ReleaseResourcesResponse(
                 success=True,
-                message="Successfully released all CV resources and cleared caches.",
-                freed_workers_count=0, # Currently we just clear dictionaries
+                message=(
+                    "Successfully released CV resources, cleared caches, "
+                    f"and closed {released_runtime_store_count} runtime store(s)."
+                ),
+                freed_workers_count=released_runtime_store_count,
                 freed_memory_mb=0.0    # Detailed memory tracking not implemented
             )
         except Exception as e:
@@ -13146,6 +13604,13 @@ async def _shutdown_grpc_server(server, servicer) -> None:
     """执行 gRPC 服务优雅关闭。"""
     logger.info("Stopping server...")
     await server.stop(5)
+    release_runtime_stores = getattr(servicer, "_release_runtime_recovery_stores", None)
+    if callable(release_runtime_stores):
+        try:
+            released_count = int(release_runtime_stores(task_id="") or 0)
+            logger.info("Runtime recovery stores released during shutdown: %s", released_count)
+        except Exception as exc:
+            logger.warning("Runtime recovery store shutdown failed: %s", exc)
     if hasattr(servicer, "process_pool"):
         servicer.process_pool.shutdown()
         logger.info("Process pool shut down")

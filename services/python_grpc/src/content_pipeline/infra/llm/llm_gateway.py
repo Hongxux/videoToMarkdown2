@@ -269,6 +269,7 @@ _POOL_RETRY_ATTEMPTS = 5
 _POOL_RETRY_JITTER_RATIO = 0.3
 _DEEPSEEK_FAST_FALLBACK_LOCK = threading.Lock()
 _DEEPSEEK_FAST_FALLBACK_OPEN = False
+_DEEPSEEK_RUNTIME_PROVIDER_ROUTE_NAME = "deepseek_primary"
 
 _VISION_HEDGE_ENABLED = _env_bool("MODULE2_VISION_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
 _VISION_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VISION_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
@@ -687,6 +688,93 @@ def _reset_deepseek_fast_fallback() -> bool:
         return bool(was_open)
 
 
+def _get_runtime_deepseek_provider_route(runtime_context: Any) -> Dict[str, Any]:
+    if runtime_context is None or not hasattr(runtime_context, "get_llm_provider_route"):
+        return {}
+    try:
+        route_snapshot = runtime_context.get_llm_provider_route(_DEEPSEEK_RUNTIME_PROVIDER_ROUTE_NAME)
+    except Exception as exc:
+        logger.debug("runtime deepseek provider route lookup failed: %s", exc)
+        return {}
+    return dict(route_snapshot or {})
+
+
+def _is_runtime_deepseek_routed_to_qwen(route_snapshot: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(route_snapshot, dict):
+        return False
+    return str(route_snapshot.get("provider", "") or "").strip().lower() == "qwen"
+
+
+def _pin_runtime_deepseek_to_qwen(
+    *,
+    runtime_context: Any,
+    gateway_name: str,
+    requested_model: str,
+    source_error: Exception,
+    previous_failures: Optional[list[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    if runtime_context is None or not hasattr(runtime_context, "pin_llm_provider_route"):
+        return {}
+
+    existing_route = _get_runtime_deepseek_provider_route(runtime_context)
+    route_snapshot = runtime_context.pin_llm_provider_route(
+        route_name=_DEEPSEEK_RUNTIME_PROVIDER_ROUTE_NAME,
+        provider="qwen",
+        source_provider="deepseek",
+        reason=str(source_error or ""),
+        extra={
+            "gateway": str(gateway_name or ""),
+            "requested_model": str(requested_model or ""),
+            "target_provider": f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+            "target_base_url": str(_DEEPSEEK_QWEN_FALLBACK_BASE_URL or ""),
+            "previous_failures": _normalize_previous_failures(previous_failures),
+        },
+    )
+    if not _is_runtime_deepseek_routed_to_qwen(existing_route):
+        logger.warning(
+            "[LLM-alt-provider] Current task pinned to Qwen after DeepSeek failure. task_id=%s, stage=%s, gateway=%s, target=%s, error=%s",
+            str(getattr(runtime_context, "task_id", "") or ""),
+            str(getattr(runtime_context, "stage", "") or ""),
+            gateway_name,
+            route_snapshot.get("target_provider", f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}"),
+            source_error,
+        )
+    return dict(route_snapshot or {})
+
+
+def _build_provider_switch_payload(
+    *,
+    fallback_label: str,
+    fallback_reason: str,
+    source_provider: str,
+    target_provider: str,
+    previous_failures: Optional[list[Dict[str, Any]]] = None,
+    fast_fallback_mode: bool = False,
+    task_provider_locked: bool = False,
+    route_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "is_fallback": False,
+        "fallback_kind": "provider_switch",
+        "fallback_label": str(fallback_label or ""),
+        "fallback_reason": str(fallback_reason or ""),
+        "source_provider": str(source_provider or ""),
+        "target_provider": str(target_provider or ""),
+        "fast_fallback_mode": bool(fast_fallback_mode),
+        "task_provider_locked": bool(task_provider_locked),
+        "previous_failures": _normalize_previous_failures(previous_failures),
+    }
+    if isinstance(route_snapshot, dict) and route_snapshot:
+        payload["task_provider_route"] = {
+            "route_name": str(route_snapshot.get("route_name", "") or ""),
+            "provider": str(route_snapshot.get("provider", "") or ""),
+            "gateway": str(route_snapshot.get("gateway", "") or ""),
+            "pinned_at_ms": int(route_snapshot.get("pinned_at_ms", 0) or 0),
+            "updated_at_ms": int(route_snapshot.get("updated_at_ms", 0) or 0),
+        }
+    return payload
+
+
 def _iter_exception_chain(exc: BaseException, max_depth: int = 6) -> list[BaseException]:
     """遍历异常链，补足被包装的连接池异常。"""
     chain: list[BaseException] = []
@@ -1015,6 +1103,43 @@ def _build_qwen_fallback_client(
     )
 
 
+async def _call_qwen_text_provider(
+    *,
+    prompt: str,
+    system_message: Optional[str],
+    need_logprobs: bool,
+    temperature: float,
+    enable_logprobs: Optional[bool],
+    cache_enabled: Optional[bool],
+    inflight_dedup_enabled: Optional[bool],
+    request_name: str,
+) -> Optional[Tuple[Tuple[str, Any, Any], list[Dict[str, Any]]]]:
+    fallback_client = _build_qwen_fallback_client(
+        temperature=temperature,
+        enable_logprobs=enable_logprobs,
+        cache_enabled=cache_enabled,
+        inflight_dedup_enabled=inflight_dedup_enabled,
+    )
+    if fallback_client is None:
+        return None
+
+    fallback_attempt_history: list[Dict[str, Any]] = []
+    result = await _run_provider_with_retry(
+        request_name=request_name,
+        provider_label=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+        max_retries=_DEEPSEEK_PROVIDER_MAX_RETRIES,
+        attempt_factory=lambda: _call_deepseek_text_once(
+            client=fallback_client,
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            disable_inflight_dedup=False,
+        ),
+        attempt_history=fallback_attempt_history,
+    )
+    return result, fallback_attempt_history
+
+
 async def _fallback_to_qwen_text(
     *,
     prompt: str,
@@ -1026,36 +1151,26 @@ async def _fallback_to_qwen_text(
     inflight_dedup_enabled: Optional[bool],
     source_error: Exception,
 ) -> Optional[Tuple[Tuple[str, Any, Any], list[Dict[str, Any]]]]:
-    fallback_client = _build_qwen_fallback_client(
-        temperature=temperature,
-        enable_logprobs=enable_logprobs,
-        cache_enabled=cache_enabled,
-        inflight_dedup_enabled=inflight_dedup_enabled,
-    )
-    if fallback_client is None:
-        return None
-
     logger.warning(
         "[LLM-alt-provider] DeepSeek text call failed; switching to Qwen alternate provider. model=%s, base_url=%s, error=%s",
         _DEEPSEEK_QWEN_FALLBACK_MODEL,
         _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
         source_error,
     )
-    fallback_attempt_history: list[Dict[str, Any]] = []
     try:
-        result = await _run_provider_with_retry(
+        fallback_output = await _call_qwen_text_provider(
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            temperature=temperature,
+            enable_logprobs=enable_logprobs,
+            cache_enabled=cache_enabled,
+            inflight_dedup_enabled=inflight_dedup_enabled,
             request_name="qwen_fallback_text",
-            provider_label=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
-            max_retries=_DEEPSEEK_PROVIDER_MAX_RETRIES,
-            attempt_factory=lambda: _call_deepseek_text_once(
-                client=fallback_client,
-                prompt=prompt,
-                system_message=system_message,
-                need_logprobs=need_logprobs,
-                disable_inflight_dedup=False,
-            ),
-            attempt_history=fallback_attempt_history,
         )
+        if fallback_output is None:
+            return None
+        result, fallback_attempt_history = fallback_output
         logger.warning(
             "[LLM-alt-provider] DeepSeek text call succeeded via Qwen alternate provider. model=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
@@ -1071,6 +1186,45 @@ async def _fallback_to_qwen_text(
         raise
 
 
+async def _call_qwen_json_provider(
+    *,
+    prompt: str,
+    system_message: Optional[str],
+    need_logprobs: bool,
+    max_tokens: Optional[int],
+    temperature: float,
+    enable_logprobs: Optional[bool],
+    cache_enabled: Optional[bool],
+    inflight_dedup_enabled: Optional[bool],
+    request_name: str,
+) -> Optional[Tuple[Tuple[Dict[str, Any], Any, Any], list[Dict[str, Any]]]]:
+    fallback_client = _build_qwen_fallback_client(
+        temperature=temperature,
+        enable_logprobs=enable_logprobs,
+        cache_enabled=cache_enabled,
+        inflight_dedup_enabled=inflight_dedup_enabled,
+    )
+    if fallback_client is None:
+        return None
+
+    fallback_attempt_history: list[Dict[str, Any]] = []
+    result = await _run_provider_with_retry(
+        request_name=request_name,
+        provider_label=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+        max_retries=_DEEPSEEK_PROVIDER_MAX_RETRIES,
+        attempt_factory=lambda: _call_deepseek_json_once(
+            client=fallback_client,
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            max_tokens=max_tokens,
+            disable_inflight_dedup=False,
+        ),
+        attempt_history=fallback_attempt_history,
+    )
+    return result, fallback_attempt_history
+
+
 async def _fallback_to_qwen_json(
     *,
     prompt: str,
@@ -1083,37 +1237,27 @@ async def _fallback_to_qwen_json(
     inflight_dedup_enabled: Optional[bool],
     source_error: Exception,
 ) -> Optional[Tuple[Tuple[Dict[str, Any], Any, Any], list[Dict[str, Any]]]]:
-    fallback_client = _build_qwen_fallback_client(
-        temperature=temperature,
-        enable_logprobs=enable_logprobs,
-        cache_enabled=cache_enabled,
-        inflight_dedup_enabled=inflight_dedup_enabled,
-    )
-    if fallback_client is None:
-        return None
-
     logger.warning(
         "[LLM-alt-provider] DeepSeek JSON call failed; switching to Qwen alternate provider. model=%s, base_url=%s, error=%s",
         _DEEPSEEK_QWEN_FALLBACK_MODEL,
         _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
         source_error,
     )
-    fallback_attempt_history: list[Dict[str, Any]] = []
     try:
-        result = await _run_provider_with_retry(
+        fallback_output = await _call_qwen_json_provider(
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            enable_logprobs=enable_logprobs,
+            cache_enabled=cache_enabled,
+            inflight_dedup_enabled=inflight_dedup_enabled,
             request_name="qwen_fallback_json",
-            provider_label=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
-            max_retries=_DEEPSEEK_PROVIDER_MAX_RETRIES,
-            attempt_factory=lambda: _call_deepseek_json_once(
-                client=fallback_client,
-                prompt=prompt,
-                system_message=system_message,
-                need_logprobs=need_logprobs,
-                max_tokens=max_tokens,
-                disable_inflight_dedup=False,
-            ),
-            attempt_history=fallback_attempt_history,
         )
+        if fallback_output is None:
+            return None
+        result, fallback_attempt_history = fallback_output
         logger.warning(
             "[LLM-alt-provider] DeepSeek JSON call succeeded via Qwen alternate provider. model=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
@@ -1151,16 +1295,6 @@ async def deepseek_complete_text(
     权衡：保留 client 注入通道，便于测试或自定义模型。
     """
     resolved_model = resolve_deepseek_model(model, default_model="deepseek-chat")
-    if client is None:
-        client = get_deepseek_client(
-            api_key=api_key,
-            base_url=base_url,
-            model=resolved_model,
-            temperature=temperature,
-            enable_logprobs=enable_logprobs,
-            cache_enabled=cache_enabled,
-            inflight_dedup_enabled=inflight_dedup_enabled,
-        )
     runtime_context = current_runtime_llm_context()
     request_payload = build_runtime_llm_request_payload(
         model=resolved_model,
@@ -1190,12 +1324,103 @@ async def deepseek_complete_text(
                 ),
                 None,
             )
+    runtime_route_snapshot = _get_runtime_deepseek_provider_route(runtime_context)
     output_text = ""
     metadata = None
     logprobs = None
     error_text = ""
-    primary_attempt_history: list[Dict[str, Any]] = []
     fallback_payload: Dict[str, Any] = {}
+    if _is_runtime_deepseek_routed_to_qwen(runtime_route_snapshot):
+        try:
+            routed_output = await _call_qwen_text_provider(
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                temperature=temperature,
+                enable_logprobs=enable_logprobs,
+                cache_enabled=cache_enabled,
+                inflight_dedup_enabled=inflight_dedup_enabled,
+                request_name="qwen_task_routed_text",
+            )
+            if routed_output is None:
+                raise RuntimeError("Qwen alternate provider is unavailable for task-routed text request")
+            (output_text, metadata, logprobs), fallback_attempt_history = routed_output
+            fallback_payload = _build_provider_switch_payload(
+                fallback_label="deepseek_task_route_to_qwen_text",
+                fallback_reason=str(runtime_route_snapshot.get("reason", "") or "task routed to qwen"),
+                source_provider="DeepSeek",
+                target_provider=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+                previous_failures=list(runtime_route_snapshot.get("previous_failures", []) or [])
+                + list(fallback_attempt_history or []),
+                task_provider_locked=True,
+                route_snapshot=runtime_route_snapshot,
+            )
+            metadata = _attach_fallback_metadata(
+                metadata,
+                fallback_payload=fallback_payload,
+            )
+            if runtime_context is not None:
+                runtime_context.persist_success(
+                    provider="deepseek",
+                    request_name="deepseek_complete_text",
+                    request_payload=request_payload,
+                    response_text=output_text,
+                    response_metadata=_build_runtime_response_metadata(
+                        metadata=metadata,
+                        requested_model=resolved_model,
+                        fallback_payload=fallback_payload,
+                    ),
+                    runtime_identity=runtime_identity,
+                )
+            return output_text, metadata, logprobs
+        except Exception as exc:
+            error_text = str(exc)
+            if runtime_context is not None:
+                runtime_context.persist_failure(
+                    provider="deepseek",
+                    request_name="deepseek_complete_text",
+                    request_payload=request_payload,
+                    error=exc,
+                    runtime_identity=runtime_identity,
+                )
+            raise
+        finally:
+            try:
+                _DEEPSEEK_HEDGE_ESTIMATOR.observe(
+                    prompt=prompt,
+                    system_message=system_message,
+                    metadata=metadata,
+                )
+            except Exception as hedge_observe_exc:
+                logger.debug("DeepSeek hedge estimator observe failed: %s", hedge_observe_exc)
+            try:
+                append_deepseek_call_record(
+                    prompt=prompt,
+                    system_message=str(system_message or ""),
+                    model=resolved_model,
+                    temperature=float(temperature),
+                    need_logprobs=bool(need_logprobs),
+                    output_text=str(output_text or ""),
+                    metadata=metadata,
+                    error=error_text,
+                    extra={
+                        "gateway": "deepseek_complete_text",
+                        "fallback": fallback_payload,
+                    },
+                )
+            except Exception as audit_exc:
+                logger.warning(f"DeepSeek audit append failed: {audit_exc}")
+    if client is None:
+        client = get_deepseek_client(
+            api_key=api_key,
+            base_url=base_url,
+            model=resolved_model,
+            temperature=temperature,
+            enable_logprobs=enable_logprobs,
+            cache_enabled=cache_enabled,
+            inflight_dedup_enabled=inflight_dedup_enabled,
+        )
+    primary_attempt_history: list[Dict[str, Any]] = []
     delay_ms = _resolve_deepseek_hedge_delay_ms(
         request_name="deepseek_complete_text",
         prompt=prompt,
@@ -1255,6 +1480,13 @@ async def deepseek_complete_text(
                 _DEEPSEEK_PROVIDER_MAX_RETRIES,
                 exc,
             )
+        runtime_route_snapshot = _pin_runtime_deepseek_to_qwen(
+            runtime_context=runtime_context,
+            gateway_name="deepseek_complete_text",
+            requested_model=resolved_model,
+            source_error=exc,
+            previous_failures=primary_attempt_history,
+        )
         fallback_output = await _fallback_to_qwen_text(
             prompt=prompt,
             system_message=system_message,
@@ -1267,16 +1499,22 @@ async def deepseek_complete_text(
         )
         if fallback_output is not None:
             (output_text, metadata, logprobs), fallback_attempt_history = fallback_output
-            fallback_payload = {
-                "is_fallback": False,
-                "fallback_kind": "provider_switch",
-                "fallback_label": "deepseek_to_qwen_text",
-                "fallback_reason": str(exc or ""),
-                "source_provider": "DeepSeek",
-                "target_provider": f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
-                "fast_fallback_mode": bool(deepseek_fast_fallback_open),
-                "previous_failures": primary_attempt_history + list(fallback_attempt_history or []),
-            }
+            fallback_previous_failures = _normalize_previous_failures(
+                runtime_route_snapshot.get("previous_failures", []),
+            )
+            if not fallback_previous_failures:
+                fallback_previous_failures = list(primary_attempt_history)
+            fallback_previous_failures.extend(list(fallback_attempt_history or []))
+            fallback_payload = _build_provider_switch_payload(
+                fallback_label="deepseek_to_qwen_text",
+                fallback_reason=str(exc or ""),
+                source_provider="DeepSeek",
+                target_provider=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+                previous_failures=fallback_previous_failures,
+                fast_fallback_mode=bool(deepseek_fast_fallback_open),
+                task_provider_locked=_is_runtime_deepseek_routed_to_qwen(runtime_route_snapshot),
+                route_snapshot=runtime_route_snapshot,
+            )
             metadata = _attach_fallback_metadata(
                 metadata,
                 fallback_payload=fallback_payload,
@@ -1356,16 +1594,6 @@ async def deepseek_complete_json(
     权衡：允许 max_tokens 透传，但需注意缓存 key 维度变化。
     """
     resolved_model = resolve_deepseek_model(model, default_model="deepseek-chat")
-    if client is None:
-        client = get_deepseek_client(
-            api_key=api_key,
-            base_url=base_url,
-            model=resolved_model,
-            temperature=temperature,
-            enable_logprobs=enable_logprobs,
-            cache_enabled=cache_enabled,
-            inflight_dedup_enabled=inflight_dedup_enabled,
-        )
     runtime_context = current_runtime_llm_context()
     request_payload = build_runtime_llm_request_payload(
         model=resolved_model,
@@ -1397,11 +1625,104 @@ async def deepseek_complete_json(
                 ),
                 None,
             )
+    runtime_route_snapshot = _get_runtime_deepseek_provider_route(runtime_context)
     metadata = None
     result_json: Dict[str, Any] = {}
+    logprobs = None
     error_text = ""
-    primary_attempt_history: list[Dict[str, Any]] = []
     fallback_payload: Dict[str, Any] = {}
+    if _is_runtime_deepseek_routed_to_qwen(runtime_route_snapshot):
+        try:
+            routed_output = await _call_qwen_json_provider(
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                enable_logprobs=enable_logprobs,
+                cache_enabled=cache_enabled,
+                inflight_dedup_enabled=inflight_dedup_enabled,
+                request_name="qwen_task_routed_json",
+            )
+            if routed_output is None:
+                raise RuntimeError("Qwen alternate provider is unavailable for task-routed json request")
+            (result_json, metadata, logprobs), fallback_attempt_history = routed_output
+            fallback_payload = _build_provider_switch_payload(
+                fallback_label="deepseek_task_route_to_qwen_json",
+                fallback_reason=str(runtime_route_snapshot.get("reason", "") or "task routed to qwen"),
+                source_provider="DeepSeek",
+                target_provider=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+                previous_failures=list(runtime_route_snapshot.get("previous_failures", []) or [])
+                + list(fallback_attempt_history or []),
+                task_provider_locked=True,
+                route_snapshot=runtime_route_snapshot,
+            )
+            metadata = _attach_fallback_metadata(
+                metadata,
+                fallback_payload=fallback_payload,
+            )
+            if runtime_context is not None:
+                runtime_context.persist_success(
+                    provider="deepseek",
+                    request_name="deepseek_complete_json",
+                    request_payload=request_payload,
+                    response_text=dump_runtime_json_text(result_json),
+                    response_metadata=_build_runtime_response_metadata(
+                        metadata=metadata,
+                        requested_model=resolved_model,
+                        fallback_payload=fallback_payload,
+                    ),
+                    runtime_identity=runtime_identity,
+                )
+            return result_json, metadata, logprobs
+        except Exception as exc:
+            error_text = str(exc)
+            if runtime_context is not None:
+                runtime_context.persist_failure(
+                    provider="deepseek",
+                    request_name="deepseek_complete_json",
+                    request_payload=request_payload,
+                    error=exc,
+                    runtime_identity=runtime_identity,
+                )
+            raise
+        finally:
+            try:
+                _DEEPSEEK_HEDGE_ESTIMATOR.observe(
+                    prompt=prompt,
+                    system_message=system_message,
+                    metadata=metadata,
+                )
+            except Exception as hedge_observe_exc:
+                logger.debug("DeepSeek hedge estimator observe failed: %s", hedge_observe_exc)
+            try:
+                append_deepseek_call_record(
+                    prompt=prompt,
+                    system_message=str(system_message or ""),
+                    model=resolved_model,
+                    temperature=float(temperature),
+                    need_logprobs=bool(need_logprobs),
+                    output_text=dump_runtime_json_text(result_json) if result_json else "",
+                    metadata=metadata,
+                    error=error_text,
+                    extra={
+                        "gateway": "deepseek_complete_json",
+                        "fallback": fallback_payload,
+                    },
+                )
+            except Exception as audit_exc:
+                logger.warning(f"DeepSeek JSON audit append failed: {audit_exc}")
+    if client is None:
+        client = get_deepseek_client(
+            api_key=api_key,
+            base_url=base_url,
+            model=resolved_model,
+            temperature=temperature,
+            enable_logprobs=enable_logprobs,
+            cache_enabled=cache_enabled,
+            inflight_dedup_enabled=inflight_dedup_enabled,
+        )
+    primary_attempt_history: list[Dict[str, Any]] = []
     delay_ms = _resolve_deepseek_hedge_delay_ms(
         request_name="deepseek_complete_json",
         prompt=prompt,
@@ -1463,6 +1784,13 @@ async def deepseek_complete_json(
                 _DEEPSEEK_PROVIDER_MAX_RETRIES,
                 exc,
             )
+        runtime_route_snapshot = _pin_runtime_deepseek_to_qwen(
+            runtime_context=runtime_context,
+            gateway_name="deepseek_complete_json",
+            requested_model=resolved_model,
+            source_error=exc,
+            previous_failures=primary_attempt_history,
+        )
         fallback_json = await _fallback_to_qwen_json(
             prompt=prompt,
             system_message=system_message,
@@ -1476,16 +1804,22 @@ async def deepseek_complete_json(
         )
         if fallback_json is not None:
             (result_json, metadata, logprobs), fallback_attempt_history = fallback_json
-            fallback_payload = {
-                "is_fallback": False,
-                "fallback_kind": "provider_switch",
-                "fallback_label": "deepseek_to_qwen_json",
-                "fallback_reason": str(exc or ""),
-                "source_provider": "DeepSeek",
-                "target_provider": f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
-                "fast_fallback_mode": bool(deepseek_fast_fallback_open),
-                "previous_failures": primary_attempt_history + list(fallback_attempt_history or []),
-            }
+            fallback_previous_failures = _normalize_previous_failures(
+                runtime_route_snapshot.get("previous_failures", []),
+            )
+            if not fallback_previous_failures:
+                fallback_previous_failures = list(primary_attempt_history)
+            fallback_previous_failures.extend(list(fallback_attempt_history or []))
+            fallback_payload = _build_provider_switch_payload(
+                fallback_label="deepseek_to_qwen_json",
+                fallback_reason=str(exc or ""),
+                source_provider="DeepSeek",
+                target_provider=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+                previous_failures=fallback_previous_failures,
+                fast_fallback_mode=bool(deepseek_fast_fallback_open),
+                task_provider_locked=_is_runtime_deepseek_routed_to_qwen(runtime_route_snapshot),
+                route_snapshot=runtime_route_snapshot,
+            )
             metadata = _attach_fallback_metadata(
                 metadata,
                 fallback_payload=fallback_payload,

@@ -8,8 +8,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.io.FileNotFoundException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Collections;
@@ -51,20 +53,43 @@ public class VideoMetaService {
 
     public ObjectNode readOrCreateNode(Path taskRoot) {
         Path metaPath = resolveVideoMetaPath(taskRoot);
+        if (metaPath == null) {
+            return objectMapper.createObjectNode();
+        }
+        return readExistingNode(metaPath, true);
+    }
+
+    private ObjectNode readExistingNode(Path metaPath, boolean allowRetry) {
         if (metaPath == null || !Files.isRegularFile(metaPath)) {
             return objectMapper.createObjectNode();
         }
         try {
-            if (Files.size(metaPath) == 0L) {
+            byte[] rawBytes = Files.readAllBytes(metaPath);
+            if (rawBytes.length == 0) {
                 return objectMapper.createObjectNode();
             }
-            JsonNode loaded = objectMapper.readTree(metaPath.toFile());
+            JsonNode loaded = objectMapper.readTree(rawBytes);
             if (loaded instanceof ObjectNode objectNode) {
                 return objectNode;
             }
             return objectMapper.createObjectNode();
+        } catch (NoSuchFileException | FileNotFoundException missingDuringRead) {
+            if (allowRetry) {
+                return readExistingNode(metaPath, false);
+            }
+            logger.debug(
+                    "video metadata disappeared during read, treat as empty node: path={} type={}",
+                    metaPath,
+                    missingDuringRead.getClass().getSimpleName()
+            );
+            return objectMapper.createObjectNode();
         } catch (Exception ex) {
-            logger.warn("read video metadata failed: {} err={}", metaPath, ex.getMessage());
+            logger.warn(
+                    "read video metadata failed: path={} type={} err={}",
+                    metaPath,
+                    ex.getClass().getSimpleName(),
+                    describeExceptionMessage(ex)
+            );
             return objectMapper.createObjectNode();
         }
     }
@@ -106,7 +131,12 @@ public class VideoMetaService {
                 Files.deleteIfExists(tmpPath);
             } catch (Exception ignored) {
             }
-            logger.warn("write video toc metadata failed: {} err={}", metaPath, ex.getMessage());
+            logger.warn(
+                    "write video toc metadata failed: path={} type={} err={}",
+                    metaPath,
+                    ex.getClass().getSimpleName(),
+                    describeExceptionMessage(ex)
+            );
             return false;
         }
     }
@@ -133,6 +163,17 @@ public class VideoMetaService {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String describeExceptionMessage(Exception ex) {
+        if (ex == null) {
+            return "<empty>";
+        }
+        String message = ex.getMessage();
+        if (message == null || message.isBlank()) {
+            return "<empty>";
+        }
+        return message.trim();
     }
 
     public static class VideoMetaSnapshot {

@@ -5,6 +5,7 @@ import org.springframework.core.io.ByteArrayResource;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.ConnectException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -12,7 +13,6 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-
 class DeepSeekAdvisorServiceTest {
 
     @Test
@@ -193,6 +193,18 @@ class DeepSeekAdvisorServiceTest {
         assertEquals(true, prompt.contains("![alt](url)"));
     }
 
+    @Test
+    void shouldDescribeAdvisorFailureWhenCauseMessagesAreEmpty() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        Method method = DeepSeekAdvisorService.class.getDeclaredMethod("resolveAdvisorFailureMessage", Throwable.class);
+        method.setAccessible(true);
+
+        IllegalStateException error = new IllegalStateException("", new ConnectException(""));
+        String message = (String) method.invoke(service, error);
+
+        assertEquals(true, message.contains("IllegalStateException (<empty>)"));
+        assertEquals(true, message.contains("ConnectException (<empty>)"));
+    }
     private void setField(Object target, String fieldName, Object value) throws Exception {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);

@@ -14,14 +14,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-import matplotlib
 import psutil
 
 from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
 
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt  # noqa: E402
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt  # noqa: E402
+except Exception as exc:  # pragma: no cover - benchmark helper fallback
+    matplotlib = None
+    plt = None
+    print(f"[bench_screenshot_opt_concurrency] matplotlib unavailable, skip charts: {exc}", flush=True)
 
 
 def _now_iso() -> str:
@@ -409,6 +415,8 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 
 def _plot_summary(summary_rows: List[Dict[str, Any]], output_png: Path) -> None:
+    if plt is None:
+        return
     if not summary_rows:
         return
 

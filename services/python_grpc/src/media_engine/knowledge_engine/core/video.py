@@ -245,6 +245,11 @@ class VideoProcessor(BaseProcessor):
         lower_url = (url or "").lower()
         return "youtube.com/" in lower_url or "youtu.be/" in lower_url
 
+    @staticmethod
+    def _is_bilibili_url(url: str) -> bool:
+        lower_url = (url or "").lower()
+        return "bilibili.com/" in lower_url or "b23.tv/" in lower_url or "bilivideo.com/" in lower_url
+
     def _with_youtube_player_client_chain(self, opts: Dict[str, Any]) -> Dict[str, Any]:
         """为 YouTube 场景补充更稳的 player_client 提取顺序。"""
         merged = dict(opts)
@@ -844,8 +849,10 @@ class VideoProcessor(BaseProcessor):
 
     @staticmethod
     def _is_external_downloader_fallback_error(err: Exception) -> bool:
-        """判断是否为外部下载器可回退的网络类失败（含 SSL/TLS）。"""
+        """判断是否为外部下载器可回退的失败（含 yt-dlp 只保留 aria2c 退出码摘要的场景）。"""
         lower_raw = str(err).lower()
+        if "aria2c exited with code" in lower_raw:
+            return True
         keywords = (
             "ssl",
             "tls",
@@ -853,11 +860,14 @@ class VideoProcessor(BaseProcessor):
             "certificate",
             "download aborted",
             "errorcode",
+            "network problem has occurred",
             "proxy",
             "timed out",
             "timeout",
+            "unreachable host",
             "could not resolve",
             "failed to resolve",
+            "no route to host",
         )
         return any(keyword in lower_raw for keyword in keywords)
 
@@ -1283,6 +1293,11 @@ class VideoProcessor(BaseProcessor):
                 if effective_proxy:
                     if not any(str(arg).startswith("--all-proxy") for arg in args_copy):
                         args_copy.append(f"--all-proxy={effective_proxy}")
+                # B 站 CDN 在部分双栈网络下会命中不可达的 IPv6 路由，默认锁定 IPv4；显式配置时尊重用户参数。
+                if self._is_bilibili_url(url) and not any(
+                    str(arg).startswith("--disable-ipv6") for arg in args_copy
+                ):
+                    args_copy.append("--disable-ipv6=true")
                 if (self.disable_ssl_verify or self._is_youtube_url(url)) and not any(
                     str(arg).startswith("--check-certificate") for arg in args_copy
                 ):
@@ -1500,6 +1515,7 @@ class VideoProcessor(BaseProcessor):
             if (
                 resolved_external_downloader
                 and external_downloader_key.startswith("aria2c")
+                and not self._is_bilibili_url(url)
                 and not self._external_downloader_fallback_attempted
                 and self._is_external_downloader_fallback_error(e)
                 and not self._is_transient_network_error(e)

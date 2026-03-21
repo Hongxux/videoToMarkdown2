@@ -200,6 +200,109 @@ def _should_release_vl_http_client(exc: BaseException) -> bool:
     return False
 
 
+def _collect_exception_text(exc: BaseException, *, max_depth: int = 6) -> str:
+    """聚合异常链文本，便于识别 provider 返回的业务错误语义。"""
+    fragments: List[str] = []
+    for current in _iter_exception_chain(exc, max_depth=max_depth):
+        text = str(current or "").strip()
+        if text:
+            fragments.append(text.lower())
+
+        body = getattr(current, "body", None)
+        if body not in (None, ""):
+            try:
+                body_text = json.dumps(body, ensure_ascii=False, default=str)
+            except Exception:
+                body_text = str(body)
+            body_text = str(body_text or "").strip()
+            if body_text:
+                fragments.append(body_text.lower())
+
+        response = getattr(current, "response", None)
+        response_text: Any = None
+        if response is not None:
+            if isinstance(response, dict):
+                response_text = response.get("text") or response.get("body") or response.get("content")
+            else:
+                response_text = getattr(response, "text", None)
+                if response_text is None:
+                    response_text = getattr(response, "content", None)
+        if response_text not in (None, "", b""):
+            if isinstance(response_text, (bytes, bytearray)):
+                try:
+                    response_text = response_text.decode("utf-8", errors="replace")
+                except Exception:
+                    response_text = str(response_text)
+            normalized_response_text = str(response_text or "").strip()
+            if normalized_response_text:
+                fragments.append(normalized_response_text.lower())
+    return " | ".join(fragments)
+
+
+def _extract_exception_status_codes(exc: BaseException) -> List[int]:
+    """抽取异常链里的 HTTP 状态码，区分参数错误与网络抖动。"""
+    status_codes: List[int] = []
+    seen: set[int] = set()
+    for current in _iter_exception_chain(exc):
+        raw_status = getattr(current, "status_code", None)
+        if raw_status is None:
+            response = getattr(current, "response", None)
+            raw_status = getattr(response, "status_code", None)
+        status_code = safe_int(raw_status, 0)
+        if status_code > 0 and status_code not in seen:
+            seen.add(status_code)
+            status_codes.append(status_code)
+    return status_codes
+
+
+def _is_dashscope_video_too_short_error(exc: BaseException) -> bool:
+    """识别 DashScope 对过短视频的参数校验错误。"""
+    error_text = _collect_exception_text(exc)
+    if not error_text:
+        return False
+    return "video file is too short" in error_text or (
+        "video modality input does not meet the requirements" in error_text
+        and "too short" in error_text
+    )
+
+
+def _is_non_retryable_vl_request_error(exc: BaseException) -> bool:
+    """将 400 类参数错误归为不可重试，避免无效退避占满并发槽位。"""
+    status_codes = _extract_exception_status_codes(exc)
+    if 400 not in status_codes:
+        return False
+
+    error_text = _collect_exception_text(exc)
+    if _is_dashscope_video_too_short_error(exc):
+        return True
+    if any(
+        token in error_text
+        for token in (
+            "invalid_parameter_error",
+            "invalid_request_error",
+            "internalerror.algo.invalidparameter",
+        )
+    ):
+        return True
+    return bool(status_codes) and all(status_code == 400 for status_code in status_codes)
+
+
+def _should_fallback_to_keyframes_after_vl_error(
+    exc: BaseException,
+    *,
+    request_transport_meta: Dict[str, Any],
+    fallback_enabled: bool,
+    fallback_already_used: bool,
+) -> bool:
+    """仅在视频模态被 provider 判定“过短”时降级到关键帧。"""
+    if (not fallback_enabled) or fallback_already_used:
+        return False
+    transport = str((request_transport_meta or {}).get("transport", "") or "").strip().lower()
+    if transport not in {"temp_url", "data_uri_video", "video_url"}:
+        return False
+    return _is_dashscope_video_too_short_error(exc)
+
+
 async def shutdown_vl_http_client_pool() -> None:
     """统一关闭 VL 共用 HTTP 连接池。"""
     clients: list[httpx.AsyncClient] = []
@@ -431,6 +534,9 @@ class VLVideoAnalyzer:
         self.video_input_mode = str(
             api_config.get("video_input_mode", default_video_input_mode) or default_video_input_mode
         ).strip().lower()
+        self.dashscope_short_video_keyframes_fallback_enabled = bool(
+            api_config.get("short_video_keyframes_fallback_enabled", True)
+        )
         self.max_input_frames = int(api_config.get("max_input_frames", 6))
         self.max_image_dim = int(api_config.get("max_image_dim", 1024))
         
@@ -2489,14 +2595,17 @@ class VLVideoAnalyzer:
             video_path=video_path,
             wave_id=wave_id,
         )
+        forced_video_input_mode: Optional[str] = None
         messages_result = await self._build_messages(
             video_path,
             extra_prompt=extra_prompt,
             analysis_mode=normalized_mode,
             runtime_identity=runtime_identity,
             return_transport_detail=True,
+            forced_video_input_mode=forced_video_input_mode,
         )
         media_prepare_interaction: Optional[Dict[str, Any]] = None
+        active_use_dashscope_offline_task = bool(use_dashscope_offline_task)
         if isinstance(messages_result, tuple) and len(messages_result) == 2:
             messages, media_prepare_interaction = messages_result
         else:
@@ -2535,7 +2644,7 @@ class VLVideoAnalyzer:
             extra_prompt=extra_prompt,
             request_transport_meta=request_transport_meta,
             video_duration_sec=video_duration_sec,
-            use_dashscope_offline_task=use_dashscope_offline_task,
+            use_dashscope_offline_task=active_use_dashscope_offline_task,
             vl_request_timeout_sec=vl_request_timeout_sec,
             vl_hedge_delay_ms=vl_hedge_delay_ms,
         )
@@ -2631,6 +2740,7 @@ class VLVideoAnalyzer:
         pool_retry_max_attempts = 5
         pool_retry_jitter_sec = max(0.0, float(self.vl_retry_initial_backoff_sec) * 0.3)
         effective_max_retries = max(0, int(self.max_retries))
+        short_video_keyframes_fallback_used = False
         attempt = 0
         while attempt <= effective_max_retries:
             client_state = await self._acquire_client_state()
@@ -2650,7 +2760,7 @@ class VLVideoAnalyzer:
 
                 offline_task_meta: Dict[str, Any] = {}
                 vl_response: Optional[llm_gateway.VLChatResult] = None
-                if use_dashscope_offline_task:
+                if active_use_dashscope_offline_task:
                     content, finish_reason, token_usage, offline_task_meta = (
                         await self._call_vl_api_with_dashscope_offline_task(
                             messages=messages,
@@ -2736,7 +2846,7 @@ class VLVideoAnalyzer:
                             "analysis_mode": normalized_mode,
                             "video_path": str(video_path or ""),
                             "video_duration_sec": float(video_duration_sec),
-                            "offline_task_enabled": bool(use_dashscope_offline_task),
+                            "offline_task_enabled": bool(active_use_dashscope_offline_task),
                             "offline_task_meta": dict(offline_task_meta or {}),
                             "timeout_sec": float(vl_request_timeout_sec),
                             "hedge_delay_ms": int(vl_hedge_delay_ms),
@@ -2784,7 +2894,7 @@ class VLVideoAnalyzer:
                             "analysis_mode": normalized_mode,
                             "video_path": str(video_path or ""),
                             "video_duration_sec": float(video_duration_sec),
-                            "offline_task_enabled": bool(use_dashscope_offline_task),
+                            "offline_task_enabled": bool(active_use_dashscope_offline_task),
                             "offline_task_meta": dict(locals().get("offline_task_meta", {}) or {}),
                             "timeout_sec": float(vl_request_timeout_sec),
                             "hedge_delay_ms": int(vl_hedge_delay_ms),
@@ -2797,6 +2907,51 @@ class VLVideoAnalyzer:
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     }
                 )
+                if _should_fallback_to_keyframes_after_vl_error(
+                    e,
+                    request_transport_meta=request_transport_meta,
+                    fallback_enabled=bool(self.dashscope_short_video_keyframes_fallback_enabled),
+                    fallback_already_used=short_video_keyframes_fallback_used,
+                ):
+                    logger.warning(
+                        "VL request rejected for short video modality input, switch to keyframes fallback: "
+                        "video_path=%s, transport=%s, error=%s",
+                        video_path,
+                        str(request_transport_meta.get("transport", "unknown") or "unknown"),
+                        err_detail,
+                    )
+                    messages_result = await self._build_messages(
+                        video_path,
+                        extra_prompt=extra_prompt,
+                        analysis_mode=normalized_mode,
+                        runtime_identity=runtime_identity,
+                        return_transport_detail=True,
+                        forced_video_input_mode="keyframes",
+                    )
+                    forced_video_input_mode = "keyframes"
+                    if isinstance(messages_result, tuple) and len(messages_result) == 2:
+                        messages = messages_result[0]
+                    else:
+                        messages = messages_result
+                    request_messages_audit = self._sanitize_messages_for_audit(messages)
+                    request_transport_meta = self._summarize_message_transport(messages)
+                    active_use_dashscope_offline_task = False
+                    short_video_keyframes_fallback_used = True
+                    runtime_request_payload = self._build_vl_runtime_request_payload(
+                        video_path=video_path,
+                        messages=messages,
+                        analysis_mode=normalized_mode,
+                        extra_prompt=extra_prompt,
+                        request_transport_meta=request_transport_meta,
+                        video_duration_sec=video_duration_sec,
+                        use_dashscope_offline_task=active_use_dashscope_offline_task,
+                        vl_request_timeout_sec=vl_request_timeout_sec,
+                        vl_hedge_delay_ms=vl_hedge_delay_ms,
+                    )
+                    continue
+                if _is_non_retryable_vl_request_error(e):
+                    logger.warning("VL request hit non-retryable provider error, stop retrying: %s", err_detail)
+                    break
                 if _is_connection_pool_exhausted_error(e) and pool_retry_index < pool_retry_max_attempts:
                     wait_time = self._compute_retry_backoff_sec(
                         attempt_index=pool_retry_index,
@@ -2842,6 +2997,20 @@ class VLVideoAnalyzer:
                             ),
                             analysis_mode=normalized_mode,
                             runtime_identity=runtime_identity,
+                            forced_video_input_mode=forced_video_input_mode,
+                        )
+                        request_messages_audit = self._sanitize_messages_for_audit(messages)
+                        request_transport_meta = self._summarize_message_transport(messages)
+                        runtime_request_payload = self._build_vl_runtime_request_payload(
+                            video_path=video_path,
+                            messages=messages,
+                            analysis_mode=normalized_mode,
+                            extra_prompt=extra_prompt,
+                            request_transport_meta=request_transport_meta,
+                            video_duration_sec=video_duration_sec,
+                            use_dashscope_offline_task=active_use_dashscope_offline_task,
+                            vl_request_timeout_sec=vl_request_timeout_sec,
+                            vl_hedge_delay_ms=vl_hedge_delay_ms,
                         )
                     await asyncio.sleep(wait_time)
                 attempt += 1
@@ -2954,6 +3123,7 @@ class VLVideoAnalyzer:
         *,
         runtime_identity: Optional[Dict[str, Any]] = None,
         return_transport_detail: bool = False,
+        forced_video_input_mode: Optional[str] = None,
     ) -> Any:
         """
         构建多模态消息。
@@ -2990,7 +3160,7 @@ class VLVideoAnalyzer:
         if override_prompt:
             user_text = "【重试补充要求】\n" + override_prompt + "\n" + user_text
 
-        mode = (self.video_input_mode or "auto").lower()
+        mode = str(forced_video_input_mode or self.video_input_mode or "auto").lower()
         if mode not in ("auto", "data_uri", "dashscope_upload", "keyframes"):
             mode = "keyframes" if self._is_qianfan_endpoint(self.base_url) else "auto"
 

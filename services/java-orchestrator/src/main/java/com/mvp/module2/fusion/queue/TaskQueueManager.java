@@ -184,6 +184,7 @@ public class TaskQueueManager {
         public Instant createdAt;
         public Instant startedAt;
         public Instant completedAt;
+        public Instant updatedAt;
         public double progress;
         public String statusMessage;
         public String userMessage;
@@ -1051,6 +1052,7 @@ public class TaskQueueManager {
         task.createdAt = record.createdAt != null ? record.createdAt : Instant.now();
         task.startedAt = record.startedAt;
         task.completedAt = record.completedAt;
+        task.updatedAt = record.updatedAt;
         task.progress = record.progress;
         task.statusMessage = normalizeOptionalText(record.statusMessage);
         task.userMessage = normalizeOptionalText(record.userMessage());
@@ -1120,6 +1122,7 @@ public class TaskQueueManager {
         if (task == null) {
             return;
         }
+        task.updatedAt = Instant.now();
         try {
             if (taskCleanupIndexService != null) {
                 taskCleanupIndexService.persistTaskState(task);
@@ -1139,6 +1142,7 @@ public class TaskQueueManager {
         if (taskCleanupIndexService == null && taskStateRepository == null) {
             throw new IllegalStateException("task state repository unavailable");
         }
+        task.updatedAt = Instant.now();
         try {
             if (taskCleanupIndexService != null) {
                 taskCleanupIndexService.persistTaskState(task);

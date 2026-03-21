@@ -30,6 +30,7 @@ service VideoProcessingService {
     
     // 步骤3: Stage1处理(步骤1-6) (LLM API调用 - Python)
     rpc ProcessStage1(Stage1Request) returns (Stage1Response);
+    rpc RecoverRuntimeContext(RecoverRuntimeContextRequest) returns (RecoverRuntimeContextResponse);
     
     // 🔑 V2: Module2 拆分为两阶段
     // 步骤4: Module2 Phase2A - 语义分析 + 时间戳提取 (不执行FFmpeg)
@@ -165,6 +166,43 @@ message Stage1Response {
 // ==========================================
 // 🔑 V2: Module2 Phase2A - 语义分析
 // ==========================================
+
+message RecoverRuntimeContextRequest {
+    string task_id = 1;
+    string output_dir = 2;
+    string requested_start_stage = 3;
+    string semantic_units_path = 4;
+    string requested_video_path = 5;
+    string requested_subtitle_path = 6;
+}
+
+message RecoverRuntimeContextResponse {
+    bool success = 1;
+    string resolved_start_stage = 2;
+    bool download_ready = 3;
+    string video_path = 4;
+    bool transcribe_ready = 5;
+    string subtitle_path = 6;
+    bool stage1_ready = 7;
+    string sentence_timestamps_path = 8;
+    bool phase2a_ready = 9;
+    string semantic_units_path = 10;
+    int32 reused_llm_call_count = 11;
+    int32 reused_chunk_count = 12;
+    string decision_reason = 13;
+    string error_msg = 14;
+    double video_duration_sec = 15;
+    string video_title = 16;
+    string resolved_url = 17;
+    string source_platform = 18;
+    string canonical_id = 19;
+    string content_type = 20;
+    string step2_json_path = 21;
+    string step6_json_path = 22;
+    bool phase2b_ready = 23;
+    string markdown_path = 24;
+    string json_path = 25;
+}
 
 message AnalyzeRequest {
     string task_id = 1;                     // 任务唯一ID
@@ -435,6 +473,7 @@ message GenerateMaterialRequestsRequest {
     string task_id = 1;
     repeated SemanticUnitForMaterialGeneration units = 2;
     string video_path = 3;
+    string output_dir = 4;
 }
 
 message SemanticUnitForMaterialGeneration {

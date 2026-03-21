@@ -287,6 +287,8 @@ public class VideoProcessingOrchestrator {
         public String recoveryStartStage;
         public String phase2aSemanticUnitsPath;
         public AnalyzeResult phase2aAnalyzeResult;
+        public String phase2bMarkdownPath;
+        public String phase2bJsonPath;
     }
     
     /**
@@ -1163,6 +1165,7 @@ public class VideoProcessingOrchestrator {
         boolean usedVLFlow = false;
         boolean usedLegacyFlow = false;
         try {
+            String effectiveStartStage = firstNonBlank(startStage, "phase2a");
             String videoPath = ioResult.videoPath;
             String outputDir = ioResult.outputDir;
             double videoDuration = ioResult.videoDuration;
@@ -1171,9 +1174,14 @@ public class VideoProcessingOrchestrator {
             if (timeouts == null) {
                 timeouts = timeoutCalculator.calculateTimeouts(Math.max(videoDuration, 1.0d));
             }
+            effectiveStartStage = reconcileRecoveredPhase2Context(taskId, ioResult, effectiveStartStage, timeouts);
+            if ("stage1".equalsIgnoreCase(effectiveStartStage)) {
+                ioResult = processVideoStage1Phase(taskId, ioResult);
+                effectiveStartStage = "phase2a";
+            }
 
             AnalyzeResult analyzeResult;
-            if ("phase2a".equalsIgnoreCase(startStage)) {
+            if ("phase2a".equalsIgnoreCase(effectiveStartStage)) {
                 if (ioResult.stage1Result == null || !ioResult.stage1Result.success) {
                     throw new IllegalStateException("Stage1 result is invalid for phase2a resume");
                 }
@@ -1191,7 +1199,7 @@ public class VideoProcessingOrchestrator {
             } else {
                 analyzeResult = ensurePhase2aAnalyzeResult(taskId, ioResult);
             }
-            if (!"phase2b".equalsIgnoreCase(startStage)) {
+            if (!"phase2b".equalsIgnoreCase(effectiveStartStage)) {
                 AssetExtractStageResult assetExtractStageResult =
                         executeAssetExtractStage(taskId, ioResult, analyzeResult, timeouts, flowFlags);
                 analyzeResult = assetExtractStageResult.analyzeResult;
@@ -1249,6 +1257,196 @@ public class VideoProcessingOrchestrator {
             flowFlags.putIfAbsent("downloaded_from_url", ioResult.downloadedFromUrl);
             flowFlags.putIfAbsent("used_vl_flow", false);
             flowFlags.putIfAbsent("used_legacy_flow", false);
+        } finally {
+            result.processingTimeMs = System.currentTimeMillis() - startTime;
+            stageTimingsMs.put("total_pipeline", result.processingTimeMs);
+            writeTaskMetricsReport(
+                    taskId,
+                    metricsOutputDir,
+                    metricsVideoPath,
+                    metricsInputVideoUrl,
+                    metricsVideoTitle,
+                    result,
+                    stageTimingsMs,
+                    flowFlags
+            );
+        }
+        return result;
+    }
+
+    public String reconcileRecoveredRuntimeContext(
+            String taskId,
+            IOPhaseResult ioResult,
+            String requestedStartStage,
+            DynamicTimeoutCalculator.TimeoutConfig timeouts
+    ) {
+        String safeRequestedStage = firstNonBlank(requestedStartStage, "download");
+        if (ioResult == null || grpcClient == null) {
+            return safeRequestedStage;
+        }
+        String outputDir = firstNonBlank(ioResult.outputDir, "");
+        if (outputDir.isBlank()) {
+            return safeRequestedStage;
+        }
+
+        int timeoutSec = 30;
+        if (timeouts != null) {
+            timeoutSec = Math.max(15, Math.min(60, timeouts.getPhase2aTimeoutSec()));
+        }
+
+        PythonGrpcClient.RecoverRuntimeContextResult recovered =
+                grpcClient.recoverRuntimeContext(
+                        taskId,
+                        outputDir,
+                        safeRequestedStage,
+                        firstNonBlank(ioResult.phase2aSemanticUnitsPath, ""),
+                        firstNonBlank(ioResult.videoPath, ioResult.videoUrl),
+                        firstNonBlank(ioResult.subtitlePath, ""),
+                        timeoutSec
+                );
+        if (recovered == null || !recovered.success) {
+            if (recovered != null && StringUtils.hasText(recovered.errorMsg)) {
+                logger.warn("[{}] Python runtime recovery skipped: {}", taskId, recovered.errorMsg);
+            }
+            return safeRequestedStage;
+        }
+
+        if (recovered.downloadReady && StringUtils.hasText(recovered.videoPath)) {
+            String recoveredVideoPath = recovered.videoPath;
+            if (!StringUtils.hasText(ioResult.videoPath) || isHttpUrl(ioResult.videoPath)) {
+                ioResult.videoPath = recoveredVideoPath;
+            }
+            if (recovered.videoDurationSec > 0) {
+                ioResult.videoDuration = recovered.videoDurationSec;
+            }
+            ioResult.metricsVideoPath = firstNonBlank(ioResult.metricsVideoPath, ioResult.videoPath);
+            ioResult.metricsVideoTitle = firstNonBlank(ioResult.metricsVideoTitle, recovered.videoTitle);
+            DownloadResult downloadResult = ioResult.downloadResult;
+            if (downloadResult == null) {
+                downloadResult = new DownloadResult();
+                ioResult.downloadResult = downloadResult;
+            }
+            downloadResult.success = true;
+            if (!StringUtils.hasText(downloadResult.videoPath) || isHttpUrl(downloadResult.videoPath)) {
+                downloadResult.videoPath = ioResult.videoPath;
+            }
+            downloadResult.durationSec = recovered.videoDurationSec > 0 ? recovered.videoDurationSec : downloadResult.durationSec;
+            downloadResult.videoTitle = firstNonBlank(downloadResult.videoTitle, recovered.videoTitle);
+            downloadResult.resolvedUrl = firstNonBlank(downloadResult.resolvedUrl, recovered.resolvedUrl);
+            downloadResult.sourcePlatform = firstNonBlank(downloadResult.sourcePlatform, recovered.sourcePlatform);
+            downloadResult.canonicalId = firstNonBlank(downloadResult.canonicalId, recovered.canonicalId);
+            downloadResult.contentType = firstNonBlank(downloadResult.contentType, recovered.contentType);
+            if (!StringUtils.hasText(ioResult.cleanupSourcePath) || isHttpUrl(ioResult.cleanupSourcePath)) {
+                ioResult.cleanupSourcePath = ioResult.videoPath;
+            }
+            if ((ioResult.timeouts == null || ioResult.videoDuration <= 1.0d) && timeoutCalculator != null) {
+                ioResult.timeouts = timeoutCalculator.calculateTimeouts(Math.max(ioResult.videoDuration, 1.0d));
+            }
+        }
+        if (recovered.transcribeReady && StringUtils.hasText(recovered.subtitlePath)) {
+            ioResult.subtitlePath = firstNonBlank(ioResult.subtitlePath, recovered.subtitlePath);
+        }
+        if (recovered.stage1Ready) {
+            Stage1Result stage1Result = ioResult.stage1Result;
+            if (stage1Result == null) {
+                stage1Result = new Stage1Result();
+                ioResult.stage1Result = stage1Result;
+            }
+            stage1Result.success = true;
+            stage1Result.step2JsonPath = firstNonBlank(stage1Result.step2JsonPath, recovered.step2JsonPath);
+            stage1Result.step6JsonPath = firstNonBlank(stage1Result.step6JsonPath, recovered.step6JsonPath);
+            stage1Result.sentenceTimestampsPath = firstNonBlank(
+                    stage1Result.sentenceTimestampsPath,
+                    firstNonBlank(recovered.sentenceTimestampsPath, "")
+            );
+        }
+        if (recovered.phase2aReady) {
+            ioResult.phase2aSemanticUnitsPath = firstNonBlank(
+                    ioResult.phase2aSemanticUnitsPath,
+                    firstNonBlank(recovered.semanticUnitsPath, resolvePhase2aSemanticUnitsPath(outputDir))
+            );
+        }
+        if (recovered.phase2bReady) {
+            ioResult.phase2bMarkdownPath = firstNonBlank(ioResult.phase2bMarkdownPath, recovered.markdownPath);
+            ioResult.phase2bJsonPath = firstNonBlank(ioResult.phase2bJsonPath, recovered.jsonPath);
+        }
+
+        String effectiveStartStage = firstNonBlank(recovered.resolvedStartStage, safeRequestedStage);
+        ioResult.recoveryStartStage = effectiveStartStage;
+        logger.info(
+                "[{}] Python runtime recovery resolved start stage: requested={} resolved={} downloadReady={} transcribeReady={} stage1Ready={} phase2aReady={} phase2bReady={} reusedLlmCalls={} reusedChunks={} reason={}",
+                taskId,
+                safeRequestedStage,
+                effectiveStartStage,
+                recovered.downloadReady,
+                recovered.transcribeReady,
+                recovered.stage1Ready,
+                recovered.phase2aReady,
+                recovered.phase2bReady,
+                recovered.reusedLlmCallCount,
+                recovered.reusedChunkCount,
+                firstNonBlank(recovered.decisionReason, "none")
+        );
+        return effectiveStartStage;
+    }
+
+    String reconcileRecoveredPhase2Context(
+            String taskId,
+            IOPhaseResult ioResult,
+            String requestedStartStage,
+            DynamicTimeoutCalculator.TimeoutConfig timeouts
+    ) {
+        return reconcileRecoveredRuntimeContext(taskId, ioResult, requestedStartStage, timeouts);
+    }
+
+    public ProcessingResult processVideoFromRecoveredOutputs(String taskId, IOPhaseResult ioResult) {
+        ProcessingResult result = new ProcessingResult();
+        result.taskId = taskId;
+        if (ioResult == null) {
+            result.success = false;
+            result.errorMessage = "IO phase result is required before recovered completion";
+            return result;
+        }
+
+        String markdownPath = firstNonBlank(ioResult.phase2bMarkdownPath, "");
+        if (markdownPath.isBlank()) {
+            result.success = false;
+            result.errorMessage = "Recovered markdown path is required before completed resume";
+            return result;
+        }
+
+        Map<String, Long> stageTimingsMs = ioResult.stageTimingsMs != null ? ioResult.stageTimingsMs : new LinkedHashMap<>();
+        Map<String, Object> flowFlags = ioResult.flowFlags != null ? ioResult.flowFlags : new LinkedHashMap<>();
+        long startTime = ioResult.pipelineStartTimeMs > 0 ? ioResult.pipelineStartTimeMs : System.currentTimeMillis();
+        String metricsOutputDir = firstNonBlank(ioResult.metricsOutputDir, ioResult.outputDir);
+        String metricsVideoPath = firstNonBlank(ioResult.metricsVideoPath, ioResult.videoPath);
+        String metricsInputVideoUrl = firstNonBlank(ioResult.metricsInputVideoUrl, ioResult.videoUrl);
+        String metricsVideoTitle = firstNonBlank(
+                ioResult.metricsVideoTitle,
+                ioResult.downloadResult != null ? ioResult.downloadResult.videoTitle : ""
+        );
+
+        try {
+            result.success = true;
+            result.markdownPath = markdownPath;
+            result.jsonPath = firstNonBlank(ioResult.phase2bJsonPath, "");
+            result.cleanupSourcePath = ioResult.cleanupSourcePath;
+            persistTaskTocMetadata(firstNonBlank(ioResult.outputDir, ""), "video", List.of());
+
+            flowFlags.putIfAbsent("downloaded_from_url", ioResult.downloadedFromUrl);
+            if (ioResult.downloadResult != null) {
+                flowFlags.put("download_content_type", firstNonBlank(ioResult.downloadResult.contentType, "unknown"));
+                flowFlags.put("download_source_platform", firstNonBlank(ioResult.downloadResult.sourcePlatform, "unknown"));
+            }
+            flowFlags.put("used_vl_flow", false);
+            flowFlags.put("used_legacy_flow", false);
+            flowFlags.put("reused_completed_outputs", true);
+            stageTimingsMs.putIfAbsent("phase2b_assemble", 0L);
+        } catch (Throwable error) {
+            String normalizedError = normalizeThrowableMessage(error, "Recovered completed outputs handling failed");
+            logger.error("[{}] Recovered completed outputs handling failed: {}", taskId, normalizedError, error);
+            result.success = false;
+            result.errorMessage = normalizedError;
         } finally {
             result.processingTimeMs = System.currentTimeMillis() - startTime;
             stageTimingsMs.put("total_pipeline", result.processingTimeMs);
@@ -5268,7 +5466,7 @@ public class VideoProcessingOrchestrator {
         // 3. Generate Material Requests
         updateProgress(taskId, 0.70, "正在生成素材提取请求...");
         List<MaterialGenerationInput> matInputs = convertToMatInputs(unitsList, analysisResults.cvResults);
-        MaterialGenerationResult matRes = grpcClient.generateMaterialRequests(taskId, matInputs, videoPath, 600);
+        MaterialGenerationResult matRes = grpcClient.generateMaterialRequests(taskId, matInputs, videoPath, outputDir, 600);
         if (!matRes.success) throw new RuntimeException("Material Gen failed: " + matRes.errorMsg);
 
         // 4. Merge Requests

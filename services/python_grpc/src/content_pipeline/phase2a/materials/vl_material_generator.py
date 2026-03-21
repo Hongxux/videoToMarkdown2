@@ -1128,36 +1128,46 @@ class VLMaterialGenerator:
         serialized_results: List[Dict[str, Any]] = []
         for idx, result in enumerate(analysis_results):
             meta = task_metadata[idx] if idx < len(task_metadata) else {}
-            unit_id = str(meta.get("unit_id", f"task_{idx}") or f"task_{idx}")
-            if isinstance(result, Exception):
-                serialized_results.append(
-                    {
-                        "unit_id": unit_id,
-                        "success": False,
-                        "error": str(result),
-                        "analysis_mode": str(meta.get("analysis_mode", "") or "").strip().lower() or "default",
-                        "raw_response_json": [],
-                        "raw_llm_interactions": [],
-                        "clip_requests": [],
-                        "screenshot_requests": [],
-                        "metadata": meta,
-                    }
-                )
-                continue
             serialized_results.append(
-                {
-                    "unit_id": unit_id,
-                    "success": bool(getattr(result, "success", False)),
-                    "error_msg": str(getattr(result, "error_msg", "") or ""),
-                    "analysis_mode": str(getattr(result, "analysis_mode", "") or "").strip().lower() or "default",
-                    "raw_response_json": getattr(result, "raw_response_json", []) or [],
-                    "raw_llm_interactions": getattr(result, "raw_llm_interactions", []) or [],
-                    "clip_requests": getattr(result, "clip_requests", []) or [],
-                    "screenshot_requests": getattr(result, "screenshot_requests", []) or [],
-                    "metadata": meta,
-                }
+                self._serialize_single_unit_analysis_output(
+                    analysis_result=result,
+                    meta=meta,
+                    result_index=idx,
+                )
             )
         return serialized_results
+
+    def _serialize_single_unit_analysis_output(
+        self,
+        *,
+        analysis_result: Any,
+        meta: Dict[str, Any],
+        result_index: int,
+    ) -> Dict[str, Any]:
+        unit_id = str(meta.get("unit_id", f"task_{result_index}") or f"task_{result_index}")
+        if isinstance(analysis_result, Exception):
+            return {
+                "unit_id": unit_id,
+                "success": False,
+                "error": str(analysis_result),
+                "analysis_mode": str(meta.get("analysis_mode", "") or "").strip().lower() or "default",
+                "raw_response_json": [],
+                "raw_llm_interactions": [],
+                "clip_requests": [],
+                "screenshot_requests": [],
+                "metadata": meta,
+            }
+        return {
+            "unit_id": unit_id,
+            "success": bool(getattr(analysis_result, "success", False)),
+            "error_msg": str(getattr(analysis_result, "error_msg", "") or ""),
+            "analysis_mode": str(getattr(analysis_result, "analysis_mode", "") or "").strip().lower() or "default",
+            "raw_response_json": getattr(analysis_result, "raw_response_json", []) or [],
+            "raw_llm_interactions": getattr(analysis_result, "raw_llm_interactions", []) or [],
+            "clip_requests": getattr(analysis_result, "clip_requests", []) or [],
+            "screenshot_requests": getattr(analysis_result, "screenshot_requests", []) or [],
+            "metadata": meta,
+        }
 
     def _load_vl_results(self, cache_path: Path, *, output_dir: str = "") -> Optional[Dict[str, Any]]:
         """从JSON文件加载VL分析结果"""
@@ -6695,6 +6705,7 @@ class VLMaterialGenerator:
         all_clip_requests: List[Dict[str, Any]],
         all_screenshot_requests: List[Dict[str, Any]],
         token_stats: Dict[str, Any],
+        on_unit_result_streamed: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
     ) -> Tuple[List[Any], List[Dict[str, Any]], Dict[str, LegacyFallbackMaterial], int]:
         """
         单元级流式流水线：
@@ -6733,6 +6744,31 @@ class VLMaterialGenerator:
         pruned_units = 0
         dispatched_vl_units = 0
         legacy_units = 0
+
+        async def _emit_unit_result_streamed_callback(
+            index_value: int,
+            meta_value: Dict[str, Any],
+            analysis_result: Any,
+        ) -> None:
+            if on_unit_result_streamed is None:
+                return
+            try:
+                callback_result = on_unit_result_streamed(
+                    self._serialize_single_unit_analysis_output(
+                        analysis_result=analysis_result,
+                        meta=meta_value,
+                        result_index=index_value,
+                    )
+                )
+                if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                    await callback_result
+            except Exception as callback_error:
+                logger.warning(
+                    "[VL-UnitStream] on_unit_result_streamed callback failed: unit=%s, idx=%s, err=%s",
+                    str(meta_value.get("unit_id", "") or ""),
+                    index_value,
+                    callback_error,
+                )
 
         async def _drain_analysis_tasks(wait_all: bool = False) -> None:
             nonlocal pending_analysis_tasks
@@ -6828,6 +6864,7 @@ class VLMaterialGenerator:
                     resolved_output_dir=resolved_output_dir,
                     original_video_path=video_path,
                 )
+                await _emit_unit_result_streamed_callback(index_value, meta_value, analyzed_result)
                 streamed_result_indexes.add(index_value)
 
             task = asyncio.create_task(_run_and_consume(result_index, task_input, task_meta))
@@ -6937,6 +6974,7 @@ class VLMaterialGenerator:
                 resolved_output_dir=resolved_output_dir,
                 original_video_path=video_path,
             )
+            await _emit_unit_result_streamed_callback(result_index, meta, analyzed_result)
             streamed_result_indexes.add(result_index)
 
         token_stats["stable_action_legacy_units"] += legacy_units
@@ -6954,7 +6992,8 @@ class VLMaterialGenerator:
         self,
         video_path: str,
         semantic_units: List[Dict[str, Any]],
-        output_dir: str = None
+        output_dir: str = None,
+        on_unit_result_streamed: Optional[Callable[[Dict[str, Any]], Awaitable[None] | None]] = None,
     ) -> VLGenerationResult:
         """
         生成素材请求 (并桢寲版鏈?
@@ -7126,6 +7165,7 @@ class VLMaterialGenerator:
                         all_clip_requests=all_clip_requests,
                         all_screenshot_requests=all_screenshot_requests,
                         token_stats=token_stats,
+                        on_unit_result_streamed=on_unit_result_streamed,
                     )
                     aggregated_analysis_results.extend(analysis_results)
                     aggregated_task_metadata.extend(task_metadata)
@@ -7345,6 +7385,16 @@ class VLMaterialGenerator:
                         resolved_output_dir=resolved_output_dir,
                         original_video_path=video_path,
                     )
+                    if on_unit_result_streamed is not None:
+                        callback_result = on_unit_result_streamed(
+                            self._serialize_single_unit_analysis_output(
+                                analysis_result=analysis_result,
+                                meta=meta,
+                                result_index=result_index,
+                            )
+                        )
+                        if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                            await callback_result
                     streamed_result_indexes.add(result_index)
 
                 if vl_unit_tasks:
@@ -7398,6 +7448,16 @@ class VLMaterialGenerator:
                         resolved_output_dir=resolved_output_dir,
                         original_video_path=video_path,
                     )
+                    if on_unit_result_streamed is not None:
+                        callback_result = on_unit_result_streamed(
+                            self._serialize_single_unit_analysis_output(
+                                analysis_result=analysis_result,
+                                meta=meta,
+                                result_index=idx,
+                            )
+                        )
+                        if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                            await callback_result
                     streamed_result_indexes.add(idx)
                     continue
 

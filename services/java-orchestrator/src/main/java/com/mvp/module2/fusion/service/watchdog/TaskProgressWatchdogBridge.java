@@ -25,6 +25,7 @@ public class TaskProgressWatchdogBridge {
     private static final Logger logger = LoggerFactory.getLogger(TaskProgressWatchdogBridge.class);
     private static final String WATCHDOG_SIGNAL_PREFIX = "WATCHDOG_SIGNAL|";
     private static final String HEARTBEAT_FILE = "task_watchdog_heartbeat.json";
+    private static final String STAGE1_HEARTBEAT_FILE = "stage1_watchdog_heartbeat.json";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentHashMap<String, Long> heartbeatSeqCache = new ConcurrentHashMap<>();
@@ -38,7 +39,7 @@ public class TaskProgressWatchdogBridge {
     @Value("${video.task.watchdog.grpc-stream.idle-timeout-seconds:25}")
     private int grpcStreamIdleTimeoutSec;
 
-    @Value("${video.task.watchdog.grpc-stream.call-timeout-seconds:8}")
+    @Value("${video.task.watchdog.grpc-stream.call-timeout-seconds:35}")
     private int grpcStreamCallTimeoutSec;
 
     @Value("${video.task.watchdog.grpc-stream.retry-backoff-ms:600}")
@@ -62,7 +63,7 @@ public class TaskProgressWatchdogBridge {
     }
 
     public MonitorHandle startMonitor(String taskId, String outputDir, String stage, SignalEmitter emitter) {
-        Path heartbeatPath = resolveHeartbeatPath(outputDir);
+        Path heartbeatPath = resolveHeartbeatPath(outputDir, stage);
         AtomicBoolean runningFlag = new AtomicBoolean(true);
         Thread monitorThread = startSignalThread(taskId, heartbeatPath, stage, runningFlag, emitter);
         return new MonitorHandle(heartbeatPath, runningFlag, monitorThread, stage);
@@ -83,11 +84,13 @@ public class TaskProgressWatchdogBridge {
         heartbeatSeqCache.remove(taskId);
     }
 
-    private Path resolveHeartbeatPath(String outputDir) {
+    private Path resolveHeartbeatPath(String outputDir, String stage) {
         if (outputDir == null || outputDir.isBlank()) {
             return null;
         }
-        return Paths.get(outputDir, "intermediates", HEARTBEAT_FILE);
+        String normalizedStage = normalizeStage(stage);
+        String heartbeatFile = "stage1".equals(normalizedStage) ? STAGE1_HEARTBEAT_FILE : HEARTBEAT_FILE;
+        return Paths.get(outputDir, "intermediates", heartbeatFile);
     }
 
     private Thread startSignalThread(

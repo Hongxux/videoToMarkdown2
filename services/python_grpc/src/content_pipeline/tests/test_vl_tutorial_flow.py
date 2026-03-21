@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import time
 import cv2
 import numpy as np
+import pytest
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
@@ -739,7 +740,8 @@ def test_call_vl_api_prefers_dashscope_offline_task_when_enabled(monkeypatch):
         _ = (video_path, extra_prompt, analysis_mode, kwargs)
         return [{"role": "system", "content": "sys"}]
 
-    async def _fake_offline_call(*, messages):
+    async def _fake_offline_call(*, messages, client=None):
+        _ = client
         assert messages == [{"role": "system", "content": "sys"}]
         return (
             '[{"id":1,"knowledge_type":"process","clip_start_sec":0,"clip_end_sec":5}]',
@@ -761,7 +763,7 @@ def test_call_vl_api_prefers_dashscope_offline_task_when_enabled(monkeypatch):
     monkeypatch.setattr(llm_gateway, "vl_chat_completion", _should_not_call_sync)
 
     parsed_results, token_usage, raw_json, interactions = asyncio.run(
-        analyzer._call_vl_api("demo_0.00-10.00.mp4", analysis_mode="default")
+        analyzer._call_vl_api("demo_0.00-10.00.mp4", semantic_unit_id="SU001", analysis_mode="default")
     )
 
     assert len(parsed_results) == 1
@@ -801,7 +803,7 @@ def test_call_vl_api_sync_path_passes_timeout_and_hedge(monkeypatch):
     monkeypatch.setattr(analyzer, "_parse_response_with_payload", _fake_parse)
     monkeypatch.setattr(llm_gateway, "vl_chat_completion", _fake_vl_chat_completion)
 
-    asyncio.run(analyzer._call_vl_api("demo_100.00-220.00.mp4", analysis_mode="default"))
+    asyncio.run(analyzer._call_vl_api("demo_100.00-220.00.mp4", semantic_unit_id="SU100", analysis_mode="default"))
 
     assert float(captured["timeout"]) == 60.0
     assert int(captured["hedge_delay_ms"]) == 60000
@@ -850,7 +852,7 @@ def test_call_vl_api_retries_with_configured_backoff(monkeypatch):
     )
 
     parsed_results, token_usage, raw_json, interactions = asyncio.run(
-        analyzer._call_vl_api("demo_0.00-10.00.mp4", analysis_mode="default")
+        analyzer._call_vl_api("demo_0.00-10.00.mp4", semantic_unit_id="SU001", analysis_mode="default")
     )
 
     assert len(parsed_results) == 1
@@ -859,6 +861,175 @@ def test_call_vl_api_retries_with_configured_backoff(monkeypatch):
     assert interactions[-1]["success"] is True
     assert captured["call_count"] == 5
     assert captured["sleep_values"] == [2.0, 4.0, 8.0, 16.0]
+
+
+def test_call_vl_api_short_video_error_falls_back_to_keyframes(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.vl_offline_task_enabled = False
+    analyzer.max_retries = 0
+
+    async def _fake_build_messages(
+        video_path: str,
+        extra_prompt=None,
+        override_prompt=None,
+        analysis_mode="default",
+        **kwargs,
+    ):
+        _ = (video_path, extra_prompt, override_prompt, analysis_mode)
+        forced_mode = kwargs.get("forced_video_input_mode")
+        if forced_mode == "keyframes":
+            return (
+                [
+                    {"role": "system", "content": "sys"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Frame 1 @ 0.40s"},
+                            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAA"}},
+                        ],
+                    },
+                ],
+                None,
+            )
+        return (
+            [
+                {"role": "system", "content": "sys"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": "https://dashscope.example/tmp/video.mp4"}},
+                        {"type": "text", "text": "video"},
+                    ],
+                },
+            ],
+            None,
+        )
+
+    def _fake_parse(content: str, finish_reason=None, analysis_mode="default"):
+        _ = (content, finish_reason, analysis_mode)
+        return [VLAnalysisResult(id=1, knowledge_type="process", clip_start_sec=0.0, clip_end_sec=0.8)], []
+
+    class _ShortVideoError(RuntimeError):
+        def __init__(self):
+            message = (
+                "BadRequestError: Error code: 400 - {'error': {'message': "
+                "'<400> InternalError.Algo.InvalidParameter: The video modality input does not meet the "
+                "requirements because: The video file is too short.', 'type': 'invalid_request_error', "
+                "'code': 'invalid_parameter_error'}}"
+            )
+            super().__init__(message)
+            self.status_code = 400
+            self.request_id = "req-short-video"
+            self.body = {
+                "message": (
+                    "<400> InternalError.Algo.InvalidParameter: The video modality input does not meet "
+                    "the requirements because: The video file is too short."
+                ),
+                "type": "invalid_request_error",
+                "code": "invalid_parameter_error",
+            }
+
+    call_transports: list[str] = []
+
+    async def _fake_vl_chat_completion(**kwargs):
+        transport = analyzer._summarize_message_transport(kwargs["messages"]).get("transport", "unknown")
+        call_transports.append(str(transport))
+        if transport != "keyframes":
+            raise _ShortVideoError()
+        return llm_gateway.VLChatResult(
+            content='[{"id":1,"knowledge_type":"process","clip_start_sec":0,"clip_end_sec":0.8}]',
+            finish_reason="stop",
+            usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            model="test-model",
+        )
+
+    monkeypatch.setattr(analyzer, "_build_messages", _fake_build_messages)
+    monkeypatch.setattr(analyzer, "_parse_response_with_payload", _fake_parse)
+    monkeypatch.setattr(llm_gateway, "vl_chat_completion", _fake_vl_chat_completion)
+
+    parsed_results, token_usage, raw_json, interactions = asyncio.run(
+        analyzer._call_vl_api("demo_0.00-0.80.mp4", semantic_unit_id="SU001", analysis_mode="default")
+    )
+
+    analysis_interactions = [item for item in interactions if item.get("stage") == "vl_video_analysis"]
+
+    assert len(parsed_results) == 1
+    assert token_usage["total_tokens"] == 3
+    assert raw_json == []
+    assert call_transports == ["temp_url", "keyframes"]
+    assert len(analysis_interactions) == 2
+    assert analysis_interactions[0]["success"] is False
+    assert analysis_interactions[0]["request"]["message_transport"] == "temp_url"
+    assert analysis_interactions[1]["success"] is True
+    assert analysis_interactions[1]["request"]["message_transport"] == "keyframes"
+    assert analysis_interactions[1]["request"]["offline_task_enabled"] is False
+
+
+def test_call_vl_api_stops_retrying_on_non_retryable_400(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.vl_offline_task_enabled = False
+    analyzer.max_retries = 4
+
+    captured: Dict[str, Any] = {"sleep_values": [], "call_count": 0}
+
+    async def _fake_build_messages(
+        video_path: str,
+        extra_prompt=None,
+        override_prompt=None,
+        analysis_mode="default",
+        **kwargs,
+    ):
+        _ = (video_path, extra_prompt, override_prompt, analysis_mode, kwargs)
+        return (
+            [
+                {"role": "system", "content": "sys"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": "https://dashscope.example/tmp/video.mp4"}},
+                        {"type": "text", "text": "video"},
+                    ],
+                },
+            ],
+            None,
+        )
+
+    async def _fake_sleep(seconds: float):
+        captured["sleep_values"].append(float(seconds))
+        return None
+
+    class _InvalidParameterError(RuntimeError):
+        def __init__(self):
+            message = (
+                "BadRequestError: Error code: 400 - {'error': {'message': 'unsupported parameter value', "
+                "'type': 'invalid_request_error', 'code': 'invalid_parameter_error'}}"
+            )
+            super().__init__(message)
+            self.status_code = 400
+            self.request_id = "req-invalid-parameter"
+            self.body = {
+                "message": "unsupported parameter value",
+                "type": "invalid_request_error",
+                "code": "invalid_parameter_error",
+            }
+
+    async def _fake_vl_chat_completion(**kwargs):
+        _ = kwargs
+        captured["call_count"] += 1
+        raise _InvalidParameterError()
+
+    monkeypatch.setattr(analyzer, "_build_messages", _fake_build_messages)
+    monkeypatch.setattr(llm_gateway, "vl_chat_completion", _fake_vl_chat_completion)
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    with pytest.raises(_InvalidParameterError):
+        asyncio.run(analyzer._call_vl_api("demo_0.00-10.00.mp4", semantic_unit_id="SU001", analysis_mode="default"))
+
+    assert captured["call_count"] == 1
+    assert captured["sleep_values"] == []
 
 
 def test_dashscope_offline_task_uses_openai_batch_with_5s_poll(monkeypatch):
@@ -970,7 +1141,8 @@ def test_dashscope_offline_task_uses_openai_batch_with_5s_poll(monkeypatch):
                         {"type": "text", "text": "analyze"},
                     ],
                 }
-            ]
+            ],
+            client=analyzer.client,
         )
     )
 

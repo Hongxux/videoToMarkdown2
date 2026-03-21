@@ -1,9 +1,15 @@
 package com.mvp.module2.fusion.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.service.StorageTaskCacheService;
+import com.mvp.module2.fusion.service.TaskStateRepository;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.sqlite.SQLiteConfig;
+import org.sqlite.SQLiteDataSource;
 
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -23,10 +29,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MobileMarkdownControllerTaskListDeduplicateTest {
 
+    @TempDir
+    Path tempDir;
+
     @Test
     void listTasksShouldReturnEmptyListWhenNoTasksExist() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
-        TaskQueueManager queueManager = new TaskQueueManager();
+        TaskQueueManager queueManager = createQueueManager("empty.db");
         StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
@@ -44,7 +53,7 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
     @Test
     void listTasksShouldDeduplicateRuntimeTaskAndPredictedStorageShadowWhileProcessing() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
-        TaskQueueManager queueManager = new TaskQueueManager();
+        TaskQueueManager queueManager = createQueueManager("dedup-shadow.db");
         StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
@@ -90,7 +99,7 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
     @Test
     void listTasksShouldKeepDifferentBookLeafTasksFromSameBook() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
-        TaskQueueManager queueManager = new TaskQueueManager();
+        TaskQueueManager queueManager = createQueueManager("book-leaf.db");
         StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
@@ -139,6 +148,93 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
         assertEquals(2, tasks.size());
         assertTrue(tasks.stream().anyMatch(item -> item instanceof Map<?, ?> map && firstTask.taskId.equals(map.get("taskId"))));
         assertTrue(tasks.stream().anyMatch(item -> item instanceof Map<?, ?> map && secondTask.taskId.equals(map.get("taskId"))));
+    }
+
+    @Test
+    void listTasksShouldKeepFailedUnreadableTasksWhenOnlyMultiSegmentEnabled() throws Exception {
+        MobileMarkdownController controller = new MobileMarkdownController();
+        TaskQueueManager queueManager = createQueueManager("failed-visible.db");
+        StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
+        injectField(controller, "taskQueueManager", queueManager);
+        injectField(controller, "storageTaskCacheService", storageCache);
+
+        TaskQueueManager.TaskEntry failedTask = queueManager.submitTask(
+                "u_failed_visible",
+                "https://www.bilibili.com/video/BV1FAILED0001?p=4",
+                "./output/failed",
+                TaskQueueManager.Priority.NORMAL,
+                "Failed Task"
+        );
+        failedTask.status = TaskQueueManager.TaskStatus.FAILED;
+        failedTask.statusMessage = "download failed";
+
+        TaskQueueManager.TaskEntry unreadableCompletedTask = queueManager.submitTask(
+                "u_failed_visible",
+                "https://www.bilibili.com/video/BV1DONE00001?p=5",
+                "./output/completed-missing",
+                TaskQueueManager.Priority.NORMAL,
+                "Completed Without Markdown"
+        );
+        unreadableCompletedTask.status = TaskQueueManager.TaskStatus.COMPLETED;
+        unreadableCompletedTask.statusMessage = "done";
+
+        ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, true, "full", null);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+        Object tasksObject = response.getBody().get("tasks");
+        assertTrue(tasksObject instanceof List<?>);
+        List<?> tasks = (List<?>) tasksObject;
+        assertEquals(1, tasks.size());
+        assertTrue(tasks.get(0) instanceof Map<?, ?>);
+        Map<?, ?> item = (Map<?, ?>) tasks.get(0);
+        assertEquals(failedTask.taskId, item.get("taskId"));
+        assertEquals(TaskQueueManager.TaskStatus.FAILED.name(), item.get("status"));
+    }
+
+    private TaskQueueManager createQueueManager(String dbFileName) throws Exception {
+        TaskQueueManager queueManager = new TaskQueueManager();
+        injectField(queueManager, "taskStateRepository", createTaskStateRepository(dbFileName));
+        return queueManager;
+    }
+
+    private TaskStateRepository createTaskStateRepository(String dbFileName) throws Exception {
+        Path dbPath = tempDir.resolve(dbFileName);
+        Files.createDirectories(dbPath.getParent());
+        SQLiteConfig config = new SQLiteConfig();
+        config.setBusyTimeout(5000);
+        config.setJournalMode(SQLiteConfig.JournalMode.WAL);
+        SQLiteDataSource dataSource = new SQLiteDataSource(config);
+        dataSource.setUrl("jdbc:sqlite:" + dbPath.toAbsolutePath().normalize());
+
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS task_runtime_state (
+                    task_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    video_url TEXT NOT NULL,
+                    normalized_video_key TEXT,
+                    title TEXT,
+                    output_dir TEXT,
+                    priority TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    progress REAL NOT NULL DEFAULT 0,
+                    status_message TEXT,
+                    user_message TEXT,
+                    result_path TEXT,
+                    cleanup_source_path TEXT,
+                    error_message TEXT,
+                    duplicate_of_task_id TEXT,
+                    book_options_json TEXT,
+                    probe_payload_json TEXT,
+                    recovery_payload_json TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """);
+        return new TaskStateRepository(jdbcTemplate, new ObjectMapper());
     }
 
     private static String md5Hex(String value) throws Exception {

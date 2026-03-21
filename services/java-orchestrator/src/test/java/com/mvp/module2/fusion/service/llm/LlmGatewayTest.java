@@ -9,8 +9,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
 class LlmGatewayTest {
 
     @Test
@@ -96,6 +96,35 @@ class LlmGatewayTest {
         assertEquals(0, fallbackStreamCalls.get());
     }
 
+    @Test
+    void shouldRetainExceptionTypeWhenMessagesAreEmpty() {
+        LlmClient client = new LlmClient() {
+            @Override
+            public LlmResponse complete(LlmProviderConfig provider, LlmPromptRequest request) throws Exception {
+                throw new IOException("");
+            }
+
+            @Override
+            public LlmResponse stream(LlmProviderConfig provider, LlmPromptRequest request, java.util.function.Consumer<String> onDelta) {
+                throw new UnsupportedOperationException("stream is not used");
+            }
+        };
+
+        LlmGateway gateway = new LlmGateway(client);
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> gateway.execute(
+                        new LlmPromptRequest("system", "user", 0.2, 512, false),
+                        new LlmFallbackStrategy(provider("deepseek"), null),
+                        new LlmRetryPolicy(0, 0L, 0L, 0d, (failure) -> false),
+                        false,
+                        null
+                )
+        );
+
+        assertTrue(error.getMessage().contains("primary=deepseek"));
+        assertTrue(error.getMessage().contains("IOException (<empty>)"));
+    }
     private LlmProviderConfig provider(String providerKey) {
         return new LlmProviderConfig(
                 providerKey,

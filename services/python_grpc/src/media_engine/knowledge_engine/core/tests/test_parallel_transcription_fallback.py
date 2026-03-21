@@ -451,6 +451,88 @@ def test_parallel_and_fallback_partial_failure_raises(monkeypatch):
     ]
 
 
+def test_pick_stable_language_from_probe_samples_locks_only_single_language():
+    samples = [
+        {"window_index": 0, "start": 0.0, "duration": 40.0, "language": "zh", "probability": 0.91, "speech_duration": 32.0},
+        {"window_index": 1, "start": 180.0, "duration": 40.0, "language": "zh", "probability": 0.93, "speech_duration": 34.0},
+        {"window_index": 2, "start": 360.0, "duration": 40.0, "language": "zh", "probability": 0.90, "speech_duration": 31.0},
+    ]
+
+    assert pt._pick_stable_language_from_probe_samples(samples) == "zh"
+
+
+def test_pick_stable_language_from_probe_samples_keeps_auto_for_mixed_zh_en():
+    samples = [
+        {"window_index": 0, "start": 0.0, "duration": 40.0, "language": "en", "probability": 0.91, "speech_duration": 32.0},
+        {"window_index": 1, "start": 180.0, "duration": 40.0, "language": "zh", "probability": 0.93, "speech_duration": 34.0},
+        {"window_index": 2, "start": 360.0, "duration": 40.0, "language": "zh", "probability": 0.90, "speech_duration": 31.0},
+    ]
+
+    assert pt._pick_stable_language_from_probe_samples(samples) is None
+
+
+def test_pick_stable_language_from_probe_samples_keeps_auto_when_single_window_is_not_strong_enough():
+    samples = [
+        {"window_index": 0, "start": 0.0, "duration": 40.0, "language": "zh", "probability": 0.80, "speech_duration": 18.0},
+    ]
+
+    assert pt._pick_stable_language_from_probe_samples(samples) is None
+
+
+def test_detect_language_by_probe_uses_multi_window_vad_vote(monkeypatch):
+    calls = []
+    probe_root = Path("var/tmp_pytest_language_probe_case")
+    probe_root.mkdir(parents=True, exist_ok=True)
+
+    class _InfoStub:
+        def __init__(self, language, probability, speech_duration):
+            self.language = language
+            self.language_probability = probability
+            self.duration_after_vad = speech_duration
+
+    class _WhisperModelStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, audio_path, language=None, beam_size=1, vad_filter=False):
+            calls.append(
+                {
+                    "audio_path": audio_path,
+                    "language": language,
+                    "beam_size": beam_size,
+                    "vad_filter": vad_filter,
+                }
+            )
+            if ".probe_0_" in audio_path:
+                return iter(()), _InfoStub("en", 0.92, 30.0)
+            if ".probe_1_" in audio_path:
+                return iter(()), _InfoStub("zh", 0.94, 32.0)
+            return iter(()), _InfoStub("zh", 0.91, 28.0)
+
+    monkeypatch.setattr(pt, "WhisperModel", _WhisperModelStub)
+    monkeypatch.setattr(
+        pt,
+        "_extract_audio_slice",
+        lambda _source, _start, _duration, output_path: Path(output_path).write_bytes(b"probe"),
+    )
+
+    selected_language, samples = pt._detect_language_by_probe(
+        full_audio_path=str(probe_root / "full_audio.wav"),
+        model_path="mock-model-path",
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=1,
+        probe_sec=120,
+        total_duration_sec=400.0,
+    )
+
+    assert selected_language is None
+    assert len(samples) == 3
+    assert all(call["language"] is None for call in calls)
+    assert all(call["beam_size"] == 1 for call in calls)
+    assert all(call["vad_filter"] is True for call in calls)
+
+
 
 
 def test_build_process_pool_executor_uses_spawn_context(monkeypatch):

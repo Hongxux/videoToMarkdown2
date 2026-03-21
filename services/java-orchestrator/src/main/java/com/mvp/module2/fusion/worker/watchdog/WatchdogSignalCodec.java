@@ -63,10 +63,26 @@ public class WatchdogSignalCodec {
         if ("failed".equals(status)) {
             return stageLabel + " failed";
         }
+        String userFacingCheckpointMessage = resolveCheckpointMessage(signal);
+        if (!userFacingCheckpointMessage.isBlank()) {
+            return userFacingCheckpointMessage;
+        }
         if (!checkpoint.isBlank()) {
             return stageLabel + " running (" + checkpoint + ")";
         }
         return stageLabel + " running";
+    }
+
+    private String resolveCheckpointMessage(TaskWatchdog.Signal signal) {
+        if (signal == null) {
+            return "";
+        }
+        String stage = signal.stage() == null ? "" : signal.stage().trim().toLowerCase(Locale.ROOT);
+        String checkpoint = signal.checkpoint() == null ? "" : signal.checkpoint().trim().toLowerCase(Locale.ROOT);
+        if ("phase2a".equals(stage) && "phase2a_segmentation_running".equals(checkpoint)) {
+            return "已开始 Phase2A 语义分割 LLM 调用，正在等待结果...";
+        }
+        return "";
     }
 
     private String toDisplayStageName(String rawStage) {

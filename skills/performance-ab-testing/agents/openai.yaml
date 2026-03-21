@@ -1,0 +1,4 @@
+interface:
+  display_name: "Performance AB Testing"
+  short_description: "Scientific performance benchmark design"
+  default_prompt: "Use `$performance-ab-testing to design or review a controlled performance benchmark and decide whether the optimization claim is actually valid."

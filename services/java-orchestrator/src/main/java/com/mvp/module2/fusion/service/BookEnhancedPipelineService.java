@@ -3,6 +3,7 @@ package com.mvp.module2.fusion.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient;
+import com.mvp.module2.fusion.service.llm.LlmErrorDescriber;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -343,9 +344,9 @@ public class BookEnhancedPipelineService {
             result.jsonPath = resolveSemanticJsonPath(outputRoot, assembleResult, baseResult);
             return result;
         } catch (Exception error) {
-            logger.warn("[{}] Book enhanced pipeline failed, fallback to base result: {}", taskId, error.getMessage(), error);
+            logger.warn("[{}] Book enhanced pipeline failed, fallback to base result: {}", taskId, LlmErrorDescriber.describe(error), error);
             result.success = false;
-            result.errorMessage = firstNonBlank(error.getMessage(), error.getClass().getSimpleName());
+            result.errorMessage = LlmErrorDescriber.describe(error);
             return result;
         } finally {
             result.stageTimingsMs.put("total", System.currentTimeMillis() - totalStart);

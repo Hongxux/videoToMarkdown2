@@ -68,4 +68,25 @@ class VideoMetaServiceTest {
         assertTrue(emptyNode.isObject());
         assertEquals(0, emptyNode.size());
     }
+
+    @Test
+    void shouldReturnEmptyNodeWhenVideoMetaJsonIsInvalid() throws Exception {
+        Path taskDir = tempDir.resolve("task-invalid-json");
+        Files.createDirectories(taskDir);
+        Files.writeString(
+                taskDir.resolve("video_meta.json"),
+                "{ invalid json",
+                StandardCharsets.UTF_8
+        );
+
+        VideoMetaService service = new VideoMetaService();
+        ObjectNode root = service.readOrCreateNode(taskDir);
+        VideoMetaService.VideoMetaSnapshot snapshot = service.read(taskDir);
+
+        assertTrue(root.isObject());
+        assertEquals(0, root.size());
+        assertNull(snapshot.title);
+        assertNull(snapshot.domain);
+        assertNull(snapshot.mainTopic);
+    }
 }

@@ -1,4 +1,564 @@
-﻿# 架构升级记录
+﻿# Architecture Upgrade Log
+
+## 2026-03-21 Phase2B 视频分类改为整片证据驱动，并修复 category prompt 占位符
+- Date: 2026-03-21
+- Background:
+  - 用户反馈当前视频分类逻辑有问题，结果不准，而且“分类得太早”。
+  - 进一步排查发现，这里的“太早”并不是调用时机真的早于 `Phase2B`，而是分类输入过早收敛：虽然 `result.json` 已落盘，但分类阶段仍只抽取标题、首段正文和组名。
+  - 同时分类 `user` prompt 还存在更底层的问题：模板使用双大括号占位符，而分类链路使用 `render_prompt(...).format(...)` 渲染，导致真实内容没有注入。
+- First principles:
+  - 分类准确率首先取决于“模型实际看到了什么证据”，而不是表面上“这个阶段挂在哪个阶段名后面”。
+  - 如果一个判定任务已经有整片 `knowledge_groups` 可用，却仍然只喂给模型首段快照，那么本质上仍是在做“过早分类”。
+  - Prompt 错误如果发生在变量注入层，就不是单纯文案质量问题，而是输入契约失效。
+- Reusable leverage:
+  - 复用现有 `grpc_service_impl -> classify_phase2b_output(...)` 主链路，不改动 `Phase2B` 末尾接入位置。
+  - 复用现有 `prompt_loader + prompt_registry + llm_gateway + verify prompt` 能力，不重写新的分类调用栈。
+  - 复用现有 `category_classification.json` 审计落盘机制，把新增证据快照一并写入。
+- Decisions:
+  - Decision 1: 修正 `deepseek/category_classifier/user.md` 为 `str.format(...)` 兼容的单大括号占位符，确保分类 prompt 真正拿到标题、正文和分类库实参。
+  - Decision 2: `VideoCategoryInput` 从“标题 + 首段正文 + 组名”扩展为：
+    - `title`
+    - `first_unit_text`
+    - `group_names`
+    - `group_evidence`
+    - `content_evidence_text`
+  - Decision 3: 分类 prompt 与 verify prompt 都改为强调“以多组正文证据为准”，显式压制：
+    - 仅凭标题归类
+    - 仅凭开场首段归类
+    - 仅凭单个 group 或偶发示例归类
+  - Decision 4: 保持现有“活动叶子路由 + 过载叶子整组下沉重分桶”架构不变；这次修复聚焦输入证据与 prompt 契约，不引入新的分类树调度分支。
+  - Decision 5: 不改全局 `prompt_loader` 的双大括号语义；因为仓库内其他 prompt 仍有字面量 `{{img_id}}` 这类输出约束，避免为了修分类把其他链路一并带坏。
+- Verification:
+  - `python -X utf8 -m py_compile services/python_grpc/src/content_pipeline/phase2b/video_category_service.py services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+  - 仓库内执行临时 Python 验证脚本，确认：
+    - 分类 prompt 变量已被真实注入
+    - 多组正文证据进入 `classify_phase2b_output(...)`
+    - `category_classification.json` 成功落盘 `content_evidence_text` / `group_evidence`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Experience:
+  - “分类太早”很多时候不是调度时机问题，而是输入证据只保留了过早的片段快照。
+  - Prompt 回归测试不能只验证模板文件可加载，还要验证“变量真的渲染进去了”。
+
+## 2026-03-21 任务提交入口设计细化 resolver intake 与补全并发模型
+- Date: 2026-03-21
+- Background:
+  - 前一轮已经确定了 resolver 是 Accept Plane 的 durable 受理补全器，也确定了 `RabbitMQ wakeup + DB claim + sweep compensation` 主体架构，但 resolver 的运行时细节仍不够落地。
+  - 特别是 `consumer_count_per_node`、`prefetch`、`resolver_concurrency_per_node`、`lease`、`ack` 与 `DLQ` 的边界，如果不写清楚，后续实现很容易把“MQ intake 能力”和“真实业务补全并发”混成一回事。
+- First principles:
+  - MQ consumer 控制的是 wakeup intake，不是业务补全吞吐。
+  - 真正需要严格限流和保护的是“有多少条 submission 同时进入 MySQL claim / 决议 / 回写”，这应由 resolver 并发控制。
+  - resolver 应被约束为短事务补全器，而不是第二套大任务执行系统。
+- Reusable leverage:
+  - 复用已经确认的 `submission_request` 真相、`RabbitMQ` wakeup、`DB claim` 串行化点和 `sweep compensation` 兜底机制。
+  - 复用前一轮已经定义的 `NORMAL / BUSY / FLOOD_PROTECT`，把 resolver backlog 与 Accept Plane 过载控制联动。
+- Decisions:
+  - Decision 1: 将 `consumer` 与 `resolver 并发` 明确分层：
+    - `consumer_count_per_node` 控制 wakeup intake
+    - `resolver_concurrency_per_node` 控制真实补全并发
+  - Decision 2: 第一版推荐参数：
+    - `consumer_count_per_node = 2 ~ 4`
+    - `prefetch = 10`
+    - `resolver_concurrency_per_node = 4 ~ 8`
+  - Decision 3: `lease_duration = 30s`
+    - 第一版默认不引入复杂续租
+  - Decision 4: claim 采用原子条件更新：
+    - 不使用先 `select` 再 `update`
+  - Decision 5: ack 采用：
+    - claim 失败立即 ack
+    - claim 成功后，处理完成并成功回写状态再 ack
+  - Decision 6: MQ DLQ 只处理传输层坏消息
+    - 正常业务失败仍由 `submission_request` 状态机表达
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 任务提交入口设计补充 submission_request 的 claim 真相模型
+- Date: 2026-03-21
+- Background:
+  - 前一轮已经把 resolver 的 intake、consumer、prefetch、lease 和 retry 讨论到了运行参数层，但“claim 的真相到底落在哪”“submission 的处理中状态如何表达”仍未彻底收敛。
+  - 如果 claim 语义继续模糊，后续实现很容易额外造一张 claim 表，或者把 `CLAIMED / RETRYING` 之类处理中状态膨胀成主状态机，导致恢复和幂等边界变复杂。
+- First principles:
+  - `submission_request` 已经是慢路径受理真相，claim / lease / retry 也应尽量落在同一真相对象上。
+  - 主状态机应尽量稳定，小而清晰；处理中语义更适合由附加字段组合表达。
+  - 真正的串行化点必须是数据库中的原子条件更新，而不是 MQ 投递顺序。
+- Reusable leverage:
+  - 复用已经确定的 `submission_request` durable 真相、`RabbitMQ wakeup`、`DB claim` 串行化点和 `sweep compensation`。
+  - 复用前一轮已经确认的 `accept_status = PENDING / RESOLVED / FAILED_AFTER_ACCEPT`，不再扩张主状态枚举。
+- Decisions:
+  - Decision 1: 第一版不引入独立 `resolver_claim` 表
+    - claim / lease / retry 真相直接放在 `submission_request`
+  - Decision 2: `submission_request` 增加 resolver 相关字段：
+    - `resolver_owner`
+    - `resolver_claimed_at`
+    - `resolver_lease_until`
+    - `resolution_attempt_count`
+    - `next_retry_at`
+    - `failure_class`
+    - `retry_hint`
+    - `last_error_code`
+    - `last_error_message`
+    - `resolved_at`
+  - Decision 3: 不新增 `CLAIMED / RETRYING / LEASED` 主状态
+    - 使用 `accept_status + lease/retry 字段` 组合表达处理中语义
+  - Decision 4: claim 采用单条原子条件更新：
+    - `PENDING + retry_due + lease_expired_or_null`
+  - Decision 5: 明确四条典型路径：
+    - 正常完成
+    - 可恢复失败
+    - 不可恢复失败
+    - 重复消息 / 旧消息跳过
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 任务提交入口设计补充过载模式 bootstrap
+- Date: 2026-03-21
+- Background:
+  - 前几轮已经确定了 `NORMAL / BUSY / FLOOD_PROTECT` 三种模式，但“到底该看哪些指标切模式、第一版阈值如何 bootstrap、如何避免模式抖动”仍未落到可执行层。
+  - 如果没有一套可解释的 bootstrap 规则，模式切换很容易退化成拍脑袋阈值，或者在生产上频繁抖动。
+- First principles:
+  - 模式切换控制的不是“流量大小”，而是“当前还要不要继续允许同步决议”。
+  - 单个指标很难代表系统真实状态，应综合入口资源、MySQL 真相层压力和慢路径 backlog。
+  - 第一版应优先选择“多信号打分 + 滞后切换”，而不是单指标硬切换或完全自适应。
+- Reusable leverage:
+  - 复用前一轮已经确定的三档模式语义，把同步预算和快/慢路径切换挂在模式之下。
+  - 复用 `submission_request` 与 resolver backlog 指标，把慢路径健康度纳入模式切换判断。
+- Decisions:
+  - Decision 1: bootstrap 指标分三组：
+    - Accept Plane 饱和度
+    - MySQL 真相层压力
+    - resolver backlog
+  - Decision 2: 第一版采用：
+    - soft trigger 记 1 分
+    - hard trigger 记 2 分
+    - 按总分切换 `NORMAL / BUSY / FLOOD_PROTECT`
+  - Decision 3: 固定滑动窗口定义为：
+    - 每 `5s` 评估一次最近 `10s` 的指标
+  - Decision 4: 切换采用“升档快、降档慢”的滞后策略：
+    - 进入 `BUSY` 需要连续窗口命中
+    - 进入 `FLOOD_PROTECT` 允许 hard trigger 快速触发
+    - 退出各模式必须有更长的稳定恢复期
+  - Decision 5: 第一版先建议运行 `shadow mode`
+    - 先观测 mode score，不直接自动切换
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 任务提交入口设计补充业务背景并默认采用 Canal
+- Date: 2026-03-21
+- Background:
+  - 前几轮已经把 Accept Plane、resolver、RabbitMQ wakeup 和补偿机制收敛出来，但设计文档还缺少对这套方案所服务的业务背景与业务需求的显式描述。
+  - 同时，resolver 架构里虽然已经引入了“CDC connector”抽象角色，但当前实现层仍需要一个默认落地方案，避免文档长期停留在抽象占位而不形成可执行设计。
+- First principles:
+  - 提交入口设计首先服务于业务问题：重复提交、客户端重启恢复、公私域共享边界、宽洪峰并发下的可退化受理。
+  - 在当前需求聚焦于 outbox 事件搬运和 resolver 唤醒时，CDC 组件应优先满足“窄而稳”，而不是过早引入完整流平台复杂度。
+- Reusable leverage:
+  - 复用已经确定的 `MySQL submission_request` 真相、`RabbitMQ` 唤醒与 `sweep compensation` 兜底机制。
+  - 复用已有 outbox + MQ 唤醒思路，把 CDC 保持在事件搬运角色。
+- Decisions:
+  - Decision 1: 在设计文档中补充业务背景与业务需求，明确这套方案要解决：
+    - 重复提交收敛
+    - 客户端重启恢复
+    - 公私域共享边界
+    - 宽洪峰下的可退化受理
+  - Decision 2: 当前 CDC 连接器默认采用 `Canal`
+    - 作为 outbox / submission 变更到 `RabbitMQ` 的事件搬运实现
+  - Decision 3: 暂不把 `Flink CDC` 定为默认实现
+    - 若未来需求扩展到多表、多 sink、在线转换和统一流平台，再单独评估替换
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 任务提交入口设计补充双快路径与 resolver 唤醒架构
+- Date: 2026-03-21
+- Background:
+  - 前一轮已经收敛了 `submission_request(PENDING)` 作为 `202` 的最小真相，但快路径是否应仅限于“命中已有结果直接复用”，以及 resolver 是否应继续以“纯扫库”方式发现待处理 submission，仍需进一步收敛。
+  - 如果快路径只允许复用，首次冷 key 资源会被过早打入慢路径；如果 resolver 主要依赖扫库，在多 key 宽洪峰下又会让 MySQL 承担过多发现成本。
+- First principles:
+  - 快路径应定义为“在短预算内可同步决议出最终稳定 `AcceptResult` 的路径”，不应只局限于只读复用。
+  - 首次资源判定应优先依赖 `global_job` 的唯一键冲突，而不是额外预判。
+  - `RabbitMQ` 更适合作为 resolver 的唤醒与分发层，而不是替代 `MySQL submission_request` 的真相层。
+- Reusable leverage:
+  - 复用已经确定的 `global_job` 唯一键模型，把“首次资源”判定下沉到数据库唯一约束。
+  - 复用 `submission_request` 作为 pending 真相，把 MQ 仅作为 wakeup 通道。
+- Decisions:
+  - Decision 1: 快路径扩展为两类：
+    - 快速复用路径
+    - 无竞争时的快速乐观创建路径
+  - Decision 2: 首次资源不做额外业务判断：
+    - 通过 `global_job` 的乐观插入和唯一键冲突自然判定
+  - Decision 3: resolver 架构收敛为：
+    - `MySQL truth + CDC connector + RabbitMQ wakeup + DB claim + sweep compensation`
+  - Decision 4: wakeup 事件的处理原则：
+    - 接受重复投递
+    - 不做重型顺序控制
+    - 通过 `submission_request` claim 状态机收口
+  - Decision 5: 补偿语义定义为：
+    - 回捞仍处于 `PENDING` 但未被及时处理的 submission
+    - 不等于回滚或撤销
+  - Decision 6: 过载模式统一命名为：
+    - `NORMAL`
+    - `BUSY`
+    - `FLOOD_PROTECT`
+    - 具体 bootstrap 阈值留待后续单独收敛
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 任务提交入口设计收敛 Accept Plane 的事务边界
+- Date: 2026-03-21
+- Background:
+  - 前一轮已经确定了 `Redis request_idempotency + MySQL submission_request` 的分层模型，但“什么时候才算真正受理”“什么时候可以返回 `202`”“同步 `200` 与异步 `202` 的主路径应该如何兼容”仍需进一步收敛。
+  - 如果不把事务边界定死，后续实现很容易把“受理真相”和“解析结果”混在一个重事务里，导致热点并发下入口变重，或者在还没真正 durable accept 时就过早返回 `202`。
+- First principles:
+  - `202 Accepted` 必须建立在 durable accept 已成立的基础上。
+  - `submission_request(PENDING)` 是 Accept Plane 的最小真相，不需要等 `global_job / binding / attempt` 全部决议完成。
+  - 同步 `200` 只能作为 opportunistic 优化，不能反过来定义主路径。
+- Reusable leverage:
+  - 复用前一轮已经确定的 `submission_request`、`submission_token` 和 `AcceptResult snapshot` 设计。
+  - 复用现有短等待预算思路，把同步成功定义为性能优化，而不是事务边界的一部分。
+- Decisions:
+  - Decision 1: Accept Plane 主路径采用：
+    - 先 durable accept
+    - 再解析 `global_job / binding / attempt`
+  - Decision 2: `submission_request(PENDING)` 的事务提交成功，是允许返回 `202 + submission_token` 的最小前提
+  - Decision 3: 如果 leader 在极短预算内已经拿到完整 `AcceptResult`：
+    - 允许直接返回 `200`
+    - 但这只是 opportunistic 优化，不改变主路径
+  - Decision 4: 明确禁止：
+    - 在 `submission_request` 尚未 durable 落库时返回 `202`
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 任务提交入口设计补充幂等索引与受理状态模型
+- Date: 2026-03-21
+- Background:
+  - 前一轮已经明确了 `Accept Plane`、`submission_token` 和客户端恢复语义，但 `request_idempotency` 与 `submission_request` 的物理落点，以及 `submission_request.accept_status` 如何表达“受理生命周期”和“新建/复用结果”仍需要收敛。
+  - 如果这些语义继续混在同一个状态字段里，后续实现会把生命周期状态和解析结果类型混为一谈。
+- First principles:
+  - `Redis` 适合做短期幂等命中加速，但不适合作为 durable 受理真相。
+  - `MySQL submission_request` 必须承载 `202 Accepted` 的真实依据和重启恢复依据。
+  - 生命周期状态和解析结果类型应拆成两个字段，而不是压成一个枚举。
+- Reusable leverage:
+  - 复用已经确定的 `Idempotency-Key + submission_token` 双标识。
+  - 复用前一轮对 `submission_request` 的 durable accept 定义，把 `resolution_type` 下沉为该对象的解析结果字段。
+- Decisions:
+  - Decision 1: `request_idempotency` 推荐物理落在 `Redis`
+    - 作为短期幂等命中加速索引
+    - 命中后仍允许回查 `MySQL submission_request`
+  - Decision 2: `submission_request` 推荐物理落在 `MySQL`
+    - 作为 durable accept 真相与恢复依据
+  - Decision 3: `submission_request` 使用双字段：
+    - `accept_status = PENDING / RESOLVED / FAILED_AFTER_ACCEPT`
+    - `resolution_type = NEW / REUSED`
+  - Decision 4: `resolution_type=NEW` 的判定明确为：
+    - 只要本次提交最终创建了新的 `attempt`，即使 `global_job` 已存在，也记为 `NEW`
+  - Decision 5: `Redis request_idempotency` 命中但 `MySQL submission_request` 不存在时：
+    - 视为脏幂等索引并清理 Redis 记录
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-20 Disable Phase2B `concrete_ai_vision` And Supplemental Images Output
+- Date: 2026-03-20
+- Background:
+  - Phase2B still had two optional visual side paths: `concrete_ai_vision` for concrete screenshots, and the markdown fallback section `Supplemental images:`.
+  - The goal of this change is to turn both of them off together, so Phase2B no longer adds extra visual latency, extra external calls, or extra image-noise output.
+- Decisions:
+  - Decision 1: Keep `content_pipeline.phase2b.concrete_ai_vision.enabled=false`.
+  - Decision 2: Add `content_pipeline.markdown_enhancer.enable_supplemental_images=false`.
+  - Decision 3: Explicitly pin `MODULE2_PHASE2B_CONCRETE_AI_VISION_ENABLED=false` and `MODULE2_ENABLE_SUPPLEMENTAL_IMAGES=false` in local/runtime env files.
+- Verification:
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "supplemental_images or img_desc_switch_env_overrides_config" -q --basetemp var/tmp_pytest_phase2b_supplemental_images`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Notes:
+  - This only disables the Phase2B concrete AI vision branch and the markdown supplemental-image fallback. It does not disable the global `VL/AnalyzeWithVL` main route or Phase2A semantic segmentation.
+
+## 2026-03-20 任务提交入口设计补充 Accept Plane 与 `submission_token` 语义
+- Date: 2026-03-20
+- Background:
+  - 前一轮已经确定了 `200/202` 提交契约和 `Idempotency-Key + submission_token` 双标识，但 `submission_token` 的真实角色、`Accept Plane` 的边界以及“什么时候才有资格返回 `202 Accepted`”仍需要进一步收敛。
+  - 如果这些语义不明确，后续实现很容易把 `202` 当成“尽量先回一个 accepted”，而不是“已经 durably 受理”的正式承诺。
+- First principles:
+  - `Accept Plane` 的首要职责不是优化，而是先建立 durable accept 的真相。
+  - 只有在最小受理状态已经 durable 落到真源后，系统才可以合法返回 `202 Accepted`。
+  - `submission_token` 是查询句柄和受理回执号，不是业务去重键，也不是最终业务对象 ID。
+- Reusable leverage:
+  - 复用前一轮已经确定的 `200/202` 契约和 `Idempotency-Key + submission_token` 双标识。
+  - 复用 `AcceptResult` 快照思路，把 `submission_token` 挂接到 durable 的受理状态对象上。
+- Decisions:
+  - Decision 1: 明确 `Accept Plane` 只负责：
+    - durable accept
+    - 幂等、防重
+    - 热点塌缩
+    - 向客户端暴露稳定查询句柄
+  - Decision 2: 在逻辑模型中引入 `submission_request` 概念对象：
+    - 用来持久化 `submission_token`
+    - 保存 `accept_status` 和最终 `AcceptResult` 快照
+  - Decision 3: 明确 `submission_token` 的作用：
+    - 标识“一次已经被系统受理的提交”
+    - 作为 `202` 之后的查询句柄
+    - 解耦“幂等语义”和“查询语义”
+  - Decision 4: 明确 `202` 的前提：
+    - 只有在 durable accept 已建立后，才允许返回 `202 + submission_token`
+    - 如果 durable accept 都无法保证，必须返回 `503`
+  - Decision 5: 明确 `WebSocket` 与 `submission_token` 的职责边界：
+    - `WebSocket` 是通知通道
+    - `submission_token` 是受理句柄 / 查询句柄
+    - `ack/replay` 提升通知可靠性，但不替代查询句柄
+  - Decision 6: 明确客户端恢复规则：
+    - `Idempotency-Key` 必须先生成、先持久化、再发送
+    - 同一次提交意图在重试、重启后复用同一个 `Idempotency-Key`
+    - 即使 `submission_token` 丢失，也可通过 `Idempotency-Key` 和 durable `submission_request` 恢复
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-20 任务提交入口设计补充发布资格与降级规则
+- Date: 2026-03-20
+- Background:
+  - 前一轮已经确定了 `global_job / job_attempt / user_job_binding / publish_outbox_event` 的主体模型，但“新 attempt 技术成功后是否立刻切版”仍缺少明确规则。
+  - 如果不把执行成功、provider 切换、降级级别和发布资格拆开，后续实现很容易把“任务跑完”误当成“可以发布”，从而让严重降级结果覆盖旧版本。
+- First principles:
+  - 技术执行成功不等于有资格成为对外版本。
+  - provider 切换本身不等于降级；只有能力档位下降或结构契约受损，才应视为降级。
+  - 发布判定应基于 `execution_status + publish_status + degradation_class`，而不是单一布尔条件。
+- Reusable leverage:
+  - 复用前一轮已经确定的 `job_attempt` 作为独立计算对象，把发布资格、provider 档位和降级语义下沉到 attempt 级别。
+  - 复用 `global_job.current_published_attempt_id` 作为唯一对外真相，只有发布资格满足时才切指针。
+- Decisions:
+  - Decision 1: `execution_status` 与 `publish_status` 分离：
+    - `RUNNING / SUCCEEDED / FAILED / CANCELLED`
+    - `PENDING_REVIEW / PUBLISHABLE / PUBLISHED / BLOCKED_BY_DEGRADATION / SUPERSEDED`
+  - Decision 2: 降级分为：
+    - `NONE`
+    - `PUBLISHABLE_DEGRADED`
+    - `BLOCKING_DEGRADED`
+  - Decision 3: provider 使用静态 `provider_capability_class`
+    - `A / B / C`
+    - 同档位切换不算降级
+    - 跨档位下切才算降级
+  - Decision 4: 已确认的阶段级规则：
+    - `VL_FALLBACK_TO_NON_VL = PUBLISHABLE_DEGRADED`
+    - `PHASE2B_SCHEMA_REPAIR_ONLY = BLOCKING_DEGRADED`
+  - Decision 5: 新 attempt 只有在 `SUCCEEDED` 且未命中 `BLOCKING_DEGRADED` 时，才允许切换 `current_published_attempt_id`
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-19 任务提交入口设计收敛为 A 方案
+- Date: 2026-03-19
+- Background:
+  - 围绕未来 `MySQL + 多实例 + 高并发入口` 的任务提交架构，原始草案已经识别到“数据库写入雪崩”和“重试风暴”问题，但设计里仍混杂了入口唯一性、缓存一致性、跨用户共享、删除清缓存和版本切换等多类语义。
+  - 如果这些语义不先收敛，后续实现很容易把 `Redis` 锁和缓存误用成系统真源，导致正确性和性能耦合在一起。
+- First principles:
+  - 入口唯一性必须由持久化真源兜底，缓存层只能做削峰和加速。
+  - 公域资源共享的是同一个计算身份，不共享用户关系层。
+  - 提示词版本变化不应该生成新的全局 Job，而应该在同一个全局 Job 下产生新的执行 attempt。
+  - 重跑期间对外应继续服务旧发布版本，直到新版本成功发布后再切换。
+- Reusable leverage:
+  - 复用现有控制平面的 `durable accept -> queue -> worker dedupe/probe` 主链，不推翻现有执行状态机。
+  - 复用现有 `normalized_video_key` 的归一化思路，将其演进为未来 `canonical_resource_id`。
+  - 复用现有运行态恢复和实时广播能力，把它们下沉到未来 `job_attempt` 执行层。
+- Decisions:
+  - Decision 1: 选定 **A 方案**：
+    - `MySQL` 做真源
+    - `Redis` 做热路径削峰和热索引
+    - `CDC binlog` 做发布版本切换后的缓存失效/刷新
+  - Decision 2: 明确公域重复提交语义：
+    - 共享的是同一个全局计算 Job
+    - 不共享的是用户关系层
+  - Decision 3: `global_job_key` 收敛为：
+    - `scope + canonical_resource_id`
+    - 不再把提示词版本包放入 `global_job_key`
+  - Decision 4: 提示词版本采用 `prompt_bundle` 建模：
+    - 版本包按 `stage / prompt family` 组成
+    - 任意成员变化都视为新的 `attempt`
+  - Decision 5: 删除 `quality_grade` 作为主流程字段：
+    - 重跑由明确业务原因驱动，仅保留：
+      - `PROMPT_BUNDLE_UPGRADE`
+      - `DEGRADED_RESULT_REPROCESS`
+  - Decision 6: 对外只保留一个当前发布版本：
+    - 重跑期间继续服务旧版本
+    - 新版本发布成功后直接覆盖为唯一对外版本
+  - Decision 7: 本机热点等待策略从 `Thread.sleep(50ms)` 轮询，收敛为：
+    - `ConcurrentHashMap<String, CompletableFuture<AcceptResult>>`
+    - leader 走专用 `@Async` 执行器
+    - follower 走 Servlet 3.0 异步等待
+    - `future.complete / completeExceptionally + finally remove` 做收口
+  - Decision 8: 提交接口采用“短等待预算 + `202 Accepted` 降级”：
+    - `200` 表示在预算内拿到完整 `AcceptResult`
+    - `202` 表示已 durable accept，但完整结果未在预算内返回
+  - Decision 9: 同时引入双标识：
+    - `Idempotency-Key` 负责幂等
+    - `submission_token` 负责查询
+  - Decision 10: 缓存采用两层模型：
+    - `global_job -> current_published_attempt_id`
+    - `attempt_id -> published content`
+  - Decision 11: 发布切换采用“同事务更新发布指针 + 写 `publish_outbox_event` + CDC/outbox 消费”
+  - Decision 12: 删除权限分级：
+    - 普通用户只操作自己的 `hide/unsubscribe`
+    - 全局删除和全局切版属于系统级动作
+  - Decision 13: 入口加入保护性背压：
+    - 热点 key、in-flight key、线程池、MySQL、Redis、CDC lag 超阈值时，主动走 `202/429/503`
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-19 任务提交入口设计补充“全局 Job / 用户关系层分离”语义
+- Date: 2026-03-19
+- Background:
+  - 在讨论未来 `MySQL + 多实例 + 高并发入口` 的任务提交方案时，原设计已经明确“公私域隔离”和“公域 URL 全局去重”，但还没有把“共享的到底是什么”写成不可歧义的系统语义。
+  - 如果只写“公域 URL 可以全局去重”，实现阶段很容易把“全局计算身份”和“用户提交关系”混成一个概念，后续会在取消、删除、重试、通知、配额和审计上产生语义冲突。
+- First principles:
+  - 公域 URL 的重复提交，真正应该收敛的是同一份计算工作，而不是把多个用户的关系层硬合并。
+  - 计算身份和用户身份必须拆开建模，否则高并发入口虽然能去重，但权限边界会失真。
+- Reusable leverage:
+  - 复用现有控制平面的 `durable accept -> queue -> worker dedupe/probe` 主链，不推翻既有状态机。
+  - 复用现有 `normalized_video_key` 的归一化思路，把它演进为未来全局 Job 选择的关键输入，而不是直接把它等同于用户任务主键。
+- Decisions:
+  - Decision 1: 在 [`任务提交入口设计.md`](D:/videoToMarkdownTest2/docs/architecture/任务提交入口设计.md) 中显式写入：
+    - 公域 URL 重复提交时，共享的是同一个全局计算 Job，不共享的是用户关系层。
+  - Decision 2: 后续实现设计中，入口层需要把“全局 Job 选择/创建”与“用户提交绑定/订阅关系”分层建模。
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-19 WebSocket 心跳协调器从 `TaskWebSocketHandler` 中拆出
+- Date: 2026-03-19
+- Background:
+  - 前一轮已经把 WebSocket 心跳升级为“时间轮单任务 + 浏览器 `suspended` 过滤”，但调度器、会话运行态、协议解析、广播过滤仍然混在 `TaskWebSocketHandler` 一个类里。
+  - 这会让后续任何一次订阅协议或广播语义修改，都有机会误伤心跳调度路径，结构耦合偏高。
+- First principles:
+  - 协议入口负责“收消息、路由动作、发消息”；心跳协调器负责“记活跃态、调度探活、回收连接”。这两个职责应该物理拆开，否则代码会继续向上积累结构债。
+  - 心跳策略如果已经形成稳定边界，就应该沉淀成独立协调器，而不是继续作为 handler 的附属细节存在。
+- Reusable leverage:
+  - 复用现有 `SessionRuntimeState`、时间轮参数、`suspended` 语义与 transport/application heartbeat 判定，不改任何阈值和外部协议。
+  - 复用既有 `TaskWebSocketHandlerRecoveryStatusTest` 与 `TaskWebSocketHandlerHeartbeatTest`，保证这次拆分是纯结构收口，不引入行为偏差。
+- Decisions:
+  - Decision 1: 新增 `TaskWebSocketHeartbeatCoordinator`，统一托管：
+    - 会话运行态
+    - 时间轮调度
+    - transport heartbeat
+    - application heartbeat
+    - `suspended` 过滤判定
+  - Decision 2: `TaskWebSocketHandler` 只保留：
+    - WebSocket 文本/二进制协议入口
+    - 订阅表管理
+    - ack/replay
+    - 广播组装与消息发送
+  - Decision 3: handler 通过协调器获取 managed session、运行态和关闭原因日志，不再直接持有时间轮与心跳状态表。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 手动定向回归：
+    - `PASS suspendedBrowserSessionShouldSkipProcessingUpdateButKeepTerminalUpdate`
+    - `PASS browserTransportHeartbeatTimeoutShouldCloseSession`
+    - `PASS nonBrowserApplicationHeartbeatTimeoutShouldCloseSession`
+    - `PASS browserPingShouldReplyWithPongAndClearSuspendedFlag`
+## 2026-03-19 WebSocket 心跳改为时间轮单任务，浏览器应用层假活跃进入 suspended
+- Date: 2026-03-19
+- Background:
+  - 旧版 `TaskWebSocketHandler` 采用两套 `@Scheduled` 全量扫描：
+    - `15s` 扫全量浏览器连接发送 protocol ping
+    - `5s` 扫全量连接做超时回收
+  - 这会在高并发下形成明显批量尖峰，而且浏览器主任务流虽然已经有应用层 `ping`，服务端却没有把它用于“页面 JS 已挂起但 TCP 仍存活”的假活跃识别。
+  - 结果是：
+    - 心跳检查量被双重扫描放大
+    - 浏览器后台页仍持续接收 processing 广播
+    - `{"action":"ping"}` 每次都走 Jackson，`pong` 每次都走对象序列化
+- First principles:
+  - 连接层存活探测和业务层可用性探测是两种不同问题，必须分层处理，不能只靠 protocol ping 兜底。
+  - 心跳调度的成本应按“连接自身”摊平，而不是让所有连接在同一批次被扫描。
+  - 心跳热路径不应该为 `ping/pong` 这种高频小报文反复触发 JSON 对象构造与回收。
+- Reusable leverage:
+  - 复用现有 `TaskWebSocketHandler.sessionStates`、`ConcurrentWebSocketSessionDecorator`、`index.html` 的应用层 `ping`、`TaskTerminalEventService` 的 ack/replay，不新建第二条 WebSocket 入口。
+  - 复用现有浏览器 `clientType=browser` 识别语义，让主任务流和 phase2b 浏览器流走同一套 transport heartbeat。
+  - 复用现有 `broadcastTaskUpdate(...)` 收口点，在发送前增加 `suspended` 过滤，而不是重写任务广播链。
+- Decisions:
+  - Decision 1: `TaskWebSocketHandler` 改为单个 `HashedWheelTimer` + 每连接唯一心跳任务，参数固定为：
+    - `tickDuration = 100ms`
+    - `ticksPerWheel = 512`
+    - 心跳检查间隔 `20s`
+  - Decision 2: 所有 `clientType=browser` 的 `/ws/tasks` 连接统一接入 protocol heartbeat；transport timeout 调整为 `60s`。
+  - Decision 3: `streamKey=web-task-updates` 的浏览器主任务流新增服务端应用层活跃判定：
+    - `60s` 没有应用层文本活动时，把会话标记为 `suspended`
+    - `suspended` 只拦截非终态 `taskUpdate`
+    - 终态事件、ack/replay 与 transport heartbeat 保持不变
+  - Decision 4: 非浏览器可靠客户端继续采用“应用层超时即关闭”，阈值保持 `35s`，不强行改成浏览器语义。
+  - Decision 5: `handleTextMessage(...)` 对 `{"action":"ping"}` 增加字符串快路径；`pong` 改为直接字符串拼装，避免 Jackson 热路径。
+  - Decision 6: `mobile-anchor-panel.js` 生成 phase2b WebSocket URL 时显式补 `clientType=browser`，让 phase2b 浏览器流也接入 transport heartbeat。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 手动定向回归：
+    - 单独编译并反射执行 `TaskWebSocketHandlerHeartbeatTest`
+    - 结果：`PASS browserTransportHeartbeatTimeoutShouldCloseSession`
+    - 结果：`PASS browserPingShouldReplyWithPongAndClearSuspendedFlag`
+    - 结果：`PASS nonBrowserApplicationHeartbeatTimeoutShouldCloseSession`
+    - 结果：`PASS suspendedBrowserSessionShouldSkipProcessingUpdateButKeepTerminalUpdate`
+  - 说明：
+    - Maven `test` 阶段当前会被仓库内其他既有 test-compile 残留噪音拦住，和本次改动无关；因此本次心跳回归采用了隔离执行。
+  - 压测：
+    - 脚本：`tools/benchmarks/TaskWebSocketHeartbeatBenchmark.java`
+    - 产物：`var/artifacts/benchmarks/websocket_heartbeat_20260319_123404`
+- Performance:
+  - 压测场景：
+    - 总连接 `20,000`
+    - 前台活跃连接 `12,000`
+    - 浏览器后台连接 `8,000`
+    - 观察窗口 `300s`
+  - 对比结果：
+    - `ping` 解码吞吐：`999,898.01 ops/s -> 3,518,902.67 ops/s`，提升 `251.93%`
+    - `pong` 编码吞吐：`1,435,601.78 ops/s -> 6,410,626.25 ops/s`，提升 `346.55%`
+    - 心跳检查次数：`1,600,000 -> 300,000`，下降 `81.25%`
+    - 单批次峰值检查量：`40,000 -> 131`，下降 `99.67%`
+    - `processing` fanout 尝试：`6,000,000 -> 4,080,000`，下降 `32.0%`
+    - 因浏览器后台假活跃被节省的无效 processing 推送：`1,920,000`
+## 2026-03-19 `GenerateMaterialRequests` 补齐 `output_dir` 协议并与阶段入口恢复链统一
+- Date: 2026-03-19
+- Background:
+  - 前一轮已经把 `ProcessStage1 / AnalyzeSemanticUnits / AssembleRichText / AnalyzeWithVL` 收口到“优先使用 `output_dir`，再从任务目录恢复本地 `video_path`”。
+  - 但 `GenerateMaterialRequests` 仍停留在旧协议：
+    - proto 没有 `output_dir`
+    - Java 只把 `video_path` 传给 Python
+    - Python 继续从 `video_path` 反推任务目录
+  - 这会让恢复链在 Phase2A 素材请求生成阶段再次断裂，出现“前面阶段已恢复，后面又沿旧路径回写”的结构性偏航。
+- First principles:
+  - 恢复场景里真正稳定的锚点是任务目录，而不是 URL、宿主机绝对路径或可漂移的 `video_path`。
+  - 只要某个阶段会读写 `video_meta.json / runtime_state.db / intermediates / semantic_units_phase2a.json`，它就必须拿到 `output_dir`，否则协议层已经失真。
+- Reusable leverage:
+  - 复用现有 `_resolve_stage_entry_paths(...)`，不再为 `GenerateMaterialRequests` 单独造一套恢复规则。
+  - 复用现有 Java `outputDir` 任务上下文和 Python `Stage1 runtime projector / RuntimeRecoveryStore / video_meta.json`，不新增第二套阶段目录发现协议。
+- Decisions:
+  - Decision 1: `GenerateMaterialRequestsRequest` 正式新增 `output_dir = 4`，把任务目录提升为协议层显式字段。
+  - Decision 2: Java `PythonGrpcClient.generateMaterialRequests(...)` 与 `VideoProcessingOrchestrator.runLegacyAnalysis(...)` 一律显式传递 `outputDir`；旧重载保留为空目录兼容口。
+  - Decision 3: Python `GenerateMaterialRequests(...)` 改为复用 `_resolve_stage_entry_paths(...)`，优先使用：
+    - `request.output_dir`
+    - `output_dir/video_meta.json`
+    - 仅最后才回退到原始 `request.video_path`
+  - Decision 4: Phase2A `semantic_units` 的回写与 runtime/sqlite 读取不再重新按 `video_path` 推导目录，而是固定锚定解析后的 `output_dir`。
+  - Decision 5: `GenerateMaterialRequests` 也纳入阶段入口路径来源日志，后续排障时可以直接看出用了哪一层真源。
+- Verification:
+  - `powershell -ExecutionPolicy Bypass -File scripts/build/generate_grpc.ps1`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py`
+  - `pytest services/python_grpc/src/server/tests/test_stage_entry_path_resolution.py -q --basetemp var/tmp_pytest_stage_entry_path_resolution`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-19 重试入口新增缓存 probe 短路，人工修复后直接复用已持久化的探测结果
+- Date: 2026-03-19
+- Background:
+  - 用户在人工修复后重试 Bilibili 任务，日志仍会再次出现 `GetVideoInfo`。
+  - 现有系统虽然已经把 `probePayload` 落到 `task_runtime_state.probe_payload_json`，也已经能基于 runtime stage snapshot 决定 `resumeFromStage`，但两条链路彼此割裂。
+- First principles:
+  - 人工修复后的重试入口，应该先判断“是否已有稳定探测事实”，再决定是否需要重新探测。
+  - 阶段恢复和元信息探测属于两种不同职责：
+    - 阶段恢复负责决定从哪个业务阶段继续
+    - probe 负责补齐标题、平台、canonical id、合集信息等元数据
+  - 如果 probe 已经有持久化快照，就不应该在每次重试时再次把远端探测塞回关键路径或旁路线程。
+- Reusable leverage:
+  - 复用现有 `TaskQueueManager.probePayload` 与 SQLite `probe_payload_json`，不新建第二套 probe 缓存表。
+  - 复用现有 `TaskProbeService.ProbeOutcome`、`applyForegroundProbeOutcome(...)` 和 `markProbeFinished(...)`，不改状态机协议。
+  - 复用既有 runtime recovery 链路，让 `resumeFromStage` 继续只负责阶段恢复。
+- Decisions:
+  - Decision 1: `TaskProcessingWorker.prepareProbeStage(...)` 在前台 probe / 后台 probe 之前，先尝试从任务已有 `probePayload` 构造本地 `ProbeOutcome`。
+  - Decision 2: 命中缓存 probe 后，直接复用 payload 与标题，执行一次本地 `PROBING -> PROCESSING`，不再触发新的 `GetVideoInfo`。
+  - Decision 3: 保持现有 `applyForegroundProbeOutcome(...)` 作为唯一收口点，确保标题同步、payload merge、WebSocket 广播和状态迁移仍走同一条调用链。
+  - Decision 4: 当任务没有缓存 probe 时，继续沿用现有策略：
+    - HTTP 视频走后台异步 probe
+    - 其他输入走前台 probe
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
 
 ## 2026-03-18 Phase2A `concrete/process` 固定子阶段与可复用结果投影设计定稿
 - Date: 2026-03-18
@@ -55,6 +615,63 @@
   - Decision 3: 存储态扫描结果继续允许 `UNKNOWN`，但前端必须独立显示为“异常残留/未完成产物”，不能再回退为 `queued`。
   - Decision 4: 存储缓存层从 `task_metrics_latest.json` 透传原始 `error_message`，让失败历史任务也能给出真实根因。
 - Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 Phase2B concrete/process 媒体保真链路补强（result.json 预落盘 + media-preserved 强制保 embed）
+- Date:
+  - 2026-03-21
+- Change:
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `assemble_only()` 在进入 `MarkdownEnhancer` 前先写出 `result.json`，让增强阶段读取到当前任务的最新 `document_payload`。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `concrete/process` 的 `media_preserved` 分支开始显式传入真实图片候选上下文，而不是硬编码 `(none)`。
+    - 新增 `_restore_media_preserved_base_text(...)`，若 LLM 结构化结果吞掉已有 Obsidian embed，则回退到确定性 media base text。
+    - 增强结束后再显式回写 `result.json`，避免后续链路继续消费旧 payload。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 增加“LLM 吞图时必须回退到 deterministic base”的回归。
+  - `services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py`
+    - 增加“`assemble_only()` 必须提前落盘 `result.json`”的回归。
+- Why:
+  - 这次修复的第一性原理不是“再让模型学会插图”，而是把 `concrete/process` 收敛为单向保真链路：
+    - 上游 VL 负责生成 canonical `main_content + [KEYFRAME_N]`
+    - 中游确定性回填负责把占位符替换成真实 embed
+    - 下游结构化最多只能整理文本，不能删除已有媒体锚点
+  - 现有架构的杠杆已经足够：
+    - `result.json` 是 Phase2B 增强阶段的输入真源
+    - `MarkdownEnhancer` 已有媒体占位符替换与 preserve prompt 能力
+    - 缺的只是“先落盘 + 后校验”的最后两道闸门
+- Trade-off:
+  - 代价是 `result.json` 在 Phase2B 期间会多一次显式落盘，并在 `media_preserved` 分支多一次 embed 完整性比较。
+  - 收益是 concrete/process 不再因为 LLM 局部改写而丢失媒体锚点，最终 Markdown 的可用性优先级高于文案重排。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "concrete_media_preserved_falls_back_to_deterministic_base_when_llm_drops_embeds" -q --basetemp var/tmp_pytest_phase2b_media_preserved`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py -k "assemble_only_exposes_phase2b_contract" -q --basetemp var/tmp_pytest_phase2b_result_contract`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 Phase2B `imgneeded` 占位符兼容层补强（花括号变体 + 顺序回填兜底）
+- Date:
+  - 2026-03-21
+- Change:
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 扩展 `imgneeded` 占位符匹配，兼容：
+      - `【imgneeded_SUxxx_img_01】`
+      - `【imgneeded_{SUxxx_img_01}】`
+      - `【imgneeded_{{img_id}}】`
+    - 对无法解析 `img_id` 但单元素材仍完整的场景，新增顺序回填兜底，把占位符直接替换为真实 Obsidian embed。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 补两条回归：花括号 `img_id` 兼容、模板字面量顺序兜底。
+- Why:
+  - 旧协议虽然已经统一为 `imgneeded`，但实际模型输出仍会出现轻微格式漂移。
+  - 如果链路只接受“绝对规范格式”，就会出现“素材明明存在，用户却看到占位符泄漏”的伪失败。
+  - 复用现有 `screenshot_items` 顺序信息即可做最后一道兼容，不需要额外引入新的协议层或二次 LLM 调用。
+- Trade-off:
+  - 代价是占位符替换逻辑更宽松，需要在“兼容变体”和“避免误替换”之间做平衡。
+  - 收益是对模型轻微偏格式输出更稳，能把问题收敛在本地确定性层解决，而不是把中间协议暴露给用户。
+- Verification:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "braced_id_is_replaced or template_placeholder_uses_sequential_fallback" -q --basetemp var/tmp_pytest_phase2b_imgneeded_variants`
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
 
@@ -14751,59 +15368,873 @@ body` and task metadata is still present.
     - `tests/test_runtime_recovery_resume_index.py`
     - `tests/test_grpc_runtime_stage_state.py`
 
-## 2026-03-21 Phase2B concrete/process 媒体保真链路补强（result.json 预落盘 + media-preserved 强制保 embed）
-- Date:
-  - 2026-03-21
-- Change:
-  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
-    - `assemble_only()` 在进入 `MarkdownEnhancer` 前先写出 `result.json`，让增强阶段读取到当前任务的最新 `document_payload`。
-  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
-    - `concrete/process` 的 `media_preserved` 分支开始显式传入真实图片候选上下文，而不是硬编码 `(none)`。
-    - 新增 `_restore_media_preserved_base_text(...)`，若 LLM 结构化结果吞掉已有 Obsidian embed，则回退到确定性 media base text。
-    - 增强结束后再显式回写 `result.json`，避免后续链路继续消费旧 payload。
-  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
-    - 增加“LLM 吞图时必须回退到 deterministic base”的回归。
-  - `services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py`
-    - 增加“`assemble_only()` 必须提前落盘 `result.json`”的回归。
-- Why:
-  - 这次修复的第一性原理不是“再让模型学会插图”，而是把 `concrete/process` 收敛为单向保真链路：
-    - 上游 VL 负责生成 canonical `main_content + [KEYFRAME_N]`
-    - 中游确定性回填负责把占位符替换成真实 embed
-    - 下游结构化最多只能整理文本，不能删除已有媒体锚点
-  - 现有架构的杠杆已经足够：
-    - `result.json` 是 Phase2B 增强阶段的输入真源
-    - `MarkdownEnhancer` 已有媒体占位符替换与 preserve prompt 能力
-    - 缺的只是“先落盘 + 后校验”的最后两道闸门
-- Trade-off:
-  - 代价是 `result.json` 在 Phase2B 期间会多一次显式落盘，并在 `media_preserved` 分支多一次 embed 完整性比较。
-  - 收益是 concrete/process 不再因为 LLM 局部改写而丢失媒体锚点，最终 Markdown 的可用性优先级高于文案重排。
+## 2026-03-19 `phase2` 恢复判定下沉到 Python，按运行时仓库自动选择 `stage1 / phase2a / asset_extract_java / phase2b`
+- Background:
+  - 版本迭代后，老任务的 `ResumeDecision` 里可能只剩阶段摘要，没有可直接补齐 `stage1Result` 的内存对象；Java 在进入 `phase2a resume` 前先校验 `ioResult.stage1Result != null`，导致任务还没来得及触发 Python 侧 runtime projector，就被提前打断。
+  - 同一份任务的可复用事实实际上已经进入 `runtime_state.db` 与 Python runtime cache，但恢复起点决策仍然由 Java 基于摘要字段做静态判断。
+- First principles:
+  - 恢复判定应该由“最了解产物语义的一侧”负责；`stage1 / phase2a` 的真实可复用状态、向后兼容与降级起点，本质上属于 Python 运行时仓库的职责，不应该让 Java 只凭摘要对象猜测。
+  - Java 适合保留任务生命周期、队列和 watchdog 控制；阶段内恢复可用性与回退策略则应通过显式 RPC 交给 Python。
+- Reusable leverage:
+  - 复用 Python 已有的 `Stage1ProjectionRepository`、`_get_stage1_runtime_outputs(...)`、`_get_phase2a_runtime_semantic_units(...)`，不重复在 Java 侧实现一份 SQLite -> 恢复上下文的拼装逻辑。
+  - 复用现有 `runtime_state.db` 中的 `llm_call/chunk/scope` 节点，直接统计可复用节点数量并回传给 Java 日志。
+- Changes:
+  - `contracts/proto/video_processing.proto`
+    - 新增 `RecoverRuntimeContext` RPC，与 `RecoverRuntimeContextRequest/Response` 契约，用于返回 `resolved_start_stage`、`stage1_ready`、`phase2a_ready`、复用计数与决策原因。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `RecoverRuntimeContext(...)` 实现。
+    - Python 侧先读取 Stage1 runtime cache / SQLite 投影，再读取 Phase2A semantic_units runtime cache / projection，根据 `requested_start_stage` 自动裁决是否可直接跳到 `asset_extract_java`、继续 `phase2a`，或回退到 `stage1`。
+    - 新增 `llm_call/chunk` 可复用节点计数，作为恢复日志与后续观测依据。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 新增 `recoverRuntimeContext(...)` 客户端调用与结果 DTO。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 新增 `reconcileRecoveredPhase2Context(...)`，在 `processVideoPhase2Resume(...)` 起始处先调用 Python 恢复判定。
+    - 当 Python 返回 `stage1_ready=true` 但 Java 当前没有 `stage1Result` 时，自动补一个可恢复占位 `Stage1Result`，避免再因空对象提前失败。
+    - 当 Python 判定 `phase2a` 已可复用时，可直接把恢复起点前推到 `asset_extract_java`；当 `stage1`/`phase2a` 都不足时，自动降级回 `stage1` 重建。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorPhase2RecoveryTest.java`
+    - 新增恢复判定回归，锁定“Python 返回 `stage1_ready` 时 Java 必须补齐占位 `stage1Result`”与“Python 返回 `phase2a_ready` 时 Java 必须接受更高恢复起点”。
+  - `services/python_grpc/src/server/tests/test_recover_runtime_context.py`
+    - 新增映射回归，锁定 `phase2a -> stage1`、`phase2a -> asset_extract_java`、`phase2b -> phase2b` 三种恢复裁决分支。
 - Verification:
-  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
-  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "concrete_media_preserved_falls_back_to_deterministic_base_when_llm_drops_embeds" -q --basetemp var/tmp_pytest_phase2b_media_preserved`
-  - `pytest services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py -k "assemble_only_exposes_phase2b_contract" -q --basetemp var/tmp_pytest_phase2b_result_contract`
+  - `python -m grpc_tools.protoc -I contracts/proto --python_out=contracts/gen/python --grpc_python_out=contracts/gen/python contracts/proto/video_processing.proto`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_recover_runtime_context.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=VideoProcessingOrchestratorPhase2RecoveryTest,TaskProcessingWorkerRecoveryStatusTest" test -q`
+- Performance comparison:
+  - Test method:
+    - 以 `phase2 resume` 恢复判定为核心，比较“Java 仅凭摘要对象硬判”与“Python 基于 runtime_state.db / runtime cache 决策”的恢复路径。
+  - Comparison data:
+    - 变更前：`phase2a resume` 在 `stage1Result == null` 时直接抛 `Stage1 result is invalid for phase2a resume`，无法进入 Python 侧 runtime projector，也无法利用已落入 SQLite 的 `llm_call/chunk` 事实。
+    - 变更后：恢复入口先调用 `RecoverRuntimeContext`；若 `stage1` 可复用则直接继续 `phase2a`，若 `phase2a` 也已可复用则可直接跳到 `asset_extract_java`，只有仓库确实不足时才回退到 `stage1` 重建。
+    - 结果上，恢复路径从“固定失败”改成“优先复用、必要时安全降级”，避免了无意义的整段重跑与重复 LLM / chunk 计算。
+  - Data source:
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorPhase2RecoveryTest.java`
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerRecoveryStatusTest.java`
+    - `services/python_grpc/src/server/tests/test_recover_runtime_context.py`
+## 2026-03-19 `RecoverRuntimeContext` 范围扩展到 `transcribe / stage1 / asset_extract_java`
+- Additional scope:
+  - 在上一条 `phase2` 恢复收口基础上，本轮继续把 `transcribe` 与 `stage1` 前置校验中的 `video_path / subtitle_path` 恢复，也统一交给 Python 端裁决与补齐。
+  - Python 现在按整条 `download -> transcribe -> stage1 -> phase2a -> asset_extract_java -> phase2b` 图的最长已完成前缀，统一返回“下一阶段从哪开始”，而不是只对 `phase2a` 做特判。
+- Changes:
+  - `contracts/proto/video_processing.proto`
+    - `RecoverRuntimeContextRequest/Response` 扩展 `requested_video_path`、`requested_subtitle_path`、`download_ready`、`video_path`、`transcribe_ready`、`subtitle_path`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `RecoverRuntimeContext(...)` 现在先做 `stage entry path` 解析，再尝试从 transcribe runtime repository materialize `subtitles.txt`。
+    - 新增 `asset_extract_java` 阶段快照判定；当 checkpoint 已到 `outputs_ready` 时，恢复起点可继续前推到 `phase2b`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 新增通用 `reconcileRecoveredRuntimeContext(...)`，统一补齐 `videoPath/subtitlePath/stage1Result/phase2aSemanticUnitsPath`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 在 `transcribe/stage1` 恢复分支进入 Java 非空校验前，先调用 Python 端恢复裁决，避免再次出现“Python 明明能还原路径，Java 却先报参数缺失”的问题。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_recover_runtime_context.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=VideoProcessingOrchestratorPhase2RecoveryTest,TaskProcessingWorkerRecoveryStatusTest" surefire:test -q`
+
+## 2026-03-19 任务级 LLM provider 路由固定：DeepSeek 首次网络失败后同任务直接切到 Qwen
+- Background:
+  - 线上日志里，DeepSeek 一旦出现 `Connection error.`，当前请求虽然已经具备 `deepseek -> qwen` 的降级能力，但同一任务后续新的 LLM 请求仍会再次先触发一次 DeepSeek。
+  - 由于 `LLMClient` 在网络错误后会主动关闭连接池，而下一次请求又会重建连接池，这种“同任务内重复试探 DeepSeek”的行为会把 `closed/rebuilt` 日志与时延成本不断放大。
+- First principles:
+  - 这个问题的本质不是“某次请求怎么 fallback”，而是“一个任务里 provider 决策什么时候应该稳定下来”。
+  - 既然同一任务里的多个 LLM 调用共享同一个上游可用性判断，那么 provider 路由状态就应该放在任务级上下文里，而不是放在进程级布尔开关里。
+  - 进程级开关适合做粗粒度兜底；任务级上下文才适合表达“本任务已经判定 DeepSeek 不可靠，后续不要再碰它”。
+- Reusable leverage:
+  - 复用现有 `RuntimeLLMContext` 作为任务级 `ContextVar` 容器，不再另造一套新的任务状态中心。
+  - 复用 `deepseek_complete_text/json` 已有的 Qwen alternate-provider 逻辑，只把“何时直接走 Qwen”的决策前移到任务级路由读取。
+  - 复用现有 fallback 审计与 runtime persistence，把“首次失败的前序记录”挂到路由快照里，避免新增一条独立的状态写盘链。
+- Changes:
+  - `services/python_grpc/src/common/utils/runtime_llm_context.py`
+    - 新增任务级 provider 路由状态、原子读取与固定方法，用于表达“当前任务的 `deepseek_primary` 是否已经切到 `qwen`”。
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 新增 `deepseek_primary` 任务级路由名。
+    - `deepseek_complete_text/json` 首次 DeepSeek 失败后，会把当前任务路由固定到 `qwen`，并保留失败历史。
+    - 同任务后续调用若发现路由已固定到 `qwen`，则直接走 Qwen，不再先触发 DeepSeek。
+    - 现有 `_DEEPSEEK_FAST_FALLBACK_OPEN` 继续保留，只作为“没有任务上下文时”的兼容路径。
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - 新增 `text/json` 两条回归，锁定“首次失败后，同任务第二次请求直接走 Qwen”。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_llm_context.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-03-19 `RecoverRuntimeContext` 补齐 `download` 元数据与 `stage1` 物化产物
+- Background:
+  - 上一轮已经把恢复起点裁决下沉到 Python，但 Java 侧仍然只拿到了“是否可复用”的摘要，没有拿到 `download` 元数据和 `stage1` 的 `step2/step6` 物化路径。
+  - 这会带来两个连锁问题：
+    - `ioResult.videoPath/downloadResult.videoPath/cleanupSourcePath` 若先被 URL 占位，Java 的 `firstNonBlank(...)` 会把 Python 返回的本地视频路径挡住。
+    - `asset_extract_java` 恢复若走到 legacy analysis 回退流，仍可能缺 `step2_json_path/step6_json_path`，导致仓库里明明已有 Stage1 投影，却无法稳定复用。
+- First principles:
+  - 恢复系统不能只返回“阶段是否 ready”，还必须返回“执行下一阶段所需的最小充分上下文”。
+  - 如果 SQLite/runtime store 里已经有 `download` 和 `stage1` 的事实，Python 就应直接把这些事实组装成可执行输入，而不是让 Java 再猜一遍。
+- Reusable leverage:
+  - 复用 `RuntimeRecoveryStore.load_stage_snapshot(stage="download")` 恢复 `duration_sec/video_title/resolved_url/source_platform/canonical_id/content_type`。
+  - 复用 `Stage1ProjectionRepository` + `stage1_runtime_repository` 里的运行态视图，不重跑 Stage1，只把 `step2/step6/sentence_timestamps` 物化到 canonical 路径。
+  - 复用现有 `stage1_text` 资源元数据写入逻辑，保证恢复后生成的物化文件也能继续参与下游复用校验。
+- Changes:
+  - `contracts/proto/video_processing.proto`
+    - `RecoverRuntimeContextResponse` 新增：
+      - `video_duration_sec`
+      - `video_title`
+      - `resolved_url`
+      - `source_platform`
+      - `canonical_id`
+      - `content_type`
+      - `step2_json_path`
+      - `step6_json_path`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_resolve_download_recovery_metadata(...)`，优先从 `download` stage snapshot 恢复下载元数据，缺失时回退到 `video_meta.json`。
+    - 新增 `_materialize_stage1_recovery_artifacts(...)`，从 Stage1 runtime projection 物化 `intermediates/step2_correction_output.json`、`intermediates/step6_merge_cross_output.json`、`intermediates/sentence_timestamps.json`。
+    - `RecoverRuntimeContext(...)` 现在不只返回阶段裁决，还返回下一阶段执行所需的下载元数据和 Stage1 物化路径。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - `reconcileRecoveredRuntimeContext(...)` 现在优先用 Python 返回的本地视频路径覆盖 URL 占位值。
+    - 同步回填 `DownloadResult` 的标题、时长、解析后 URL、平台、 canonical ID 与 content type。
+    - 同步回填 `Stage1Result.step2JsonPath/step6JsonPath/sentenceTimestampsPath`，避免 `asset_extract_java` 的 legacy 回退再次因占位对象缺字段而失败。
+    - 新增 `timeoutCalculator` 空保护，避免恢复 helper 因测试环境或极端注入缺失而 NPE。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorPhase2RecoveryTest.java`
+    - 扩充回归，锁定“URL 占位必须被本地视频路径覆盖”以及“Python 返回的 Stage1 物化路径必须进入 `Stage1Result`”。
+  - `services/python_grpc/src/server/tests/test_recover_runtime_context.py`
+    - 新增“Stage1 物化 + download 元数据恢复”回归，锁定 `RecoverRuntimeContext` 会直接落盘 `step2/step6/sentence_timestamps`。
+- Verification:
+  - `python -m grpc_tools.protoc -I contracts/proto --python_out=contracts/gen/python --grpc_python_out=contracts/gen/python contracts/proto/video_processing.proto`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_recover_runtime_context.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `pytest services/python_grpc/src/server/tests/test_recover_runtime_context.py -q`
+- Performance comparison:
+  - Test method:
+    - 以 `phase2a -> asset_extract_java` 恢复路径为样本，对比“只返回 ready 摘要”与“直接返回可执行上下文”的恢复策略。
+  - Comparison data:
+    - 变更前：即使 Python 已判定 `download/stage1` 可复用，Java 仍可能保留 URL 占位与空 `step2/step6`，导致恢复后还需要额外进入 `download` 或 `stage1` 重建，或者在 `asset_extract_java` 回退时失去稳定复用条件。
+    - 变更后：Python 直接返回 6 个 `download` 元数据字段与 3 个 Stage1 物化产物路径；恢复后额外需要重建的前置阶段数由“最多 `download + stage1` 两层”降为 `0`，`asset_extract_java` 可直接消费仓库恢复出的输入。
+  - Data source:
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorPhase2RecoveryTest.java`
+    - `services/python_grpc/src/server/tests/test_recover_runtime_context.py`
+## 2026-03-19 浏览器主任务流的非终态重连对账改为显式纳入运行态 `updatedAt`
+- Background:
+  - 浏览器主任务流此前已经具备：
+    - 终态 `taskTerminalEvent` replay/ack
+    - 重连后的 `/api/mobile/tasks/changes` 增量对账
+  - 但非终态任务的增量游标仍偏向静态字段，导致“任务确实还在跑，且 checkpoint 已变化”时，重连后可能继续看到旧阶段。
+- First principles:
+  - 终态可靠性交给 replay 队列。
+  - 非终态既然只要求“当前快照正确”，就必须让快照游标与运行态 durable 真源绑定，而不是和 UI 辅助字段绑定。
+  - 对于进行中任务，真正代表“此时此刻状态”的是运行态持久化时间，而不是 `createdAt/completedAt`。
+- Reusable leverage:
+  - 复用现有 `task_runtime_state.updated_at` 作为控制面真源，不再引入第二套浏览器专用 `SYNC_REQUEST` 协议。
+  - 复用现有 `TaskEntry -> TaskView -> /api/mobile/tasks(/changes)` 映射链，只补 `updatedAt/runtimeUpdatedAt`，不重写任务列表接口。
+  - 复用已有 `recoveryStage/recoveryCheckpoint` 字段，前端只补 fallback 展示逻辑，不新造一套“阶段提示”字段。
+- Changes:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+    - `TaskEntry` 新增 `updatedAt`，每次持久化前统一刷新。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `TaskView` 新增 `runtimeUpdatedAt`。
+    - `/api/mobile/tasks` 与 `/api/mobile/tasks/changes` 的 `snapshotVersion/nextSince` 开始纳入运行态更新时间。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+    - 主任务快照消息补充 `runtimeUpdatedAt`，保持 WebSocket 与 REST 对账字段一致。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 前端任务列表同步游标纳入 `runtimeUpdatedAt`。
+    - live merge 开始保留 `runtimeUpdatedAt/recovery*`。
+    - 任务卡片在缺少 `statusMessage` 时，允许回退到 `recoveryStage/recoveryCheckpoint` 形成阶段提示。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Impact:
+  - 浏览器主任务流在“断线期间进行中任务继续推进”场景下，重连后的快照一致性从“可能停留旧阶段”提升为“跟随运行态更新时间重新对账”。
+  - 该改动不引入非终态历史消息重放，仍保持当前“终态可靠补偿 + 非终态快照对账”的架构边界。
+## 2026-03-19 `RecoverRuntimeContext` 继续前推到 `phase2b` 最终产物复用
+- Background:
+  - 前一轮恢复已经能自动回到 `phase2b`，但如果 `markdown/json` 自己其实也已经准备好了，Java 仍会重新跑一次 assemble。
+  - 这意味着恢复链虽然已经把 `download/transcribe/stage1/phase2a/asset_extract_java` 都交给 Python 判定，最后一段仍有重复执行窗口。
+- First principles:
+  - 如果最终产物已经真实存在且可直接交付，就不应该再把“组装一次”当成恢复的必经步骤。
+  - 恢复系统的终点不该是“回到最后一个阶段”，而应该是“回到最后一个还需要执行的阶段”；当这个阶段数为 `0` 时，应直接完成任务。
+- Reusable leverage:
+  - 复用 Python 已有的 `phase2b_runtime_repository` 与 `_load_phase2b_runtime_outputs_from_store(...)`，不新增新的最终产物索引表。
+  - 复用 Java 现有 `ProcessingResult`、`task_metrics_latest.json`、`completeTask(...)` 收口链，只新增一个“从恢复产物直接完成”的轻量分支。
+- Changes:
+  - `contracts/proto/video_processing.proto`
+    - `RecoverRuntimeContextResponse` 新增：
+      - `phase2b_ready`
+      - `markdown_path`
+      - `json_path`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `RecoverRuntimeContext(...)` 新增 `phase2b` 最终产物检查：若 `phase2b_runtime_repository` 恢复出的 `markdown_path` 真实存在，则直接把 `resolved_start_stage` 推进为 `completed`。
+    - 同时返回 `markdown/json` 路径，作为 Java 直接完成任务的输入。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - `IOPhaseResult` 新增 `phase2bMarkdownPath/phase2bJsonPath`。
+    - `reconcileRecoveredRuntimeContext(...)` 接受 Python 返回的最终产物路径。
+    - 新增 `processVideoFromRecoveredOutputs(...)`，直接构造成功 `ProcessingResult`、补写 metrics/toc，并复用原有完成态收口。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 恢复分支新增 `completed` case；当 Python 判定最终产物可直接复用时，不再进入 `phase2b` 重新 assemble。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorPhase2RecoveryTest.java`
+    - 新增 `completed` 分支回归，锁定最终产物已就绪时必须直接完成。
+  - `services/python_grpc/src/server/tests/test_recover_runtime_context.py`
+    - 新增 `phase2b outputs ready -> completed` 回归。
+- Verification:
+  - `python -m grpc_tools.protoc -I contracts/proto --python_out=contracts/gen/python --grpc_python_out=contracts/gen/python contracts/proto/video_processing.proto`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_recover_runtime_context.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Performance comparison:
+  - Test method:
+    - 对比“恢复到 `phase2b` 再重跑 assemble”与“检测到最终产物后直接完成”两条路径。
+  - Comparison data:
+    - 变更前：最终产物已存在时，仍需再次进入 `AssembleRichText`，重复触发 Phase2B 装配与其监控链。
+    - 变更后：`RecoverRuntimeContext` 直接返回 `completed`，Java 不再调用 assemble，最终重复执行阶段数从 `1` 降为 `0`。
+  - Data source:
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorPhase2RecoveryTest.java`
+    - `services/python_grpc/src/server/tests/test_recover_runtime_context.py`
+## 2026-03-19 将 recovery helper 从 `grpc_service_impl.py` 抽离为独立模块
+- Background:
+  - 虽然 `RecoverRuntimeContext` 的阶段判定、Stage1 物化和 `phase2b` 最终产物复用已经逐步交给 Python，但实现仍堆在 `grpc_service_impl.py` 这个超大服务文件里。
+  - 这种结构会让后续新增恢复阶段时继续把业务语义堆回 gRPC 服务层，形成“入口薄、细节厚”的结构债。
+- First principles:
+  - gRPC 服务层只应负责协议入参与协议出参，不应继续承载恢复判定本身。
+  - 恢复语义要形成单一事实来源，至少要同时收口：
+    - 阶段可复用性判定
+    - Stage1 / 字幕等恢复物化
+    - `phase2b` 最终产物复用
+  - 模块边界如果仍用裸 `dict` 传递 20+ 个字段，等价于把隐式协议散落在调用方；因此需要显式的数据对象来承载恢复结果。
+- Reusable leverage:
+  - 复用已存在的 `RuntimeRecoveryStore`、Stage1 runtime repository、`stage_artifact_paths`，不重造存储或路径规则。
+  - 复用既有 `RecoverRuntimeContext` RPC，不改 Java 调用链，只替换 Python 内部恢复实现的归属位置。
+  - 复用已补齐的 `download/stage1/phase2a/phase2b` 恢复语义，避免再次拆出并行的恢复流程。
+- Changes:
+  - `services/python_grpc/src/server/runtime_recovery_context.py`
+    - 新增独立 recovery 模块，承载：
+      - 下载元数据恢复判定
+      - Stage1 产物物化
+      - 可复用 LLM/chunk 计数
+      - `download -> transcribe -> stage1 -> phase2a -> asset_extract_java -> phase2b -> completed` 阶段裁决
+      - `RuntimeRecoveryContext` 数据对象与响应载荷序列化
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `RuntimeRecoveryResolver` 懒加载入口。
+    - 原 `_resolve_download_recovery_metadata / _materialize_stage1_recovery_artifacts / _count_reusable_runtime_nodes / _resolve_runtime_recovery_context` 改为薄包装。
+    - `RecoverRuntimeContext(...)` 改为直接消费 `RuntimeRecoveryContext`，不再手工维护恢复字段字典协议。
+  - `services/python_grpc/src/server/tests/test_runtime_recovery_context.py`
+    - 新增模块级回归，直接锁定独立 recovery 模块的核心行为。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/server/runtime_recovery_context.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_runtime_recovery_context.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Performance comparison:
+  - Test method:
+    - 对比抽离前后 `RecoverRuntimeContext` 调用链中由 gRPC 服务层直接维护的恢复字段协议规模。
+  - Comparison data:
+    - 变更前：`grpc_service_impl.py` 需要手工展开并维护 `RecoverRuntimeContextResponse` 的 23 个恢复字段，恢复结果在模块边界以裸 `dict` 传递。
+    - 变更后：恢复结果收口为单一 `RuntimeRecoveryContext` 数据对象，gRPC 服务层只负责 `to_response_payload()` 出参封装，恢复字段协议从“调用方散落维护”降为“模块内集中维护”。
+  - Data source:
+    - `services/python_grpc/src/server/runtime_recovery_context.py`
+    - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `services/python_grpc/src/server/tests/test_runtime_recovery_context.py`
+
+## 2026-03-20 站点化收敛下载器策略：Bilibili 保留 aria2c，YouTube 强制 yt-dlp
+- Problem:
+  - 外部下载器失败后的降级原本主要由错误类型驱动，容易把“站点职责边界”混入统一 fallback 逻辑。
+  - 这会让下载策略持续朝“哪个错误再多兜一层”演化，而不是按站点能力做稳定收敛。
+- First principles:
+  - 下载器策略的首要维度应是站点特性，而不是错误字符串。
+  - Bilibili 更适合让 `aria2c` 负责传输层并发与重试；YouTube 则应把稳定性重心放在 yt-dlp 的 extractor / player client / Cookie / POT 链路。
+- Reusable leverage:
+  - 复用 `VideoProcessor.download(...)` 里已有的 YouTube 外部下载器禁用逻辑，不新增第二套 YouTube 下载分支。
+  - 复用既有 `aria2c -> yt-dlp` 单次降级框架，只把 Bilibili 明确排除在该降级之外，不重写下载主流程。
+  - 复用 `test_video_processor_download.py` 现有 stub 模式补站点策略回归，不新建测试基础设施。
+- Changes:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_is_bilibili_url(...)`。
+    - `aria2c` 降级分支改为仅对非 Bilibili 生效。
+    - Bilibili 走 `aria2c` 时，若用户未显式配置 `--disable-ipv6`，默认追加 `--disable-ipv6=true`，优先锁定 IPv4。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 增加 YouTube 禁用外部下载器回归测试。
+    - 增加 Bilibili 保持 `aria2c` 策略、不降级到内置下载器的回归测试。
+    - 增加 Bilibili `aria2c` 默认注入 `--disable-ipv6=true` 的回归测试。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+  - 手工脚本验证两条策略：
+    - `YOUTUBE_POLICY_OK`
+    - `BILIBILI_POLICY_OK`
+    - `BILIBILI_IPV6_DISABLED_OK`
+    - `YOUTUBE_STILL_BUILTIN_OK`
+
+## 2026-03-20 Stage1 Watchdog 桥接收敛：专用心跳文件兜底与延后重启广播
+- Date:
+  - 2026-03-20
+- Background:
+  - `stage1` 任务在 Python 侧已经持续推进时，Java 侧仍可能先出现 `阶段长时间无进展，准备重启子步骤`，随后又正常进入 `正在进行语义单元分析... (35%)`。
+  - 这类现象会让操作者误判为主链路断开或 Stage1 已经真实重跑，但实际多数情况下主流程并未中断。
+- First principles:
+  - watchdog 的用户态文案必须和真实执行动作一致；如果不会真的 interrupt，就不能先向用户广播“准备重启”。
+  - 阶段进度桥接必须优先消费该阶段最稳定、最贴近执行现场的心跳载体，而不是把所有阶段都硬绑到同一份 heartbeat 文件上。
+- Reusable leverage:
+  - 复用 Python Stage1 既有 `stage1_watchdog_heartbeat.json` 心跳协议，不新增第二套心跳 schema。
+  - 复用 `TaskProgressWatchdogBridge` 现有 gRPC stream + 文件兜底双路径，只把文件路径解析改成按 stage 分流。
+  - 复用 `TaskWatchdog.shouldInterruptOnRestart(...)` 既有决策，不改 watchdog 状态机，只修正文案广播时机。
+- Changes:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/watchdog/TaskProgressWatchdogBridge.java`
+    - 为 `stage1` 监控切换到 `intermediates/stage1_watchdog_heartbeat.json` 文件兜底。
+    - 将 gRPC watchdog stream 默认 `call-timeout` 从 `8s` 提高到 `35s`，显式大于 `idle-timeout=25s`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 先判断 `interruptOnRestart`，只有真正会中断的阶段才向前端广播 `准备重启子步骤`。
+    - 对 `heartbeat-strong stage` 改为仅写内部 info 日志，等待后续心跳或阶段完成恢复。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=TaskProcessingWorkerWatchdogDeferredRestartTest,TaskProgressWatchdogBridgeStage1FileFallbackTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Notes:
+  - 这次调整的目标是“让 Stage1 的可观测性与真实执行动作对齐”，不是放宽 watchdog 的总超时或禁用 watchdog 本身。
+
+## 2026-03-20 任务列表收口 UNKNOWN 残留：列表聚合前置清理孤儿存储任务
+- Problem:
+  - 任务列表之前会把 `StorageTaskCacheService` 扫描出的 `UNKNOWN` 目录直接并入返回结果，导致“异常残留”目录被当成正常任务展示。
+  - 这类目录往往没有 markdown、没有 runtime owner，也不应继续停留在用户侧任务列表中。
+- First principles:
+  - 任务列表是“用户可操作任务视图”，不是“磁盘目录枚举结果”。
+  - 只要一个存储目录既没有可读产物，也没有 runtime owner，它就应该先进入清理链路，而不是先展示给用户。
+- Reusable leverage:
+  - 复用 `MobileMarkdownController` 既有 `deleteStorageTaskByTaskId(...)`，不新造第二套目录删除流程。
+  - 复用既有 `deletePersistedTaskState(...)` 和 `clearTaskCleanupIndexQuietly(...)`，把持久化状态与 cleanup index 一并收口。
+  - 复用既有 `resolveRuntimeStorageKey(...)` 判定 runtime shadow，确保正在处理中的任务目录不会被误删。
+- Changes:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `collectTaskViews(...)` 从“直接拼 runtime + storage 视图”收敛为“先判定并清理孤儿 `UNKNOWN` 残留，再输出任务列表”。
+    - 新增 runtime taskId/storageKey owner 集合，作为残留清理的安全边界。
+    - `listTaskChanges(...)` 在本轮聚合发生残留清理时返回 `resyncRequired=true`，促使前端回退全量刷新。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerResidualTaskCleanupTest.java`
+    - 增加“孤儿残留应删除”和“runtime shadow 不应误删”的回归测试。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerResidualTaskCleanupTest test -q`
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
 
-## 2026-03-21 Phase2B `imgneeded` 占位符兼容层补强（花括号变体 + 顺序回填兜底）
+## 2026-03-20 删除链路收口 runtime SQLite 句柄：先释放再删，删不掉则转后台 cleanup
+- Problem:
+  - 任务删除链之前默认目录可立即删除，但 Python runtime recovery 的 SQLite/WAL 句柄仍可能常驻进程缓存。
+  - 在 Windows 上，这会把 `runtime_state.db-wal` 文件锁直接放大成用户态删除失败，前端进一步误报为“故事加载失败”。
+- First principles:
+  - “任务业务状态完成”与“底层资源句柄已释放”不是同一个概念。
+  - 删除任务的目标应该是先达成“逻辑删除”，再尽量完成“物理清理”；一旦物理清理被文件锁阻塞，不应反向否定逻辑删除结果。
+- Reusable leverage:
+  - 复用现有 `ReleaseCVResources` RPC，而不是新造一条专门的“释放 runtime store”协议。
+  - 复用现有 `TaskCleanupQueueRepository` / `TaskCleanupIndexService`，把删除失败目录转入同一套 cleanup queue，而不是再发明第二套异步清理器。
+  - 复用 `MobileMarkdownController.deleteStorageTaskByTaskId(...)` 既有安全边界（storage root / safe storage key），只补“释放前置”和“删除失败降级”语义。
+- Changes:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - shared SQLite index 新增显式关闭与 shared instance 驱逐能力。
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - RuntimeRecoveryStore 新增 task 级 `close()`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `ReleaseCVResources` 开始承担 task 级 runtime store 释放职责。
+    - gRPC 关闭阶段补充 runtime store 全量释放。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 新增同步 `releaseCVResources(taskId)` 供删除链直接调用。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 删除任务改为：`remove runtime -> release python resources -> delete storage(with retry) -> delete persisted state -> fallback cleanup queue`。
+    - storage 删除失败但已成功逻辑删除时，返回 `DELETED_PENDING_CLEANUP`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskCleanupIndexService.java`
+    - 新增立即清理入队入口，支持删除链立即挂起后台清理。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/common/utils/runtime_recovery_sqlite.py services/python_grpc/src/common/utils/runtime_recovery_store.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=TaskCleanupIndexServiceTest,MobileMarkdownControllerDeleteTaskTest,MobileMarkdownControllerDeleteTaskPersistenceTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Performance comparison:
+  - Test method:
+    - 对比“删除任务直接同步强删失败返回 500”与“先释放 runtime store + 失败转 cleanup queue”的删除链行为。
+  - Comparison data:
+    - 变更前：Windows 文件锁会让删除接口直接失败，前端无法继续重提交流程。
+    - 变更后：若句柄释放后仍短时锁定，接口返回 `DELETED_PENDING_CLEANUP`，用户可继续重提交流程，物理清理由后台 cleanup queue 补偿完成。
+  - Data source:
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerDeleteTaskTest.java`
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskCleanupIndexServiceTest.java`
+
+## 2026-03-21 科学 AB 复核：多阶段门阀拆分的机制级收益
+- 背景：
+  - 之前“下载 / 转写 / 文本预处理拆门阀”更多来自线上日志症状与单测时序观察，但缺少单一变量、可重复的机制级 AB benchmark。
+  - 本次补一组受控 benchmark，专门隔离“粗粒度单锁”与“分阶段门阀”两种调度拓扑的差异。
+- 测试方式：
+  - 新增脚本：`tools/benchmarks/task_stage_gate_topology_benchmark.py`
+  - 固定阶段耗时：`download=120ms`、`transcribe=80ms`、`stage1=300ms`、`llm=300ms`
+  - 单一变量：
+    - `legacy_single_gate`：`download + transcribe + stage1` 共用一个粗粒度门阀
+    - `split_stage_gates`：`download` 与 `transcribe` 独立门阀，`stage1` 不再占用转写配额
+  - 任务数：`2,4`
+  - 重复次数：`5`
+  - 产物：`var/artifacts/benchmarks/task_stage_gate_topology_scientific_20260321_102933/`
+- 对比数据：
+  - `2` 任务：
+    - `legacy_single_gate`：`1303.46ms`
+    - `split_stage_gates`：`882.40ms`
+    - makespan 下降约 `32.30%`
+  - `4` 任务：
+    - `legacy_single_gate`：`2305.66ms`
+    - `split_stage_gates`：`1043.50ms`
+    - makespan 下降约 `54.74%`
+  - 并发形态变化：
+    - `download_max_inflight`：`1 -> 2/3`
+    - `transcribe_max_inflight`：始终 `1`
+    - `llm_max_inflight`：`1 -> 2/4`
+    - `transcribe_started_while_stage1_inflight_mean`：`0 -> 1/3`
+- 结论：
+  - “拆门阀”的收益是成立的，而且是调度拓扑本身带来的可重复收益，不需要依赖远端模型或真实网络波动才成立。
+  - 更准确的归因应表述为：
+    - 通过把粗粒度单锁拆成阶段级门阀，让后续任务的下载/转写能够与前序任务的文本预处理和后处理重叠执行，减少了调度层制造的空等。
+- 验证：
+  - `python tools/benchmarks/task_stage_gate_topology_benchmark.py --task-counts 2,4 --repeats 5 --download-ms 120 --transcribe-ms 80 --stage1-ms 300 --llm-ms 300 --task-name task_stage_gate_topology_scientific`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=TaskProcessingWorkerIoConcurrencyTest#runWithWatchdogShouldAllowParallelDownloadAndSerializeTranscribe+runWithWatchdogShouldCapPhase2ConcurrencyByPermit" test -q`
+
+## 2026-03-21 科学 AB 复核：Windows 本地样本下 route screenshot 的 `process_streaming` 不能作为收益证据
+- 背景：
+  - 之前曾把 `process_streaming + ProcessPool + queue_maxsize` 直接归因到“截图/视频分析核心耗时显著下降”。
+  - 本次按单一变量重跑本地样本，验证这条归因是否还能站住。
+- 测试方式：
+  - 使用 `var/artifacts/benchmarks/sample_data/pre_vl_sample/`
+  - 脚本：`scripts/bench_route_screenshot_concurrency.py`
+  - 单一变量：
+    - `legacy_batch|w=4`
+    - `process_streaming|w=4|q=8`
+  - 固定：
+    - `knowledge_type=process`
+    - `max_units=6`
+    - `repeats=3`
+  - 产物：`var/artifacts/benchmarks/route_screenshot_mode_compare_scientific_20260321_102044/`
+- 对比数据：
+  - `legacy_batch|w=4|q=1`
+    - 成功率：`100%`
+    - 平均耗时：`77481.44ms`
+    - P95：`80442.46ms`
+    - 吞吐：`0.0775 units/s`
+  - `process_streaming|w=4|q=8`
+    - 成功率：`0%`
+    - 3 轮均在启动阶段直接失败：`[WinError 5] 拒绝访问。`
+- 结论：
+  - 在当前 Windows 本地样本环境下，`process_streaming` 不能作为“单任务时延优化”的有效证据来源；它甚至还不具备稳定可测性。
+  - 这意味着此前把 `660.2s -> 276.0s` 全量归因到“有界背压流水线 + CV 进程池”并不严谨；该数字包含了多项改动，不应继续单独挂到 `process_streaming` 头上。
+  - 当前更稳妥的说法应改为：
+    - `process_streaming` 是一套“有界队列 + 在途上限 + 进程池”的架构性保护方案；
+    - 它在当前 Windows 本地样本下尚未通过稳定性复核，不能再直接包装为“单任务截图阶段必然更快”。
+- 改进建议：
+  - 先定位并修复 `process_streaming` 路径在 Windows 下的 `WinError 5`。
+  - 在修复前，不要把这条链路作为性能亮点证据，只能作为“并发保护设计”来讲。
+  - 后续若继续保留该模式，需补一组“同样本、同 worker、同 repeats”的成功率 + P95 + 资源占用复测，再决定是否恢复为默认收益点。
+
+## 2026-03-21 科学 AB 复核：小样本真实任务下 ProcessPool 不是默认更快，应改为规模感知
+- 背景：
+  - 之前已有较大样本 benchmark 显示 `ProcessPool` 在某些 Phase2B 结构预处理场景能提升吞吐，但这类收益未必对所有任务规模都成立。
+  - 本次补一组真实小样本复核，验证“多进程一定更快”的说法是否成立。
+- 测试方式：
+  - 样本目录：`var/storage/storage/0e95e5abef4626cdcf4d4597ea4103ff/`
+  - 脚本：`scripts/bench_phase2b_material_flow_concurrency.py`
+  - 单一变量：
+    - `sw=1|ow=2`
+    - `sw=4|ow=2`
+  - 固定：
+    - `structure_mode=process`
+    - `rounds=3`
+    - `warmup=true`
+    - `safe_no_delete=true`
+  - 产物：`var/artifacts/benchmarks/phase2b_structure_ab_scientific_20260321_103404/`
+- 对比数据：
+  - `sw=1|ow=2`
+    - 平均耗时：`629.08ms`
+    - P95：`636.97ms`
+    - 吞吐：`19.0784 units/s`
+  - `sw=4|ow=2`
+    - 平均耗时：`629.94ms`
+    - P95：`638.94ms`
+    - 吞吐：`19.0523 units/s`
+- 结论：
+  - 在这份 `12` 单元的小样本真实任务上，`ProcessPool 4 workers` 相比 `1 worker` 没有带来可感知收益，反而略慢。
+  - 更准确的归因应改为：
+    - 多进程池的价值在于“突破 CPU 串行瓶颈并提供扩展能力”，但是否真正带来吞吐收益，取决于任务规模、素材命中率和进程管理开销；
+    - 这条链路应做成“规模感知/样本感知”的自适应并发，而不是默认把 worker 拉高。
+- 改进建议：
+  - 当 `unit_count`、素材数或结构预处理命中率较低时，优先使用低 worker 或单 worker。
+  - 将 `ProcessPool` 的启用条件与任务规模、素材命中率、历史耗时分布绑定，而不是固定写死在配置里。
+
+## 2026-03-21 科学 AB 复核补充：route screenshot 旧结论需要修正，流式调度收益约为 2%
+- 背景：
+  - 早上第一轮 `route screenshot` benchmark 中，`process_streaming|w=4|q=8` 在 Windows 本地环境 `3/3` 直接失败，错误为 `[WinError 5] 拒绝访问。`，因此当时只能先下“当前环境下不具备稳定可测性”的保守结论。
+  - 用户补充完整权限后重新复测，`process_streaming` 已可稳定跑通；但进一步核对原始结果发现，第一版 benchmark 把 `legacy_batch` 和 `process_streaming` 放在一起比较时，二者实际走的不是同一算法口径，不能直接当成科学 AB 结论。
+- 问题定位：
+  - 带权限复测产物：`var/artifacts/benchmarks/route_screenshot_mode_compare_scientific_rerun_20260321_104709/`
+  - 复测后两边都 `3/3` 成功，但工作量不一致：
+    - `legacy_batch` 平均产出 `59` 张截图；
+    - `process_streaming` 平均产出 `9` 张截图；
+    - 原始明细显示 `legacy_batch` 走普通区间截图选择，`process_streaming` 走带 `route_roi` 的路由截图任务。
+  - 代码口径核对：
+    - `services/python_grpc/src/server/grpc_service_impl.py:12154`
+      - `process_streaming` 调用 `run_select_screenshots_for_range_task`
+    - `scripts/bench_route_screenshot_concurrency.py`
+      - `legacy_batch` 原先调用 `_select_screenshots_sync`
+  - 结论：
+    - 第一版 benchmark 混入了“不同算法 + 不同输出口径”两个变量，不能继续作为“流式调度一定更快”的证据。
+- 修正后的测试方式：
+  - 为了锁定单一变量，本次扩展 `scripts/bench_route_screenshot_concurrency.py`，新增 `process_batch` 模式：
+    - `process_batch`：与 `process_streaming` 复用同一个 `run_select_screenshots_for_range_task` 和同一个 `ProcessPool`
+    - `process_streaming`：生产者-消费者队列 + 有界 `queue_size`
+    - 单一变量仅保留“全量提交”与“有界流式派发”的调度差异
+  - 运行命令：
+    - `python -m scripts.bench_route_screenshot_concurrency --video var/artifacts/benchmarks/sample_data/pre_vl_sample/video.mp4 --units var/artifacts/benchmarks/sample_data/pre_vl_sample/semantic_units_phase2a.json --task-name route_screenshot_scheduler_ab_scientific --modes process_batch,process_streaming --workers 4 --queue-sizes 8 --knowledge-types process --max-units 6 --repeats 3 --sample-interval-sec 0.5`
+  - 产物：
+    - `var/artifacts/benchmarks/route_screenshot_scheduler_ab_scientific_20260321_110554/`
+- 对比数据：
+  - 原权限复测（仅用于说明旧 benchmark 不公平，不作为收益结论）：
+    - `legacy_batch|w=4|q=1`
+      - 成功率：`100%`
+      - 平均耗时：`81971.97ms`
+      - 吞吐：`0.0732 units/s`
+      - 平均截图数：`59`
+    - `process_streaming|w=4|q=8`
+      - 成功率：`100%`
+      - 平均耗时：`161971.15ms`
+      - 吞吐：`0.0371 units/s`
+      - 平均截图数：`9`
+  - 修正后的同算法 AB：
+    - `process_batch|w=4|q=1`
+      - 成功率：`100%`
+      - 平均耗时：`158118.51ms`
+      - P95：`160766.76ms`
+      - 吞吐：`0.03795 units/s`
+      - 平均截图数：`9`
+      - CPU 均值：`85.60%`
+      - 内存均值：`68.34%`
+    - `process_streaming|w=4|q=8`
+      - 成功率：`100%`
+      - 平均耗时：`154992.03ms`
+      - P95：`155743.26ms`
+      - 吞吐：`0.03871 units/s`
+      - 平均截图数：`9`
+      - CPU 均值：`84.03%`
+      - 内存均值：`67.41%`
+  - 相对收益：
+    - 平均耗时下降：约 `1.98%`
+    - P95 下降：约 `3.12%`
+    - 吞吐提升：约 `2.00%`
+- 根因与结论：
+  - 在当前这份 `6` 单元 `process` 样本上，路由截图链路的主耗时仍然由视频解码、ROI 分析、OCR/形状特征提取和截图选择本身主导，调度拓扑只带来小幅收益。
+  - 更准确的归因应改写为：
+    - `process_streaming` 的核心价值首先是“有界队列 + 在途上限 + 进程池”的稳定性保护，其次才是小幅减少全量提交带来的排队与调度开销；
+    - 在当前同算法 AB 中，流式调度带来的可复现收益约为 `2%`，而不是之前误写的数量级提升。
+  - 面试表达应收敛为：
+    - 这条链路的价值点是“避免上游无限制压垮下游，并在保证稳定性的前提下拿到约 `2%` 的调度收益”，不要再把它包装成“单靠流式调度就让截图阶段缩短一半以上”。
+- 环境与风险记录：
+  - 第一轮 `[WinError 5]` 更可能是受限执行环境下 Windows 多进程启动失败导致；在当前全权限环境下已无法复现，但由于不能回放旧沙箱环境，这一条只能作为高置信推断记录。
+  - 当前 Python 环境仍存在 `NumPy 2.4.2` 与 `pytesseract/pandas/pyarrow` 编译版本不兼容的问题，worker 启动时会打印大量导入错误，随后回退到 `rapidocr`。这不会阻断 benchmark 完成，但会污染日志并增加进程冷启动噪声。
+- 工程改进：
+  - `scripts/bench_route_screenshot_concurrency.py`
+    - 新增 `process_batch` 模式，便于后续继续做“同算法、不同调度”的对照。
+    - 增加仓库根目录注入，支持直接 `python scripts/...` 运行。
+    - 将 `matplotlib` 改为延迟加载，避免 Windows `spawn` 子进程在模块导入期重复打印失败日志。
+
+## 2026-03-21 稳定性保护压测：route screenshot 的核心价值是“堆积受控 + 依赖故障不扩散”
+- 背景：
+  - 仅靠上一轮“同算法 AB 时延差约 2%”不足以支撑“稳定性保护”这四个字。
+  - 这次改为专门验证有界并发的保护价值：不再只看耗时，而是观测 backlog 峰值、进程树 RSS 峰值、输出一致性，以及 OCR 依赖异常时是否仍能完成任务。
+- 测试方式：
+  - 扩展脚本：`scripts/bench_route_screenshot_concurrency.py`
+    - 新增实时采样指标：
+      - `scheduler_outstanding_peak`
+      - `executor_outstanding_peak`
+      - `unit_queue_depth_peak`
+      - `process_tree_rss_mb_peak`
+      - `child_rss_mb_peak`
+      - `process_count_peak`
+    - 继续保留 `success_rate / elapsed / throughput / error_units / pid_unique_count`
+  - 压测命令：
+    - `python -m scripts.bench_route_screenshot_concurrency --video var/artifacts/benchmarks/sample_data/pre_vl_sample/video.mp4 --units var/artifacts/benchmarks/sample_data/pre_vl_sample/semantic_units_phase2a.json --task-name route_screenshot_stability_guardrail_scientific --modes process_batch,process_streaming --workers 4 --queue-sizes 2,8 --knowledge-types process --max-units 16 --repeats 1 --sample-interval-sec 0.5`
+  - 产物：
+    - `var/artifacts/benchmarks/route_screenshot_stability_guardrail_scientific_20260321_113533/`
+  - 固定条件：
+    - 同一视频
+    - 同一 `16` 个 `process` 单元
+    - 同一 `run_select_screenshots_for_range_task`
+    - 同一 `ProcessPool(max_workers=4)`
+    - 唯一变量只有调度方式：
+      - `process_batch`：一次性全量提交
+      - `process_streaming`：生产者-消费者队列 + 有界 `queue_maxsize`
+- 对比数据：
+  - `process_batch|w=4|q=1`
+    - 成功率：`100%`
+    - 平均耗时：`496231.19ms`
+    - 吞吐：`0.03224 units/s`
+    - 输出截图数：`28`
+    - `scheduler_outstanding_peak`: `16`
+    - `process_tree_rss_mb_peak`: `2189.03MB`
+    - `process_count_peak`: `5`
+  - `process_streaming|w=4|q=2`
+    - 成功率：`100%`
+    - 平均耗时：`503161.81ms`
+    - 吞吐：`0.03180 units/s`
+    - 输出截图数：`28`
+    - `scheduler_outstanding_peak`: `6`
+    - `unit_queue_depth_peak`: `2`
+    - `executor_inflight_peak`: `4`
+    - `process_tree_rss_mb_peak`: `2227.07MB`
+    - `process_count_peak`: `5`
+  - `process_streaming|w=4|q=8`
+    - 成功率：`100%`
+    - 平均耗时：`497154.31ms`
+    - 吞吐：`0.03218 units/s`
+    - 输出截图数：`28`
+    - `scheduler_outstanding_peak`: `12`
+    - `unit_queue_depth_peak`: `8`
+    - `executor_inflight_peak`: `4`
+    - `process_tree_rss_mb_peak`: `2199.13MB`
+    - `process_count_peak`: `5`
+  - 输出一致性：
+    - 三种模式下 `16` 个单元的截图数量逐单元一致，未出现错单、漏单或错误单元扩散。
+- 结论：
+  - 这轮压测已经能证明“稳定性保护”的第一个核心点：有界流式派发确实把未完成任务堆积限制在可控范围。
+    - 从 `process_batch` 的 `outstanding_peak=16`
+    - 收敛到 `process_streaming(q=2)` 的 `6`
+    - 或 `process_streaming(q=8)` 的 `12`
+  - 并且这个 backlog 钳制没有明显牺牲吞吐：
+    - `q=8` 与 `batch` 吞吐几乎持平（`0.03218` vs `0.03224 units/s`）
+  - 这轮压测也证明了第二个核心点：依赖故障没有扩散成整批失败。
+    - 运行过程中所有 worker 都出现了 `pytesseract/pandas/pyarrow` 与 `NumPy 2.4.2` 的兼容错误；
+    - 但由于 OCR 初始化失败后会降级到备用路径，最终 `3` 个 case 都保持 `100%` 成功率、`0` 错误单元、输出一致。
+  - 需要如实说明的限制：
+    - 本样本下 `process_tree_rss_mb_peak` 没有显著下降，说明内存峰值主要由常驻的 CV/OCR worker 进程决定，而不是 backlog 队列决定；
+    - 因此这条链路当前最硬的稳定性收益不是“峰值内存显著下降”，而是“待处理堆积被明确封顶，外部依赖抖动不再扩散成整批失败”。
+- 面试表达建议：
+  - 不要说“这套背压模型把截图链路性能提升很多”。
+  - 改说：
+    - 我把原来一次性全量提交的路由截图链路，改成了有界并发的生产者-消费者模型；
+    - 在 `16` 个单元的压力样本里，把未完成任务峰值从 `16` 压到 `6`，同时吞吐基本不变；
+    - 即使 OCR 依赖在 worker 内初始化失败，链路仍能通过降级路径完成，避免整批任务失败。
+
+## 2026-03-21 机制级强压测：无界提交会放大 backlog 与父进程 RSS，有界派发可直接削峰防雪崩
+- 背景：
+  - 真实 route screenshot 链路已经证明了“backlog 能被钳住”，但由于样本规模和常驻 worker 占用限制，内存峰值差异不够直观，仍然很难一眼感受到“防雪崩”。
+  - 本次补一组机制级强压 benchmark，专门放大“上游一次性把大 payload 全丢给 ProcessPool，下游处理速度有限”时的堆积与内存放大效应。
+- 测试方式：
+  - 新增脚本：`tools/benchmarks/processpool_backpressure_guardrail_benchmark.py`
+  - 测试对象：
+    - 使用 `ProcessPool(4)` 模拟下游 CPU 处理链路；
+    - 每个任务携带 `16MB` payload，并执行 `2` 轮哈希计算 + `400ms` 人工慢处理；
+    - 总任务数 `40`，重复 `3` 轮。
+  - 单一变量：
+    - `unbounded_submit`：一次性提交全部 `40` 个任务；
+    - `bounded_streaming(q=2)`：额外等待队列上限为 `2`，最多保留 `workers + queue_size = 6` 个未完成任务；
+    - `bounded_streaming(q=8)`：额外等待队列上限为 `8`，最多保留 `workers + queue_size = 12` 个未完成任务。
+  - 指标：
+    - `scheduler_outstanding_peak`
+    - `process_tree_rss_mb_peak`
+    - `parent_rss_mb_peak`
+    - `child_rss_mb_peak`
+    - `throughput_tasks_per_sec`
+  - 运行命令：
+    - `python tools/benchmarks/processpool_backpressure_guardrail_benchmark.py --task-name processpool_backpressure_guardrail_scientific --modes unbounded_submit,bounded_streaming --workers 4 --queue-sizes 2,8 --task-counts 40 --payload-mb 16 --cpu-iterations 2 --sleep-ms 400 --repeats 3 --sample-interval-sec 0.1`
+  - 产物：
+    - `var/artifacts/benchmarks/processpool_backpressure_guardrail_scientific_20260321_124800/`
+- 对比数据：
+  - `unbounded_submit|w=4`
+    - 成功率：`100%`
+    - 平均耗时：`4670.37ms`
+    - 吞吐：`8.5647 tasks/s`
+    - `scheduler_outstanding_peak`: `40`
+    - `process_tree_rss_mb_peak`: `845.89MB`
+    - `parent_rss_mb_peak`: `682.66MB`
+  - `bounded_streaming|w=4|q=2`
+    - 成功率：`100%`
+    - 平均耗时：`4678.66ms`
+    - 吞吐：`8.5503 tasks/s`
+    - `scheduler_outstanding_peak`: `6`
+    - `process_tree_rss_mb_peak`: `320.45MB`
+    - `parent_rss_mb_peak`: `138.33MB`
+  - `bounded_streaming|w=4|q=8`
+    - 成功率：`100%`
+    - 平均耗时：`4689.27ms`
+    - 吞吐：`8.5307 tasks/s`
+    - `scheduler_outstanding_peak`: `12`
+    - `process_tree_rss_mb_peak`: `412.17MB`
+    - `parent_rss_mb_peak`: `234.48MB`
+- 量化结论：
+  - 相比一次性全量提交，额外等待队列上限为 `2` 的有界流式派发：
+    - 未完成任务峰值从 `40` 压到 `6`，下降约 `85%`
+    - 进程树 RSS 峰值从 `845.89MB` 压到 `320.45MB`，下降约 `62%`
+    - 父进程 RSS 峰值从 `682.66MB` 压到 `138.33MB`，下降约 `80%`
+    - 吞吐仅从 `8.5647` 降到 `8.5503 tasks/s`，几乎无损
+  - 额外等待队列上限为 `8` 时，仍然明显优于无界提交：
+    - 未完成任务峰值下降约 `70%`
+    - 进程树 RSS 峰值下降约 `51%`
+    - 父进程 RSS 峰值下降约 `66%`
+- 归因：
+  - 这组数据把“防雪崩”做成了直观证据：真正放大资源占用的不是 worker 数本身，而是上游一次性提交造成的 pending 任务堆积。
+  - 一旦把提交模型改成“完成一个，补一个”，即便 worker 数和单任务耗时不变，也能把 backlog 和父进程排队内存显著压平。
+  - 吞吐几乎不变的原因是：系统瓶颈始终在 `ProcessPool(4)` 的实际处理能力，而不是上游提交速度；有界派发只要保证 4 个 worker 始终不空闲，就不会明显损失吞吐，但能显著减少等待中的大 payload 数量。
+  - 更准确的工程表达应为：
+    - 背压模型的核心价值不是让单任务更快，而是把资源曲线削平，让系统在相同吞吐目标下不再因为待处理任务无限堆积而逼近雪崩区。
+- 口径约束：
+  - 这组 benchmark 是机制级强压测，不是直接线上业务链路回放；
+  - 它用于证明“为什么背压能防雪崩”，而真实 route screenshot benchmark 用于证明“我们的实际链路确实已经在做 backlog 封顶与故障隔离”。
+
+## 2026-03-21 LLM 最小补丁协议复核：不仅压缩回包体积，还验证本地回放成本与 Step4 零调用
+- 背景：
+  - 历史记录里已经有 3 组代表性数据：
+    - 图片描述增量补全：`1571 -> 160 chars`
+    - Step3.5：`2717 -> 1648 chars`
+    - Step4：`1714 -> 947 chars`
+  - 但旧口径主要是“单样本 + `json.dumps(..., separators=(',', ':'))` 字符长度”，还缺少：
+    - UTF-8 字节数
+    - 更接近真实分词的 token 近似
+    - 本地补丁回放是否引入明显 CPU 开销
+    - `Step4` 合并模式是否真的做到零调用
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - LLM 只输出最小语义差异，本地负责确定性回放与装配；
+    - 只要本地回放成本远小于远端生成成本，就应优先让模型“少说话”。
+  - 复用杠杆：
+    - `MarkdownEnhancer._apply_img_desc_incremental_ops(...)`
+    - `patch_protocol.py`
+    - `step_contracts.parse_step35_translated_sentences(...)`
+    - `step_contracts.parse_step4_cleaned_sentences(...)`
+    - `step_contracts.assemble_step4_cleaned_sentences(...)`
+    - `step4_node` 的 `STEP2_STEP4_MERGED_STATE_FLAG`
+- 测试方式：
+  - 新增脚本：`tools/benchmarks/llm_patch_protocol_payload_benchmark.py`
+  - 测试对象：
+    - `img_desc_augment`
+      - 旧：整段回写 JSON
+      - 新：`replace/add` 最小补丁 JSON
+    - `step3_5_translate`
+      - 旧：长键 `translated_sentences / sentence_id / translated_text`
+      - 新：短键 `t / sid / tt`
+    - `step3_5_translate_local_fill`
+      - 旧：回包额外携带 `start_sec / end_sec / source_subtitle_ids`
+      - 新：模型仅返回 `sid / tt`，时间轴与来源由本地回填
+    - `step4_clean_local`
+      - 旧：长键删除补丁 `removals / sentence_id / original / left_context / right_context`
+      - 新：短键删除补丁 `d / sid / o / l / r`
+    - `step4_zero_call_merge_mode`
+      - 验证 `Step2 + Step4` 合并模式命中后，`Step4` 只做本地直通，`token_usage=0`
+  - 指标：
+    - 字符数：`len(serialized_json)`
+    - UTF-8 字节数：`len(serialized_json.encode('utf-8'))`
+    - repo token proxy：沿用仓库现有 `chars / 4`
+    - `tiktoken.cl100k_base` 近似 token
+    - 本地回放耗时：warmup `50` 次 + measured `200` 次微基准
+  - 产物：
+    - `var/artifacts/benchmarks/llm_patch_protocol_payload_benchmark_v3_20260321_133549/`
+- 对比数据：
+  - `img_desc_augment`
+    - `legacy_chars=1461` -> `compact_chars=145`，下降 `90.08%`
+    - `legacy_bytes=4315` -> `compact_bytes=213`，下降 `95.06%`
+    - `legacy_cl100k_tokens=1576` -> `compact_cl100k_tokens=83`，下降 `94.73%`
+    - 本地回放耗时：`0.0044ms -> 0.0099ms`
+  - `step3_5_translate`（仅短键收敛）
+    - `legacy_chars=3967` -> `compact_chars=2898`，下降 `26.95%`
+    - `legacy_bytes=5567` -> `compact_bytes=4498`，下降 `19.20%`
+    - `legacy_repo_token_proxy=991` -> `compact_repo_token_proxy=724`，下降 `26.94%`
+    - 本地回放耗时：`0.0652ms -> 0.0590ms`
+  - `step3_5_translate_local_fill`（短键 + 本地时间轴回填）
+    - `legacy_chars=7199` -> `compact_chars=2898`，下降 `59.74%`
+    - `legacy_bytes=8799` -> `compact_bytes=4498`，下降 `48.88%`
+    - `legacy_cl100k_tokens=2854` -> `compact_cl100k_tokens=1654`，下降 `42.05%`
+    - 本地回放耗时：`0.0934ms -> 0.0625ms`
+  - `step4_clean_local`
+    - `legacy_chars=1885` -> `compact_chars=1118`，下降 `40.69%`
+    - `legacy_bytes=2525` -> `compact_bytes=1758`，下降 `30.38%`
+    - `legacy_repo_token_proxy=471` -> `compact_repo_token_proxy=279`，下降 `40.76%`
+    - 本地回放耗时：`0.2962ms -> 0.2816ms`
+  - `step4_zero_call_merge_mode`
+    - `token_usage=0`
+    - `sentence_count=20`
+    - `latency_mean=0.7006ms`
+- 结果与归因：
+  - 这轮复核把“最小补丁 + 本地确定性回放”的收益拆成了三层：
+    - 第一层：`img_desc_augment` 这种“长正文、少量增量修改”场景，补丁协议收益最明显，字节数与近似 token 都在 `90%+` 量级下降。
+    - 第二层：`Step3.5 / Step4` 的短键收敛本身就能稳定压缩回包。
+    - 第三层：当把时间轴、来源 ID 这类本地可确定字段从模型输出中彻底移除后，`Step3.5` 的回包体积进一步大幅收缩。
+  - 本地回放耗时都处于 `0.01ms ~ 0.30ms` 量级，远低于一次真实 LLM 调用，因此补丁协议引入的本地 CPU 成本可以忽略不计。
+  - `Step4` 合并模式验证了“局部步骤零调用”不是口号，而是当前代码路径的真实行为：命中 merged mode 后，`token_usage=0`，整个节点仅做本地直通与时间戳落盘。
+- 数据准确性说明：
+  - 旧日志中的 `1571 -> 160`、`2717 -> 1648`、`1714 -> 947` 仍然可以作为历史单样本证据；
+  - 本次 benchmark 的优势在于：
+    - 引入 UTF-8 字节数与 `cl100k_base` 近似 token，避免把“字符数”直接等价成 token；
+    - 所有 case 都验证了 `final_equivalent=true`，即旧 payload 与新 payload 最终得到的本地结果一致；
+    - 同时补充了本地回放耗时，证明这项优化不是“把远端成本偷偷转嫁成本地重计算”。
+
+## 2026-03-21 幻觉风险保护机制复核：用机制级对照场景验证“风险收敛”而非只靠口头推断
+- 背景：
+  - “最小补丁 + 本地确定性回放”理论上能降低幻觉风险，但如果没有明确指标，很容易沦为口头推断。
+  - 本次补一组机制级 benchmark，把“幻觉风险”拆成后端可验证的 3 类问题：
+    - 无证据新增或误改
+    - 元数据漂移
+    - 关键术语误删
+  - 同时补 2 类“直接减少幻觉机会”的验证：
+    - 无有效证据时跳过模型调用
+    - 合并模式命中后局部阶段零调用
+- 测试方式：
+  - 新增脚本：`tools/benchmarks/llm_hallucination_guardrail_benchmark.py`
+  - 机制级 unsafe_change 场景：
+    - `img_desc_ambiguous_guard`
+      - 基线：若直接信任整段回写，会把两处重复片段一起误改；
+      - 当前：补丁定位歧义时保持原文。
+    - `step35_metadata_guard`
+      - 基线：若直接信任模型返回的时间轴和来源字段，会发生元数据漂移；
+      - 当前：仅接受句子编号与译文，本地重新回填时间轴和来源。
+    - `step4_bilingual_guard`
+      - 基线：若直接信任整句清理结果，会误删双语术语中的英文原词；
+      - 当前：本地执行补丁后再经过双语术语保护回退。
+  - call_avoidance 场景：
+    - `img_desc_no_evidence_skip_call`
+      - 无有效图文对齐证据时，不调用模型。
+    - `step4_merged_mode_zero_call`
+      - 纠错与清理合并模式命中后，清理阶段 `token_usage=0`。
+  - valid_change 场景：
+    - `img_desc_valid_patch`
+      - 合法补丁仍能被正确应用，证明新协议不是“只会保守拒绝”。
+  - 产物：
+    - `var/artifacts/benchmarks/llm_hallucination_guardrail_benchmark_scientific_20260321_135012/`
+- 对比数据：
+  - `unsafe_change` 场景共 `3` 个：
+    - 旧协议安全通过率：`0.00%`
+    - 当前协议安全通过率：`100.00%`
+  - `call_avoidance` 场景共 `2` 个：
+    - 当前协议减少模型调用机会成功率：`100.00%`
+  - `valid_change` 场景共 `1` 个：
+    - 当前协议合法补丁落地成功率：`100.00%`
+- 典型场景结论：
+  - 图片描述补全：
+    - 旧整段回写会放大改动范围；
+    - 当前补丁协议在无法唯一定位时直接拒绝应用，保持原文。
+  - 字幕翻译与润色：
+    - 旧模式若信任远端回包，会被错误 `start_sec/end_sec/source_subtitle_ids` 污染；
+    - 当前链路只接受“句子编号 + 译文”，其余字段由本地状态回填。
+  - 本地文本清理：
+    - 旧模式若直接信任整句 cleaned_text，会误删 `智能体（agent）` 这类双语术语；
+    - 当前链路通过本地补丁执行 + 术语保护回退保住原句。
+  - 模型调用机会收缩：
+    - 无有效图文对齐证据时，图片描述补全阶段直接 `llm_calls=0`；
+    - 合并模式命中后，清理阶段 `token_usage=0`、`llm_factory_calls=0`。
+- 归因：
+  - 这组结果说明“幻觉风险下降”是可以被工程化验证的，但验证对象不是抽象的“模型变聪明”，而是：
+    - 模型可改动范围是否被约束；
+    - 不可信字段是否被本地权威值覆盖；
+    - 缺乏证据时是否还能触发生成；
+    - 不该调用模型的阶段是否真的被剪掉。
+  - 更准确的表述应为：
+    - 我们已经验证了当前协议能显著降低“无证据新增、误改范围扩散、元数据漂移、关键术语误删”这几类可定义风险；
+    - 但这是一组机制级对照场景，不等价于线上全量语料上的统计学“幻觉率下降 X%”。
+
+## 2026-03-21 WebSocket 重连后的任务对账切换为终态限定补账
 - Date:
   - 2026-03-21
 - Change:
-  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
-    - 扩展 `imgneeded` 占位符匹配，兼容：
-      - `【imgneeded_SUxxx_img_01】`
-      - `【imgneeded_{SUxxx_img_01}】`
-      - `【imgneeded_{{img_id}}】`
-    - 对无法解析 `img_id` 但单元素材仍完整的场景，新增顺序回填兜底，把占位符直接替换为真实 Obsidian embed。
-  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
-    - 补两条回归：花括号 `img_id` 兼容、模板字面量顺序兜底。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - WebSocket `recoveryConnect` 成功后，不再走整页 `reloadTaskList(...)`。
+    - 改为只对本地仍非终态的任务执行 `reconcileTerminalTaskSnapshots(...)`。
+    - 页面隐藏期间收到终态消息时，只记录 `taskTerminalReconcilePending`，在恢复可见时做终态限定重绘/补账。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 新增 `/api/mobile/tasks/reconcile-terminal`，按 `taskId` 小批量返回已终态任务快照。
 - Why:
-  - 旧协议虽然已经统一为 `imgneeded`，但实际模型输出仍会出现轻微格式漂移。
-  - 如果链路只接受“绝对规范格式”，就会出现“素材明明存在，用户却看到占位符泄漏”的伪失败。
-  - 复用现有 `screenshot_items` 顺序信息即可做最后一道兼容，不需要额外引入新的协议层或二次 LLM 调用。
+  - 当前问题并不总是“终态没到前端”，而是“终态消息已经 merge 并 ACK，但因为页面隐藏没有立刻重绘，恢复时又没有命中刷新条件”。
+  - 这个场景真正需要的是“终态限定补账 + 延迟重绘”，而不是把所有任务列表都重新拉一遍。
+  - 对于恢复连接期间真正漏过终态消息的情况，只要按本地非终态 `taskId` 做小批量回查，也足以恢复最终一致性。
 - Trade-off:
-  - 代价是占位符替换逻辑更宽松，需要在“兼容变体”和“避免误替换”之间做平衡。
-  - 收益是对模型轻微偏格式输出更稳，能把问题收敛在本地确定性层解决，而不是把中间协议暴露给用户。
+  - 代价是前后端多了一条“终态限定补账”接口与本地待对账标记。
+  - 收益是把对账范围从“整页任务列表”压缩到“本地仍非终态任务”，减少无关列表刷新与排序抖动，同时保留终态一致性。
 - Verification:
-  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "braced_id_is_replaced or template_placeholder_uses_sequential_fallback" -q --basetemp var/tmp_pytest_phase2b_imgneeded_variants`
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`

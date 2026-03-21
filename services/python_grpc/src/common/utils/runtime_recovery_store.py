@@ -742,6 +742,18 @@ class RuntimeRecoveryStore:
             return Path(configured).expanduser().resolve()
         return (self.runtime_root / "runtime_state.db").resolve()
 
+    def close(self) -> int:
+        """
+        做什么：释放当前任务 runtime store 持有的 SQLite 共享索引连接。
+        为什么：Windows 上删除任务目录前若仍保留 WAL 句柄，会导致 runtime_state.db-wal 无法删除。
+        权衡：连接会在下次访问时按需重建，删除链路优先于连接复用收益。
+        """
+        if self._sqlite_index is None:
+            return 0
+        released = 1 if RuntimeRecoverySqliteIndex.release_shared(db_path=str(self.runtime_state_db_path)) else 0
+        self._sqlite_index = None
+        return released
+
     def _resume_index_path(self) -> Path:
         return self.runtime_root / "resume_index.json"
 

@@ -2,7 +2,6 @@ package com.mvp.module2.fusion.service.llm;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -189,23 +188,7 @@ public final class LlmGateway {
     }
 
     private String describeThrowable(Throwable ex) {
-        if (ex == null) {
-            return "";
-        }
-        List<String> parts = new ArrayList<>();
-        Throwable cursor = ex;
-        int depth = 0;
-        while (cursor != null && depth < 4) {
-            String part = cursor.getClass().getSimpleName();
-            String message = String.valueOf(cursor.getMessage() == null ? "" : cursor.getMessage()).trim();
-            if (StringUtils.hasText(message)) {
-                part += ": " + message;
-            }
-            parts.add(part);
-            cursor = cursor.getCause();
-            depth += 1;
-        }
-        return String.join(" -> ", parts);
+        return LlmErrorDescriber.describe(ex);
     }
 
     private static final class GatewayAttemptResult {
@@ -289,7 +272,7 @@ public final class LlmGateway {
                 try {
                     delegate.accept(safeDelta);
                 } catch (Exception callbackError) {
-                    logger.warn("[llm-stream] Ignore delta callback failure: {}", String.valueOf(callbackError.getMessage() == null ? "" : callbackError.getMessage()));
+                    logger.warn("[llm-stream] Ignore delta callback failure: {}", LlmErrorDescriber.describe(callbackError));
                 }
             };
         }

@@ -153,3 +153,8 @@ scripts/dev/
 services/java-orchestrator/src/test/java/com/mvp/module2/fusion/scheduler/
 tools/bgutil-ytdlp-pot-provider/
 docs/architecture/面试.md
+docs/architecture/断点续传.md
+docs/architecture/gRPC.md
+docs/architecture/WebSocket连接的心跳设计.md
+
+docs/architecture/任务提交入口设计.md

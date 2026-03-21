@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TypeVar
 import httpx
 
 from .client import LLMClient, LLMConfig, LLMResponse
+from .error_utils import format_provider_error
 from services.python_grpc.src.common.utils.hash_policy import fast_hasher
 from services.python_grpc.src.common.utils.runtime_llm_context import (
     build_runtime_llm_request_payload,
@@ -399,12 +400,10 @@ class DeepSeekClient(LLMClient):
                 start_time = datetime.now()
                 try:
                     data = await self._post_with_retry(payload)
-                except httpx.HTTPStatusError as error:
-                    raise RuntimeError(
-                        f"DeepSeek API error: {error.response.status_code} - {error.response.text}"
-                    ) from error
                 except Exception as error:
-                    raise RuntimeError(f"DeepSeek API error: {error}") from error
+                    raise RuntimeError(
+                        f"DeepSeek API error: {format_provider_error(error, base_url=self.config.base_url, model=self.config.model, timeout=self.config.timeout)}"
+                    ) from error
 
                 try:
                     content = str(data["choices"][0]["message"]["content"])

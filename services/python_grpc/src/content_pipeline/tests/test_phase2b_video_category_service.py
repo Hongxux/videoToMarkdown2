@@ -31,6 +31,7 @@ def _seed_task(
     title: str,
     group_name: str,
     body_text: str,
+    knowledge_groups: list[dict] | None = None,
     category_path: str | None = None,
 ) -> Path:
     task_dir = _build_task_dir(tmp_path, task_id)
@@ -44,7 +45,8 @@ def _seed_task(
         task_dir / "result.json",
         {
             "title": title,
-            "knowledge_groups": [
+            "knowledge_groups": knowledge_groups
+            or [
                 {
                     "group_name": group_name,
                     "units": [
@@ -179,6 +181,8 @@ def test_classify_phase2b_output_writes_task_and_summary_artifacts(tmp_path, mon
 
     task_payload = json.loads((task_dir / "category_classification.json").read_text(encoding="utf-8"))
     assert task_payload["category_path"] == "engineering/algorithms"
+    assert "KMP overview" in task_payload["input_snapshot"]["content_evidence_text"]
+    assert task_payload["input_snapshot"]["group_evidence"][0]["group_name"] == "KMP overview"
 
     video_meta = json.loads((task_dir / "video_meta.json").read_text(encoding="utf-8"))
     assert video_meta["category_path"] == "engineering/algorithms"
@@ -321,6 +325,96 @@ def test_classify_phase2b_output_accepts_direct_multi_level_category_path(tmp_pa
     assert video_meta["category_path"] == "engineering/java/concurrency"
     assert video_meta["category_depth"] == 3
     assert video_meta["category_leaf"] == "concurrency"
+
+
+def test_classify_phase2b_output_renders_real_multigroup_evidence_into_prompt(tmp_path, monkeypatch):
+    task_dir = _seed_task(
+        tmp_path,
+        task_id="task-evidence",
+        title="Java concurrency deep dive",
+        group_name="线程池设计",
+        body_text="讲解核心线程数与阻塞队列。",
+        knowledge_groups=[
+            {
+                "group_name": "线程池设计",
+                "units": [
+                    {
+                        "body_text": "讲解核心线程数、阻塞队列、拒绝策略和线程复用。",
+                    }
+                ],
+            },
+            {
+                "group_name": "并发控制",
+                "units": [
+                    {
+                        "body_text": "讲解 CAS、自旋、可见性和锁竞争的取舍。",
+                    }
+                ],
+            },
+        ],
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    captured_prompts: list[str] = []
+    responses = [
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/java/concurrency",
+                    "is_new": True,
+                    "reasoning": "The content focuses on Java concurrency and thread pool design.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/java/concurrency",
+                    "is_new": True,
+                    "reasoning": "The content focuses on Java concurrency and thread pool design.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+    ]
+
+    async def _fake_deepseek_complete_text(**kwargs):
+        captured_prompts.append(str(kwargs.get("prompt") or ""))
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2b.video_category_service.llm_gateway.deepseek_complete_text",
+        _fake_deepseek_complete_text,
+    )
+
+    result = asyncio.run(
+        classify_phase2b_output(
+            output_dir=str(task_dir),
+            title="Java concurrency deep dive",
+            result_json_path=str(task_dir / "result.json"),
+        )
+    )
+
+    assert result is not None
+    assert result["category_path"] == "engineering/java/concurrency"
+    assert captured_prompts
+    first_prompt = captured_prompts[0]
+    assert "Java concurrency deep dive" in first_prompt
+    assert "线程池设计" in first_prompt
+    assert "并发控制" in first_prompt
+    assert "核心线程数" in first_prompt
+    assert "CAS" in first_prompt
+    assert "{video_title}" not in first_prompt
+    assert "{group_evidence}" not in first_prompt
+
+    task_payload = json.loads((task_dir / "category_classification.json").read_text(encoding="utf-8"))
+    assert "并发控制" in task_payload["input_snapshot"]["content_evidence_text"]
+    assert len(task_payload["input_snapshot"]["group_evidence"]) == 2
 
 
 def test_classify_phase2b_output_routes_into_existing_child_category(tmp_path, monkeypatch):

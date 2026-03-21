@@ -147,6 +147,42 @@ def test_render_prompt_missing_variable_raises(monkeypatch):
         render_prompt(PromptKeys.DEEPSEEK_KC_BATCH_USER, context={"title": "only-title"})
 
 
+def test_render_prompt_category_classifier_injects_values(monkeypatch):
+    _reset_loader_cache()
+    monkeypatch.setattr(
+        prompt_loader,
+        "load_module2_config",
+        lambda: {
+            "prompt_management": {
+                "enabled": True,
+                "root_dir": "",
+                "overrides": {},
+                "strict": False,
+            }
+        },
+    )
+
+    content = render_prompt(
+        PromptKeys.DEEPSEEK_CATEGORY_CLASSIFIER_USER,
+        context={
+            "video_title": "Java 并发",
+            "first_unit_text": "开场介绍线程池。",
+            "group_names": "- 线程池\n- 锁优化",
+            "group_evidence": "1. 线程池\n   - 证据1: 讲解核心线程数与阻塞队列",
+            "content_evidence_text": "线程池: 讲解核心线程数与阻塞队列",
+            "categories": "编程开发/Java\n系统设计/并发",
+            "target_level": 2,
+            "max_target_level": 4,
+            "required_prefix": "",
+        },
+    )
+
+    assert "Java 并发" in content
+    assert "线程池: 讲解核心线程数与阻塞队列" in content
+    assert "{video_title}" not in content
+    assert "{group_evidence}" not in content
+
+
 def test_concrete_knowledge_prompt_supports_system_key_and_legacy_user_key(monkeypatch):
     _reset_loader_cache()
     monkeypatch.setattr(

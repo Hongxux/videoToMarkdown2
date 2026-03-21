@@ -2,6 +2,7 @@ package com.mvp.module2.fusion.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient;
+import com.mvp.module2.fusion.service.llm.LlmErrorDescriber;
 import org.apache.pdfbox.contentstream.PDFStreamEngine;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.cos.COSBase;
@@ -349,7 +350,7 @@ public class BookMarkdownService {
         } catch (Exception error) {
             logger.error("Book markdown processing failed, source={}, output={}", sourcePath, outputDir, error);
             result.success = false;
-            result.errorMessage = firstNonBlank(error.getMessage(), error.getClass().getSimpleName());
+            result.errorMessage = LlmErrorDescriber.describe(error);
             return result;
         }
     }
@@ -385,9 +386,9 @@ public class BookMarkdownService {
             result.success = true;
             return result;
         } catch (Exception error) {
-            logger.warn("Probe book failed, sourcePath={}, err={}", sourcePath, error.getMessage());
+            logger.warn("Probe book failed, sourcePath={}, err={}", sourcePath, LlmErrorDescriber.describe(error));
             result.success = false;
-            result.errorMessage = firstNonBlank(error.getMessage(), error.getClass().getSimpleName());
+            result.errorMessage = LlmErrorDescriber.describe(error);
             return result;
         }
     }

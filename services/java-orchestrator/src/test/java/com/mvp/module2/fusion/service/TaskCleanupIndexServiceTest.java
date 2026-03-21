@@ -125,6 +125,25 @@ class TaskCleanupIndexServiceTest {
         assertFalse(Files.exists(taskRoot.resolve("intermediates").resolve("task_metrics_VT_cleanup_003.json")));
     }
 
+    @Test
+    void scheduleImmediateCleanupShouldCreateDueQueueRecord() throws Exception {
+        TestContext context = createContext();
+        Path taskRoot = createLatestVideoTaskRoot(context.storageRoot, "cleanup-hash-004");
+
+        boolean scheduled = context.service.scheduleImmediateCleanupForTask(
+                "VT_cleanup_004",
+                taskRoot.toString(),
+                "VIDEO"
+        );
+
+        assertTrue(scheduled);
+        PendingCleanupTaskRecord record = context.cleanupRepository.findByTaskId("VT_cleanup_004").orElseThrow();
+        assertEquals("cleanup-hash-004", record.storageKey());
+        assertEquals("DELETE_PENDING_CLEANUP", record.taskStatus());
+        assertEquals(0L, record.ttlMillis());
+        assertEquals(record.completedAtMs(), record.cleanupAfterMs());
+    }
+
     private TestContext createContext() throws Exception {
         Path dbPath = tempDir.resolve("cleanup-index.db");
         Files.createDirectories(dbPath.getParent());
@@ -146,6 +165,7 @@ class TaskCleanupIndexServiceTest {
                     status TEXT NOT NULL,
                     progress REAL NOT NULL DEFAULT 0,
                     status_message TEXT,
+                    user_message TEXT,
                     result_path TEXT,
                     cleanup_source_path TEXT,
                     error_message TEXT,

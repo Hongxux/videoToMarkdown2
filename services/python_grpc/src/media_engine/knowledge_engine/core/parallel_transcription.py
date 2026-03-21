@@ -83,6 +83,14 @@ _PROCESS_POOL_CRASH_MARKERS = (
     "a child process terminated abruptly",
 )
 
+_LANGUAGE_PROBE_SUPPORTED_LANGUAGES = {"zh", "en"}
+_LANGUAGE_PROBE_MAX_WINDOWS = 3
+_LANGUAGE_PROBE_MIN_WINDOW_SEC = 30
+_LANGUAGE_PROBE_MIN_SPEECH_SEC = 6.0
+_LANGUAGE_PROBE_MIN_CONFIDENCE = 0.80
+_LANGUAGE_PROBE_SINGLE_WINDOW_MIN_CONFIDENCE = 0.95
+_LANGUAGE_PROBE_SCORE_MARGIN = 1.35
+
 
 def _is_resource_exhaustion_error(error):
     if error is None:
@@ -302,36 +310,220 @@ def _extract_audio_slice(source_audio_path, start_sec, duration_sec, output_audi
         )
 
 
-def _detect_language_by_probe(full_audio_path, model_path, device, compute_type, cpu_threads, probe_sec=120):
+def _build_language_probe_windows(total_duration_sec, probe_sec):
+    """将探测预算拆成头/中/尾窗口，避免单看片头把主体中文误锁成英文。"""
+    safe_duration = max(0.0, safe_float(total_duration_sec, 0.0))
+    probe_budget_sec = max(_LANGUAGE_PROBE_MIN_WINDOW_SEC, safe_int(probe_sec, 120))
+
+    if safe_duration <= 0:
+        return [
+            {
+                "window_index": 0,
+                "start": 0.0,
+                "duration": float(probe_budget_sec),
+            }
+        ]
+
+    if safe_duration <= probe_budget_sec:
+        window_count = 1
+    elif safe_duration <= probe_budget_sec * 2:
+        window_count = 2
+    else:
+        window_count = _LANGUAGE_PROBE_MAX_WINDOWS
+
+    window_duration = min(
+        safe_duration,
+        max(_LANGUAGE_PROBE_MIN_WINDOW_SEC, float(probe_budget_sec) / float(window_count)),
+    )
+
+    if window_count == 1:
+        raw_starts = [0.0]
+    elif window_count == 2:
+        raw_starts = [0.0, max(0.0, safe_duration - window_duration)]
+    else:
+        raw_starts = [
+            0.0,
+            max(0.0, (safe_duration - window_duration) / 2.0),
+            max(0.0, safe_duration - window_duration),
+        ]
+
+    windows = []
+    seen = set()
+    for index, raw_start in enumerate(raw_starts):
+        start = max(0.0, min(safe_duration, safe_float(raw_start, 0.0)))
+        duration = max(0.0, min(window_duration, safe_duration - start))
+        dedupe_key = (round(start, 3), round(duration, 3))
+        if duration <= 0 or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        windows.append(
+            {
+                "window_index": len(windows),
+                "start": start,
+                "duration": duration,
+            }
+        )
+    return windows
+
+
+def _pick_stable_language_from_probe_samples(probe_samples):
     """
-    从前2分钟（可配置）探测语种，仅在 zh/en 间固定语言，其他场景保留自动检测。
+    只有当 probe 窗口在有效语音和置信度上都足够稳定时，才把 auto 升级成固定语种。
+    一旦出现冲突或证据不足，就保留 auto，让后续分段继续自适应。
     """
-    probe_sec = max(30, safe_int(probe_sec, 120))
-    probe_audio = f"{full_audio_path}.probe_{probe_sec}s.wav"
+    language_stats = {}
+    for sample in list(probe_samples or []):
+        if not isinstance(sample, dict):
+            continue
+        language = normalize_whisper_language(sample.get("language"))
+        if language not in _LANGUAGE_PROBE_SUPPORTED_LANGUAGES:
+            continue
+
+        probability = max(0.0, safe_float(sample.get("probability", 0.0), 0.0))
+        speech_duration = max(0.0, safe_float(sample.get("speech_duration", 0.0), 0.0))
+        if speech_duration < _LANGUAGE_PROBE_MIN_SPEECH_SEC:
+            continue
+
+        sample_score = probability * max(1.0, speech_duration)
+        stat = language_stats.setdefault(
+            language,
+            {
+                "votes": 0,
+                "score": 0.0,
+                "speech_duration": 0.0,
+                "probability_sum": 0.0,
+            },
+        )
+        stat["votes"] += 1
+        stat["score"] += sample_score
+        stat["speech_duration"] += speech_duration
+        stat["probability_sum"] += probability
+
+    if not language_stats:
+        return None
+
+    # 只要有效 probe 窗口里同时出现中英两种语言，就保留 auto。
+    # 混合语种内容本来就不适合被单一全局语言硬锁定。
+    if len(language_stats) > 1:
+        return None
+
+    ordered_stats = sorted(
+        language_stats.items(),
+        key=lambda item: (
+            item[1]["score"],
+            item[1]["votes"],
+            item[1]["probability_sum"],
+        ),
+        reverse=True,
+    )
+    winner_language, winner_stats = ordered_stats[0]
+    winner_avg_probability = winner_stats["probability_sum"] / max(1, winner_stats["votes"])
+
+    if len(ordered_stats) == 1:
+        if winner_stats["votes"] >= 2 and winner_avg_probability >= _LANGUAGE_PROBE_MIN_CONFIDENCE:
+            return winner_language
+        if (
+            winner_stats["votes"] == 1
+            and winner_avg_probability >= _LANGUAGE_PROBE_SINGLE_WINDOW_MIN_CONFIDENCE
+            and winner_stats["speech_duration"] >= (_LANGUAGE_PROBE_MIN_SPEECH_SEC * 2)
+        ):
+            return winner_language
+        return None
+
+    _, runner_up_stats = ordered_stats[1]
+    if winner_stats["votes"] <= runner_up_stats["votes"]:
+        return None
+    if winner_avg_probability < _LANGUAGE_PROBE_MIN_CONFIDENCE:
+        return None
+    if winner_stats["score"] < runner_up_stats["score"] * _LANGUAGE_PROBE_SCORE_MARGIN:
+        return None
+    return winner_language
+
+
+def _format_language_probe_samples(probe_samples):
+    """压缩探测窗口信息，便于在日志里快速看出是哪个窗口把语种带偏。"""
+    formatted_samples = []
+    for sample in list(probe_samples or []):
+        if not isinstance(sample, dict):
+            continue
+        window_index = safe_int(sample.get("window_index", len(formatted_samples)), len(formatted_samples))
+        language = normalize_whisper_language(sample.get("language")) or "unknown"
+        start = safe_float(sample.get("start", 0.0), 0.0)
+        duration = safe_float(sample.get("duration", 0.0), 0.0)
+        probability = safe_float(sample.get("probability", 0.0), 0.0)
+        speech_duration = safe_float(sample.get("speech_duration", 0.0), 0.0)
+        formatted_samples.append(
+            f"#{window_index + 1} {language} start={start:.0f}s duration={duration:.0f}s "
+            f"speech={speech_duration:.1f}s conf={probability:.2f}"
+        )
+    return "; ".join(formatted_samples) if formatted_samples else "无有效窗口"
+
+
+def _detect_language_by_probe(
+    full_audio_path,
+    model_path,
+    device,
+    compute_type,
+    cpu_threads,
+    probe_sec=120,
+    total_duration_sec=0.0,
+):
+    """
+    将探测预算分散到多个窗口，用 VAD 去掉静音后再投票，避免片头英文把主体中文误锁死。
+    """
+    probe_windows = _build_language_probe_windows(total_duration_sec, probe_sec)
+    probe_samples = []
     try:
-        _extract_audio_slice(full_audio_path, 0, probe_sec, probe_audio)
         model = WhisperModel(
             model_path,
             device=device,
             compute_type=compute_type,
             cpu_threads=max(1, safe_int(cpu_threads, 1)),
         )
-        _, info = model.transcribe(
-            probe_audio,
-            language=None,
-            beam_size=1,
-            vad_filter=False,
-        )
-        detected = (getattr(info, "language", None) or "").strip().lower()
-        if detected in {"zh", "en"}:
-            return detected
-        return None
     except Exception as e:
         print(f"[语种探测] 失败，回退自动检测: {e}", flush=True)
-        return None
-    finally:
-        if os.path.exists(probe_audio):
-            os.remove(probe_audio)
+        return None, probe_samples
+
+    for probe_window in probe_windows:
+        probe_audio = (
+            f"{full_audio_path}.probe_"
+            f"{safe_int(probe_window.get('window_index', 0), 0)}_"
+            f"{int(safe_float(probe_window.get('start', 0.0), 0.0) * 1000)}_"
+            f"{int(safe_float(probe_window.get('duration', 0.0), 0.0) * 1000)}.wav"
+        )
+        try:
+            _extract_audio_slice(
+                full_audio_path,
+                probe_window.get("start", 0.0),
+                probe_window.get("duration", 0.0),
+                probe_audio,
+            )
+            _, info = model.transcribe(
+                probe_audio,
+                language=None,
+                beam_size=1,
+                vad_filter=True,
+            )
+            probe_samples.append(
+                {
+                    "window_index": safe_int(probe_window.get("window_index", 0), 0),
+                    "start": safe_float(probe_window.get("start", 0.0), 0.0),
+                    "duration": safe_float(probe_window.get("duration", 0.0), 0.0),
+                    "language": normalize_whisper_language(getattr(info, "language", None)),
+                    "probability": safe_float(getattr(info, "language_probability", 0.0), 0.0),
+                    "speech_duration": safe_float(getattr(info, "duration_after_vad", 0.0), 0.0),
+                }
+            )
+        except Exception as probe_error:
+            print(
+                f"[语种探测] 跳过窗口: start={safe_float(probe_window.get('start', 0.0), 0.0):.1f}s, "
+                f"duration={safe_float(probe_window.get('duration', 0.0), 0.0):.1f}s, error={probe_error}",
+                flush=True,
+            )
+        finally:
+            if os.path.exists(probe_audio):
+                os.remove(probe_audio)
+    return _pick_stable_language_from_probe_samples(probe_samples), probe_samples
 
 
 def get_video_duration(video_path):
@@ -791,22 +983,33 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     _extract_full_audio(video_path, full_audio_path)
     print("[并行转录] ✓ 整段音频提取完成", flush=True)
 
-    # 3.6 自动语种时，从前2分钟探测，仅在 zh/en 间固定语种。
+    # 3.6 自动语种时，用多窗口 probe 判断是否值得固定 zh/en，否则继续保留 auto。
     normalized_language = normalize_whisper_language(language)
     if normalized_language is None:
-        detected_lang = _detect_language_by_probe(
+        detected_lang, probe_samples = _detect_language_by_probe(
             full_audio_path=full_audio_path,
             model_path=model_path,
             device=device,
             compute_type=compute_type,
             cpu_threads=cpu_threads_per_worker,
             probe_sec=probe_sec,
+            total_duration_sec=safe_float(
+                isinstance(segments[-1], dict) and segments[-1].get("end", 0.0),
+                0.0,
+            ) if segments else 0.0,
         )
+        probe_summary = _format_language_probe_samples(probe_samples)
         if detected_lang in {"zh", "en"}:
             normalized_language = detected_lang
-            print(f"[并行转录] 语种探测结果: {detected_lang}（固定语种）", flush=True)
+            print(
+                f"[并行转录] 语种探测结果: {detected_lang}（固定语种，窗口={probe_summary}）",
+                flush=True,
+            )
         else:
-            print("[并行转录] 语种探测无法稳定判定 zh/en，继续自动检测", flush=True)
+            print(
+                f"[并行转录] 语种探测不稳定，继续自动检测。窗口={probe_summary}",
+                flush=True,
+            )
     
     if len(segments) == 1:
         print(f"[并行转录] 短视频模式，不分段处理")

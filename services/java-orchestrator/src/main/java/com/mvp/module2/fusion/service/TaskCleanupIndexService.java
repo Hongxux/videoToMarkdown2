@@ -137,6 +137,34 @@ public class TaskCleanupIndexService {
         taskCleanupQueueRepository.delete(taskId);
     }
 
+    @Transactional
+    public boolean scheduleImmediateCleanupForTask(String taskId, String taskRoot, String taskTypeHint) {
+        String normalizedTaskId = trim(taskId);
+        Path normalizedTaskRoot = normalizePath(taskRoot);
+        if (normalizedTaskId == null || normalizedTaskRoot == null || !isManagedStorageTaskRoot(normalizedTaskRoot)) {
+            return false;
+        }
+        String storageKey = resolveStorageKey(normalizedTaskRoot);
+        if (storageKey == null) {
+            return false;
+        }
+        long nowMs = Instant.now(clock).toEpochMilli();
+        taskCleanupQueueRepository.upsert(new PendingCleanupTaskRecord(
+                normalizedTaskId,
+                storageKey,
+                normalizedTaskRoot.toString(),
+                resolveTaskTypeHint(taskTypeHint, normalizedTaskRoot),
+                "DELETE_PENDING_CLEANUP",
+                POLICY_VERSION,
+                0L,
+                nowMs,
+                nowMs,
+                nowMs,
+                null
+        ));
+        return true;
+    }
+
     public int reconcileCleanupPolicy() {
         if (!cleanupEnabled) {
             return 0;
@@ -432,6 +460,17 @@ public class TaskCleanupIndexService {
     private String resolveTaskType(TaskQueueManager.TaskEntry task, Path taskRoot) {
         if (task != null && task.bookOptions != null) {
             return TASK_TYPE_BOOK;
+        }
+        return resolveTaskTypeHint(null, taskRoot);
+    }
+
+    private String resolveTaskTypeHint(String taskTypeHint, Path taskRoot) {
+        String normalizedHint = normalizeUpper(taskTypeHint);
+        if (TASK_TYPE_BOOK.equals(normalizedHint)) {
+            return TASK_TYPE_BOOK;
+        }
+        if (TASK_TYPE_VIDEO.equals(normalizedHint)) {
+            return TASK_TYPE_VIDEO;
         }
         if (taskRoot != null) {
             if (Files.isRegularFile(taskRoot.resolve("book.md").normalize())

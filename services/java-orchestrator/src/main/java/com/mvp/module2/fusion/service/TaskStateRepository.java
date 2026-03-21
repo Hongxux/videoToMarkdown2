@@ -214,6 +214,21 @@ public class TaskStateRepository {
         return Optional.of(rows.get(0));
     }
 
+    @Transactional
+    public boolean deleteTask(String taskId) {
+        String normalizedTaskId = normalize(taskId);
+        if (normalizedTaskId.isEmpty()) {
+            return false;
+        }
+        return jdbcTemplate.update(
+                """
+                DELETE FROM task_runtime_state
+                WHERE task_id = ?
+                """,
+                normalizedTaskId
+        ) > 0;
+    }
+
     public List<PersistedTaskRecord> listAllTasks() {
         return jdbcTemplate.query(
                 """
@@ -274,11 +289,22 @@ public class TaskStateRepository {
             String normalizedVideoKey,
             String excludeTaskId
     ) {
-        String normalizedKey = normalize(normalizedVideoKey);
-        if (normalizedKey.isEmpty()) {
+        List<PersistedTaskRecord> candidates = findReusableTasksByNormalizedVideoKey(normalizedVideoKey, excludeTaskId);
+        if (candidates.isEmpty()) {
             return Optional.empty();
         }
-        List<PersistedTaskRecord> rows = jdbcTemplate.query(
+        return Optional.of(candidates.get(0));
+    }
+
+    public List<PersistedTaskRecord> findReusableTasksByNormalizedVideoKey(
+            String normalizedVideoKey,
+            String excludeTaskId
+    ) {
+        String normalizedKey = normalize(normalizedVideoKey);
+        if (normalizedKey.isEmpty()) {
+            return List.of();
+        }
+        return jdbcTemplate.query(
                 """
                 SELECT
                     task_id,
@@ -308,7 +334,6 @@ public class TaskStateRepository {
                   AND task_id <> ?
                   AND status NOT IN ('FAILED', 'CANCELLED', 'DEDUPED', 'MANUAL_RETRY_REQUIRED', 'FATAL')
                 ORDER BY created_at DESC
-                LIMIT 1
                 """,
                 (rs, rowNum) -> new PersistedTaskRecord(
                         rs.getString("task_id"),
@@ -337,10 +362,6 @@ public class TaskStateRepository {
                 normalizedKey,
                 normalize(excludeTaskId)
         );
-        if (rows.isEmpty()) {
-            return Optional.empty();
-        }
-        return Optional.of(rows.get(0));
     }
 
     private String serializeBookOptions(TaskQueueManager.BookProcessingOptions options) {

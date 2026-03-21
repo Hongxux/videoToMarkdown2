@@ -4104,6 +4104,7 @@
         taskUpdatesLastPongAt: 0,
         taskUpdatesLastProcessedMessageId: TASK_UPDATES_WS_INITIAL_MESSAGE_ID,
         taskUpdatesPendingAckMessageId: 0,
+        taskTerminalReconcilePending: false,
         taskListSelectionMode: false,
         taskListSelectedIds: new Set(),
         taskListSelectionPivotId: '',
@@ -6254,6 +6255,11 @@
         return list.reduce((maxVersion, task) => {
             const createdAt = Date.parse(String(task && task.createdAt || '').trim());
             const lastOpenedAt = Date.parse(String(task && task.lastOpenedAt || '').trim());
+            const runtimeUpdatedAt = Date.parse(String(
+                task && task.runtimeUpdatedAt
+                    ? task.runtimeUpdatedAt
+                    : ''
+            ).trim());
             const costUpdatedAt = Date.parse(String(
                 task && task.taskCost && task.taskCost.updatedAt
                     ? task.taskCost.updatedAt
@@ -6262,6 +6268,7 @@
             const nextVersion = Math.max(
                 Number.isFinite(createdAt) ? createdAt : 0,
                 Number.isFinite(lastOpenedAt) ? lastOpenedAt : 0,
+                Number.isFinite(runtimeUpdatedAt) ? runtimeUpdatedAt : 0,
                 Number.isFinite(costUpdatedAt) ? costUpdatedAt : 0
             );
             return Math.max(maxVersion, nextVersion);
@@ -6612,6 +6619,84 @@
             setTaskSummary('');
         }
         return true;
+    }
+
+    async function fetchTerminalTaskSnapshots(taskIds) {
+        const normalizedTaskIds = Array.isArray(taskIds)
+            ? taskIds.map((taskId) => normalizeTaskId(taskId)).filter(Boolean)
+            : [];
+        if (!normalizedTaskIds.length) {
+            return { tasks: [] };
+        }
+        const resp = await fetchWithTimeout(`${API_BASE}/tasks/reconcile-terminal`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                taskIds: normalizedTaskIds,
+            }),
+        }, 12000);
+        if (!resp.ok) {
+            throw new Error(`终态对账失败 HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    function collectTerminalReconcileCandidateTaskIds() {
+        const ids = [];
+        const seen = new Set();
+        const addTaskId = (rawTaskId) => {
+            const normalizedTaskId = normalizeTaskId(rawTaskId);
+            if (!normalizedTaskId || seen.has(normalizedTaskId)) {
+                return;
+            }
+            seen.add(normalizedTaskId);
+            ids.push(normalizedTaskId);
+        };
+        const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+        tasks.forEach((task) => {
+            if (isTaskTerminalStatus(task && task.status)) {
+                return;
+            }
+            addTaskId(task && task.taskId);
+        });
+        const currentTaskId = normalizeTaskId(state.currentTaskId);
+        if (currentTaskId) {
+            const currentTask = findTaskByTaskIdentity(state.currentTaskId, state.currentTaskStorageKey);
+            if (!currentTask || !isTaskTerminalStatus(currentTask.status)) {
+                addTaskId(currentTaskId);
+            }
+        }
+        return ids.slice(0, 200);
+    }
+
+    async function reconcileTerminalTaskSnapshots(options = {}) {
+        const force = !!options.force;
+        const shouldRender = !options || options.render !== false;
+        const pending = !!state.taskTerminalReconcilePending;
+        if (!force && !pending) {
+            return false;
+        }
+        const previousTasks = Array.isArray(state.tasks) ? state.tasks.map((task) => ({ ...task })) : [];
+        const candidateTaskIds = collectTerminalReconcileCandidateTaskIds();
+        let merged = false;
+        if (candidateTaskIds.length) {
+            const payload = await fetchTerminalTaskSnapshots(candidateTaskIds);
+            const terminalTasks = payload && Array.isArray(payload.tasks) ? payload.tasks : [];
+            if (terminalTasks.length) {
+                mergeTaskRecordsIntoState(terminalTasks, { replace: false });
+                merged = true;
+            }
+        }
+        if (shouldRender && (pending || merged)) {
+            applyTaskListMotionDiff(previousTasks, state.tasks || []);
+            renderTaskList();
+            await syncCurrentTaskRealtimeStateAfterTaskReload();
+            setTaskSummary('');
+        }
+        state.taskTerminalReconcilePending = false;
+        return pending || merged;
     }
 
     function normalizeTaskLifecycleStatus(status) {
@@ -8429,11 +8514,51 @@
         );
     }
 
+    function formatTaskRecoveryStageName(rawStage) {
+        const stage = normalizeTaskTitleText(rawStage).toLowerCase();
+        if (!stage) {
+            return '';
+        }
+        if (stage === 'download') return 'Download';
+        if (stage === 'transcribe') return 'Transcribe';
+        if (stage === 'book_pdf_extract') return 'Book PDF';
+        if (stage === 'stage1') return 'Stage1';
+        if (stage === 'phase2a') return 'Phase2A';
+        if (stage === 'analysis_extraction') return 'Analysis';
+        if (stage === 'asset_extract_java') return 'Asset Extract';
+        if (stage === 'phase2b') return 'Phase2B';
+        if (stage === 'finalize') return 'Finalize';
+        return stage;
+    }
+
+    function resolveTaskRecoveryPhaseText(task) {
+        const recovery = task && task.recovery && typeof task.recovery === 'object' ? task.recovery : null;
+        const stage = formatTaskRecoveryStageName(
+            task && task.recoveryStage
+                ? task.recoveryStage
+                : (recovery && recovery.stage)
+        );
+        const checkpoint = normalizeTaskTitleText(
+            task && task.recoveryCheckpoint
+                ? task.recoveryCheckpoint
+                : (recovery && recovery.checkpoint)
+        );
+        if (!stage && !checkpoint) {
+            return '';
+        }
+        const stageText = stage || 'Pipeline';
+        return checkpoint ? `${stageText} running (${checkpoint})` : `${stageText} running`;
+    }
+
     function resolveTaskPhaseText(task, statusVisual, progressPercent) {
         const statusMessage = normalizeTaskTitleText(task && task.statusMessage);
         const errorMessage = normalizeTaskTitleText(task && task.errorMessage);
+        const recoveryPhaseText = resolveTaskRecoveryPhaseText(task);
         if (shouldUseTaskErrorHint(statusVisual, statusMessage) && errorMessage) {
             return errorMessage;
+        }
+        if (!statusMessage && statusVisual === 'processing' && recoveryPhaseText) {
+            return recoveryPhaseText;
         }
         if (statusVisual === 'unknown' && !statusMessage) {
             return '异常残留/未完成产物';
@@ -9761,8 +9886,49 @@
                 nextTask.createdAt = createdAt;
             }
         }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'runtimeUpdatedAt')) {
+            const runtimeUpdatedAt = String(payload.runtimeUpdatedAt || '').trim();
+            if (runtimeUpdatedAt) {
+                nextTask.runtimeUpdatedAt = runtimeUpdatedAt;
+            }
+        }
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'source')) {
             nextTask.source = String(payload.source || '').trim() || nextTask.source || 'runtime';
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'blocked')) {
+            nextTask.blocked = !!payload.blocked;
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'statusCategory')) {
+            nextTask.statusCategory = String(payload.statusCategory || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'recoveryStage')) {
+            nextTask.recoveryStage = String(payload.recoveryStage || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'recoveryCheckpoint')) {
+            nextTask.recoveryCheckpoint = String(payload.recoveryCheckpoint || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'retryMode')) {
+            nextTask.retryMode = String(payload.retryMode || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'requiredAction')) {
+            nextTask.requiredAction = String(payload.requiredAction || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'retryEntryPoint')) {
+            nextTask.retryEntryPoint = String(payload.retryEntryPoint || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'retryStrategy')) {
+            nextTask.retryStrategy = String(payload.retryStrategy || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'operatorAction')) {
+            nextTask.operatorAction = String(payload.operatorAction || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'actionHint')) {
+            nextTask.actionHint = String(payload.actionHint || '').trim();
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'recovery')) {
+            nextTask.recovery = payload.recovery && typeof payload.recovery === 'object'
+                ? { ...payload.recovery }
+                : null;
         }
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'collectionId')) {
             nextTask.collectionId = String(payload.collectionId || '');
@@ -9822,6 +9988,9 @@
         const deduped = dedupeTasksByVideoUrl(nextTasks, { separateArchived: false });
         state.tasks = deduped.sort(compareTaskCreatedOrder);
         const affectsCurrentTask = taskMatchesIdentity(mergedTask, state.currentTaskId, state.currentTaskStorageKey);
+        if (document.hidden && isTaskTerminalStatus(mergedTask.status)) {
+            state.taskTerminalReconcilePending = true;
+        }
         const shouldRenderLiveUpdate = !document.hidden
             && (state.currentView === 'tasks' || affectsCurrentTask);
         if (shouldRenderLiveUpdate) {
@@ -10094,11 +10263,11 @@
                 syncTaskUpdatesSocketTaskSubscription(state.currentTaskId, '');
                 flushTaskUpdatesSocketAck();
                 if (recoveryConnect) {
-                    refreshTaskListIncrementally({
-                        showLoading: false,
+                    reconcileTerminalTaskSnapshots({
+                        force: true,
                         render: true,
                     }).catch((error) => {
-                        console.warn('refresh task snapshot after websocket reconnect failed', error);
+                        console.warn('reconcile terminal task snapshot after websocket reconnect failed', error);
                     });
                 }
                 finish(true);
@@ -20524,6 +20693,13 @@
             taskListRefreshPolicy.onVisibilityChange();
             if (!document.hidden) {
                 renderTaskNotificationPreference();
+                if (state.taskTerminalReconcilePending) {
+                    reconcileTerminalTaskSnapshots({
+                        render: true,
+                    }).catch((error) => {
+                        console.warn('reconcile terminal task snapshot on visibility restore failed', error);
+                    });
+                }
                 ensureTaskUpdatesWebSocketConnected().catch((error) => {
                     console.warn('reconnect task status websocket on visibility restore failed', error);
                 });
@@ -20533,6 +20709,13 @@
             }
         });
         window.addEventListener('pageshow', () => {
+            if (state.taskTerminalReconcilePending) {
+                reconcileTerminalTaskSnapshots({
+                    render: true,
+                }).catch((error) => {
+                    console.warn('reconcile terminal task snapshot on pageshow failed', error);
+                });
+            }
             ensureTaskUpdatesWebSocketConnected().catch((error) => {
                 console.warn('reconnect task status websocket on pageshow failed', error);
             });
