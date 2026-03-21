@@ -12226,6 +12226,75 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             vl_token_stats = {}
             vl_unit_analysis_outputs: List[Dict[str, Any]] = []
             vl_failure_snapshot: Dict[str, Any] = {}
+            streamed_semantic_payload: Optional[Dict[str, Any]] = None
+            streamed_semantic_units_map: Dict[str, Dict[str, Any]] = {}
+            streamed_semantic_update_count = 0
+            streamed_semantic_lock = asyncio.Lock()
+
+            async def _persist_streamed_vl_unit_output(unit_output: Dict[str, Any]) -> None:
+                nonlocal streamed_semantic_payload, streamed_semantic_units_map, streamed_semantic_update_count
+                if not output_dir or not isinstance(unit_output, dict):
+                    return
+
+                analysis_mode = str(unit_output.get("analysis_mode", "") or "").strip().lower()
+                metadata = unit_output.get("metadata", {})
+                semantic_unit_meta = metadata.get("semantic_unit", {}) if isinstance(metadata, dict) else {}
+                route_override = (
+                    str(semantic_unit_meta.get("_vl_route_override", "") or "").strip().lower()
+                    if isinstance(semantic_unit_meta, dict)
+                    else ""
+                )
+                if analysis_mode != "concrete" and route_override not in {"abstract", "concrete"}:
+                    return
+
+                async with streamed_semantic_lock:
+                    if streamed_semantic_payload is None:
+                        streamed_semantic_payload = data if isinstance(data, dict) else {}
+                        if semantic_units_path and os.path.exists(semantic_units_path):
+                            try:
+                                with open(semantic_units_path, "r", encoding="utf-8") as persisted_file:
+                                    loaded_payload = json.load(persisted_file)
+                                if isinstance(loaded_payload, dict):
+                                    streamed_semantic_payload = loaded_payload
+                            except Exception as load_error:
+                                logger.warning(
+                                    f"[{task_id}] Failed to load streamed semantic_units payload: {load_error}"
+                                )
+                        streamed_semantic_units_map = self._build_semantic_unit_index(streamed_semantic_payload)
+                        if not streamed_semantic_units_map:
+                            streamed_semantic_payload = self._build_grouped_semantic_units_payload(
+                                list(semantic_units or [])
+                            )
+                            streamed_semantic_units_map = self._build_semantic_unit_index(
+                                streamed_semantic_payload
+                            )
+
+                    if not streamed_semantic_units_map:
+                        return
+
+                    update_summary = self._apply_streamed_vl_unit_output_to_semantic_nodes(
+                        unit_output=unit_output,
+                        units_map={u.get("unit_id"): u for u in semantic_units if isinstance(u, dict)},
+                        persist_units_map=streamed_semantic_units_map,
+                    )
+                    updated_route = int(update_summary.get("route_patch_updated", 0) or 0)
+                    updated_concrete = int(update_summary.get("concrete_main_content_updated", 0) or 0)
+                    if updated_route <= 0 and updated_concrete <= 0:
+                        return
+
+                    persisted_paths = _persist_phase2a_semantic_units_payload(
+                        output_dir,
+                        streamed_semantic_payload,
+                        task_id=task_id,
+                    )
+                    streamed_semantic_update_count += 1
+                    logger.info(
+                        f"[{task_id}] Streamed VL unit semantic update persisted: "
+                        f"unit={update_summary.get('unit_id', '')}, "
+                        f"route_patch_updated={updated_route}, "
+                        f"concrete_main_content_updated={updated_concrete}, "
+                        f"paths={persisted_paths or [_phase2a_semantic_units_virtual_path(output_dir)]}"
+                    )
             if vl_units:
                 vl_t0 = time.perf_counter()
                 generator = VLMaterialGenerator(
@@ -12241,7 +12310,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     task_id=task_id,
                     storage_key=Path(output_dir).name if output_dir else "",
                 ):
-                    vl_task = asyncio.create_task(generator.generate(video_path, vl_units, output_dir))
+                    vl_task = asyncio.create_task(
+                        generator.generate(
+                            video_path,
+                            vl_units,
+                            output_dir,
+                            on_unit_result_streamed=_persist_streamed_vl_unit_output,
+                        )
+                    )
                 vl_started_at_sec = time.time()
                 _update_vl_heartbeat_state(
                     status="running",
@@ -12850,14 +12926,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             try:
                 has_updates = False
                 units_map = {u.get("unit_id"): u for u in semantic_units}
-                persist_payload: Any = data
-                if semantic_units_path and os.path.exists(semantic_units_path):
+                persist_payload: Any = streamed_semantic_payload if isinstance(streamed_semantic_payload, dict) else data
+                persist_units_map = (
+                    streamed_semantic_units_map
+                    if isinstance(streamed_semantic_units_map, dict) and streamed_semantic_units_map
+                    else {}
+                )
+                if not persist_units_map and semantic_units_path and os.path.exists(semantic_units_path):
                     try:
                         with open(semantic_units_path, "r", encoding="utf-8") as persisted_file:
                             persist_payload = json.load(persisted_file)
                     except Exception as load_error:
                         logger.warning(f"[{task_id}] Failed to load persisted semantic_units payload: {load_error}")
-                persist_units_map = self._build_semantic_unit_index(persist_payload)
+                if not persist_units_map:
+                    persist_units_map = self._build_semantic_unit_index(persist_payload)
                 if not persist_units_map:
                     # 兜底重建为 grouped 结构，避免回写时退化为旧的扁平展示格式。
                     persist_payload = self._build_grouped_semantic_units_payload(list(semantic_units or []))
@@ -13213,7 +13295,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     )
                     logger.info(
                         f"[{task_id}] Persisted semantic_units updates to {persisted_paths or [semantic_units_path]} "
-                        f"(material_request_units={updated_material_request_units}, "
+                        f"(streamed_unit_updates={streamed_semantic_update_count}, "
+                        f"material_request_units={updated_material_request_units}, "
                         f"instructional_units={updated_instructional_units}, "
                         f"concrete_main_content_units={updated_concrete_main_content_units}, "
                         f"route_override_units={synced_route_override_units}, "
