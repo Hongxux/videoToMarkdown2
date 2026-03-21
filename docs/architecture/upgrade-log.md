@@ -14750,3 +14750,60 @@ body` and task metadata is still present.
     - `tests/test_runtime_recovery_store.py`
     - `tests/test_runtime_recovery_resume_index.py`
     - `tests/test_grpc_runtime_stage_state.py`
+
+## 2026-03-21 Phase2B concrete/process 媒体保真链路补强（result.json 预落盘 + media-preserved 强制保 embed）
+- Date:
+  - 2026-03-21
+- Change:
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `assemble_only()` 在进入 `MarkdownEnhancer` 前先写出 `result.json`，让增强阶段读取到当前任务的最新 `document_payload`。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `concrete/process` 的 `media_preserved` 分支开始显式传入真实图片候选上下文，而不是硬编码 `(none)`。
+    - 新增 `_restore_media_preserved_base_text(...)`，若 LLM 结构化结果吞掉已有 Obsidian embed，则回退到确定性 media base text。
+    - 增强结束后再显式回写 `result.json`，避免后续链路继续消费旧 payload。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 增加“LLM 吞图时必须回退到 deterministic base”的回归。
+  - `services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py`
+    - 增加“`assemble_only()` 必须提前落盘 `result.json`”的回归。
+- Why:
+  - 这次修复的第一性原理不是“再让模型学会插图”，而是把 `concrete/process` 收敛为单向保真链路：
+    - 上游 VL 负责生成 canonical `main_content + [KEYFRAME_N]`
+    - 中游确定性回填负责把占位符替换成真实 embed
+    - 下游结构化最多只能整理文本，不能删除已有媒体锚点
+  - 现有架构的杠杆已经足够：
+    - `result.json` 是 Phase2B 增强阶段的输入真源
+    - `MarkdownEnhancer` 已有媒体占位符替换与 preserve prompt 能力
+    - 缺的只是“先落盘 + 后校验”的最后两道闸门
+- Trade-off:
+  - 代价是 `result.json` 在 Phase2B 期间会多一次显式落盘，并在 `media_preserved` 分支多一次 embed 完整性比较。
+  - 收益是 concrete/process 不再因为 LLM 局部改写而丢失媒体锚点，最终 Markdown 的可用性优先级高于文案重排。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "concrete_media_preserved_falls_back_to_deterministic_base_when_llm_drops_embeds" -q --basetemp var/tmp_pytest_phase2b_media_preserved`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py -k "assemble_only_exposes_phase2b_contract" -q --basetemp var/tmp_pytest_phase2b_result_contract`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 Phase2B `imgneeded` 占位符兼容层补强（花括号变体 + 顺序回填兜底）
+- Date:
+  - 2026-03-21
+- Change:
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 扩展 `imgneeded` 占位符匹配，兼容：
+      - `【imgneeded_SUxxx_img_01】`
+      - `【imgneeded_{SUxxx_img_01}】`
+      - `【imgneeded_{{img_id}}】`
+    - 对无法解析 `img_id` 但单元素材仍完整的场景，新增顺序回填兜底，把占位符直接替换为真实 Obsidian embed。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 补两条回归：花括号 `img_id` 兼容、模板字面量顺序兜底。
+- Why:
+  - 旧协议虽然已经统一为 `imgneeded`，但实际模型输出仍会出现轻微格式漂移。
+  - 如果链路只接受“绝对规范格式”，就会出现“素材明明存在，用户却看到占位符泄漏”的伪失败。
+  - 复用现有 `screenshot_items` 顺序信息即可做最后一道兼容，不需要额外引入新的协议层或二次 LLM 调用。
+- Trade-off:
+  - 代价是占位符替换逻辑更宽松，需要在“兼容变体”和“避免误替换”之间做平衡。
+  - 收益是对模型轻微偏格式输出更稳，能把问题收敛在本地确定性层解决，而不是把中间协议暴露给用户。
+- Verification:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "braced_id_is_replaced or template_placeholder_uses_sequential_fallback" -q --basetemp var/tmp_pytest_phase2b_imgneeded_variants`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`

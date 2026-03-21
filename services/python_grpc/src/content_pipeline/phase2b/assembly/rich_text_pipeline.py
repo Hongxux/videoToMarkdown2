@@ -15,6 +15,7 @@ import json
 import logging
 import asyncio
 import yaml
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
@@ -337,6 +338,257 @@ class RichTextPipeline:
             }
         )
 
+    @staticmethod
+    def _preview_audit_text(value: Any, max_chars: int = 120) -> str:
+        raw = " ".join(str(value or "").split())
+        if not raw:
+            return ""
+        if max_chars <= 0 or len(raw) <= max_chars:
+            return raw
+        return raw[:max_chars] + "...[TRUNCATED]"
+
+    def _build_image_match_audit_payload(self) -> Dict[str, Any]:
+        records = list(self._image_match_audit_records)
+        status_counter: Counter[str] = Counter()
+        unit_summary_map: Dict[str, Dict[str, Any]] = {}
+        source_counter: Counter[str] = Counter()
+        img_id_counter: Counter[str] = Counter()
+        compact_records: List[Dict[str, Any]] = []
+        unmapped_records: List[Dict[str, Any]] = []
+
+        for raw_record in records:
+            if not isinstance(raw_record, dict):
+                continue
+
+            unit_id = str(raw_record.get("unit_id") or "").strip()
+            img_id = str(raw_record.get("img_id") or "").strip()
+            source_id = str(raw_record.get("source_id") or "").strip()
+            mapping_status = str(raw_record.get("mapping_status") or "").strip()
+            sentence_id = str(raw_record.get("sentence_id") or "").strip()
+            sentence_text = str(raw_record.get("sentence_text") or "").strip()
+            img_description = str(raw_record.get("img_description") or "").strip()
+
+            status_counter[mapping_status or "(empty)"] += 1
+            if source_id:
+                source_counter[source_id] += 1
+            if img_id:
+                img_id_counter[img_id] += 1
+
+            unit_summary = unit_summary_map.setdefault(
+                unit_id or "(unknown)",
+                {
+                    "unit_id": unit_id,
+                    "total_records": 0,
+                    "mapped_records": 0,
+                    "unmapped_records": 0,
+                    "records_without_sentence_id": 0,
+                    "status_counts": Counter(),
+                },
+            )
+            unit_summary["total_records"] += 1
+            unit_summary["status_counts"][mapping_status or "(empty)"] += 1
+            if mapping_status == "mapped":
+                unit_summary["mapped_records"] += 1
+            else:
+                unit_summary["unmapped_records"] += 1
+            if not sentence_id:
+                unit_summary["records_without_sentence_id"] += 1
+
+            compact = {
+                "unit_id": unit_id,
+                "img_id": img_id,
+                "source_id": source_id,
+                "timestamp_sec": raw_record.get("timestamp_sec"),
+                "mapping_status": mapping_status,
+                "sentence_id": sentence_id,
+                "sentence_text_preview": self._preview_audit_text(sentence_text),
+                "img_description_preview": self._preview_audit_text(img_description),
+            }
+            compact = {key: value for key, value in compact.items() if value not in ("", None)}
+            compact_records.append(compact)
+            if mapping_status != "mapped" or not sentence_id:
+                unmapped_records.append(compact)
+
+        by_status = [
+            {
+                "mapping_status": status,
+                "count": count,
+            }
+            for status, count in sorted(status_counter.items(), key=lambda item: (-item[1], item[0]))
+        ]
+
+        by_unit: List[Dict[str, Any]] = []
+        for unit_key in sorted(unit_summary_map.keys()):
+            unit_summary = unit_summary_map[unit_key]
+            by_unit.append(
+                {
+                    "unit_id": unit_summary.get("unit_id", ""),
+                    "total_records": int(unit_summary.get("total_records", 0) or 0),
+                    "mapped_records": int(unit_summary.get("mapped_records", 0) or 0),
+                    "unmapped_records": int(unit_summary.get("unmapped_records", 0) or 0),
+                    "records_without_sentence_id": int(unit_summary.get("records_without_sentence_id", 0) or 0),
+                    "status_counts": dict(unit_summary.get("status_counts", Counter())),
+                }
+            )
+
+        duplicate_source_ids = [
+            {
+                "source_id": source_id,
+                "count": count,
+            }
+            for source_id, count in sorted(source_counter.items(), key=lambda item: (-item[1], item[0]))
+            if count > 1
+        ]
+        duplicate_img_ids = [
+            {
+                "img_id": img_id,
+                "count": count,
+            }
+            for img_id, count in sorted(img_id_counter.items(), key=lambda item: (-item[1], item[0]))
+            if count > 1
+        ]
+
+        overview = {
+            "total_records": len(records),
+            "mapped_records": status_counter.get("mapped", 0),
+            "unmapped_records": len(unmapped_records),
+            "records_without_sentence_id": sum(
+                1 for item in compact_records if not str(item.get("sentence_id") or "").strip()
+            ),
+            "unique_units": len(by_unit),
+            "duplicate_source_id_groups": len(duplicate_source_ids),
+            "duplicate_img_id_groups": len(duplicate_img_ids),
+        }
+
+        problem_summary: List[Dict[str, Any]] = []
+        if not records:
+            problem_summary.append(
+                {
+                    "severity": "warning",
+                    "type": "empty_audit",
+                    "message": "当前没有任何图片匹配审计记录。",
+                }
+            )
+        if overview["unmapped_records"] > 0:
+            problem_summary.append(
+                {
+                    "severity": "warning",
+                    "type": "unmapped_records",
+                    "message": f"存在 {overview['unmapped_records']} 条未成功匹配到句子的记录。",
+                }
+            )
+        if overview["records_without_sentence_id"] > 0:
+            problem_summary.append(
+                {
+                    "severity": "warning",
+                    "type": "missing_sentence_binding",
+                    "message": f"存在 {overview['records_without_sentence_id']} 条记录缺少 sentence_id 绑定。",
+                }
+            )
+        if duplicate_source_ids:
+            problem_summary.append(
+                {
+                    "severity": "info",
+                    "type": "duplicate_source_id",
+                    "message": f"存在 {len(duplicate_source_ids)} 组重复 source_id，建议检查是否重复审计或重复挂载。",
+                }
+            )
+        if duplicate_img_ids:
+            problem_summary.append(
+                {
+                    "severity": "info",
+                    "type": "duplicate_img_id",
+                    "message": f"存在 {len(duplicate_img_ids)} 组重复 img_id，建议检查素材命名或重复绑定。",
+                }
+            )
+        if not problem_summary:
+            problem_summary.append(
+                {
+                    "severity": "ok",
+                    "type": "healthy",
+                    "message": "没有明显的未匹配、缺少句子绑定或重复映射问题。",
+                }
+            )
+
+        return {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "overview": overview,
+            "problem_summary": problem_summary,
+            "by_status": by_status,
+            "by_unit": by_unit,
+            "duplicate_source_ids": duplicate_source_ids,
+            "duplicate_img_ids": duplicate_img_ids,
+            "unmapped_records": unmapped_records,
+            "compact_records": compact_records,
+            "total_records": len(records),
+            "records": records,
+        }
+
+    @staticmethod
+    def _build_image_match_audit_markdown(payload: Dict[str, Any]) -> str:
+        overview = payload.get("overview", {})
+        problem_summary = payload.get("problem_summary", [])
+        by_unit = payload.get("by_unit", [])
+        unmapped_records = payload.get("unmapped_records", [])
+
+        lines: List[str] = []
+        lines.append("# Phase2B Image Match Audit")
+        lines.append("")
+        lines.append("## 一眼结论")
+        lines.append(f"- total_records: {overview.get('total_records', 0)}")
+        lines.append(f"- mapped_records: {overview.get('mapped_records', 0)}")
+        lines.append(f"- unmapped_records: {overview.get('unmapped_records', 0)}")
+        lines.append(f"- records_without_sentence_id: {overview.get('records_without_sentence_id', 0)}")
+        lines.append(f"- duplicate_source_id_groups: {overview.get('duplicate_source_id_groups', 0)}")
+        lines.append(f"- duplicate_img_id_groups: {overview.get('duplicate_img_id_groups', 0)}")
+        lines.append("")
+
+        lines.append("## 问题摘要")
+        if isinstance(problem_summary, list) and problem_summary:
+            for item in problem_summary:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(f"- [{str(item.get('severity') or '').upper()}] {item.get('message', '')}")
+        else:
+            lines.append("- [INFO] 没有问题摘要。")
+        lines.append("")
+
+        lines.append("## 单元汇总")
+        if isinstance(by_unit, list) and by_unit:
+            for item in by_unit:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    "- "
+                    f"unit={item.get('unit_id', '')} "
+                    f"total={item.get('total_records', 0)} "
+                    f"mapped={item.get('mapped_records', 0)} "
+                    f"unmapped={item.get('unmapped_records', 0)} "
+                    f"missing_sentence_id={item.get('records_without_sentence_id', 0)}"
+                )
+        else:
+            lines.append("- 无单元汇总。")
+        lines.append("")
+
+        lines.append("## 未匹配记录")
+        if isinstance(unmapped_records, list) and unmapped_records:
+            for item in unmapped_records:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    "- "
+                    f"unit={item.get('unit_id', '')} "
+                    f"img_id={item.get('img_id', '')} "
+                    f"source_id={item.get('source_id', '')} "
+                    f"status={item.get('mapping_status', '')} "
+                    f"sentence_id={item.get('sentence_id', '')} "
+                    f"sentence={item.get('sentence_text_preview', '')}"
+                )
+        else:
+            lines.append("- 无未匹配记录。")
+        lines.append("")
+        return "\n".join(lines)
+
     def _flush_image_match_audit(self) -> str:
         """方法说明：RichTextPipeline._flush_image_match_audit 工具方法。
         执行步骤：
@@ -348,18 +600,14 @@ class RichTextPipeline:
 
         output_path = Path(self.output_dir) / "intermediates" / "phase2b_image_match_audit.json"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._build_image_match_audit_payload()
 
         with open(output_path, "w", encoding="utf-8") as file_obj:
-            json.dump(
-                {
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "total_records": len(self._image_match_audit_records),
-                    "records": self._image_match_audit_records,
-                },
-                file_obj,
-                ensure_ascii=False,
-                indent=2,
-            )
+            json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+
+        markdown_path = output_path.with_suffix(".md")
+        with open(markdown_path, "w", encoding="utf-8") as file_obj:
+            file_obj.write(self._build_image_match_audit_markdown(payload))
         return str(output_path)
 
     def _resolve_intermediate_path(self, provided_path: Optional[str], candidate_names: List[str]) -> str:
@@ -1605,6 +1853,8 @@ class RichTextPipeline:
             markdown_path = os.path.join(self.output_dir, markdown_filename)
             json_path = os.path.join(self.output_dir, "result.json")
             document_payload = document.to_dict()
+            with open(json_path, "w", encoding="utf-8") as file_obj:
+                json.dump(document_payload, file_obj, ensure_ascii=False, indent=2)
             store.commit_projection_payload(
                 stage="phase2b",
                 projection_name="result_document",

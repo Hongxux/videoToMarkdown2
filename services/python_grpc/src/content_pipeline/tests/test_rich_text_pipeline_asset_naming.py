@@ -788,6 +788,10 @@ def test_apply_external_materials_writes_image_match_audit(tmp_path):
 
         import json
         payload = json.loads(path_obj.read_text(encoding="utf-8"))
+        assert payload["overview"]["total_records"] == 1
+        assert payload["overview"]["mapped_records"] == 1
+        assert payload["overview"]["unmapped_records"] == 0
+        assert path_obj.with_suffix(".md").exists()
         records = payload.get("records", [])
         assert records
         first = records[0]
@@ -796,6 +800,42 @@ def test_apply_external_materials_writes_image_match_audit(tmp_path):
         assert first["mapping_status"] == "mapped"
     finally:
         os.environ.pop("MODULE2_CONFIG_PATH", None)
+
+
+def test_flush_image_match_audit_surfaces_unmapped_and_duplicate_source(tmp_path):
+    pipeline, _ = _build_pipeline(tmp_path)
+    pipeline._image_match_audit_enabled = True
+
+    pipeline._record_image_match_audit(
+        unit_id="SU970",
+        img_id="SU970_img_01",
+        source_id="SU970/shared_source",
+        timestamp_sec=1.0,
+        sentence_id="",
+        sentence_text="",
+        img_description="desc one",
+        mapping_status="unmapped",
+    )
+    pipeline._record_image_match_audit(
+        unit_id="SU970",
+        img_id="SU970_img_02",
+        source_id="SU970/shared_source",
+        timestamp_sec=2.0,
+        sentence_id="",
+        sentence_text="",
+        img_description="desc two",
+        mapping_status="unmapped",
+    )
+
+    audit_path = Path(pipeline._flush_image_match_audit())
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+
+    assert payload["overview"]["unmapped_records"] == 2
+    assert payload["overview"]["records_without_sentence_id"] == 2
+    assert payload["overview"]["duplicate_source_id_groups"] == 1
+    assert payload["duplicate_source_ids"][0]["source_id"] == "SU970/shared_source"
+    assert any(item["type"] == "unmapped_records" for item in payload["problem_summary"])
+    assert any(item["type"] == "duplicate_source_id" for item in payload["problem_summary"])
 
 
 def test_analyze_only_exposes_phase2a_contract(tmp_path):
@@ -964,8 +1004,12 @@ def test_assemble_only_exposes_phase2b_contract(tmp_path, monkeypatch):
     )
 
     assert Path(markdown_path).exists()
-    assert not Path(json_path).exists()
+    assert Path(json_path).exists()
+    assert Path(json_path).name == "result.json"
     assert Path(markdown_path).name == "Assemble Title.md"
+    json_payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    assert json_payload.get("title") == "Assemble Title"
+    assert json_payload.get("knowledge_groups")
 
     store = RuntimeRecoveryStore(
         output_dir=str(output_dir),

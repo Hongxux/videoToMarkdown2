@@ -11445,3 +11445,59 @@
     - 返回结构化 `OOM` 文本时的降并发重试
     - 只返回 `process pool terminated abruptly` 时的降并发重试
   - 以后凡是把异常压成字符串的聚合层代码，都必须保留“空消息异常的类型信息”，否则 `MemoryError` 这类关键语义会在日志看起来像空值，分类器也会被误导。
+
+## 2026-03-21 Phase2B concrete/process 媒体锚点被结构化结果覆盖，导致最终 Markdown 丢图或残留假链接
+- Date:
+  - 2026-03-21
+- Symptom:
+  - Phase2A / VL 已经产出 `concrete/process` 的 `[KEYFRAME_N]` 占位符与真实截图素材，但最终 Markdown 仍出现两类错误：
+    - 正文没有任何图片回填；
+    - 或正文出现 `![...](SU006_img_01)` 这类只包含 `img_id` 的假链接，而不是 `![[assets/...]]`。
+  - 在部分任务中，`phase2b_image_match_audit.json` 已显示图片全部匹配成功，但最终 `.md` 仍无图。
+- Root cause:
+  - `RichTextPipeline.assemble_only(...)` 在调用 `MarkdownEnhancer` 前，没有先把当前 `document_payload` 落盘到 `result.json`。
+  - 这会让 `MarkdownEnhancer` 在某些任务里继续读取旧 `result.json`，拿不到最新 `_vl_concrete_segments/main_content`，后续只能基于退化正文做结构化。
+  - 同时 `media_preserved` 分支虽然会继续调用 preserve prompt，但缺少“媒体 embed 不得丢失”的最终校验；一旦 LLM 返回的结构化文本吞掉已有 embed，旧逻辑仍会把这份无媒体正文当最终结果回写。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 在 `assemble_only()` 调用 `MarkdownEnhancer` 前，先把最新 `document_payload` 写入 `result.json`，确保增强阶段读取到的是当前任务的 canonical payload。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 为 `concrete/process` 的 `media_preserved` 分支补充真实 `image_context`。
+    - 新增 `_restore_media_preserved_base_text(...)`，若结构化结果丢失上游已回填的 Obsidian embed，则直接回退到确定性的 media base text。
+    - `enhance()` 结束时再显式回写 `result.json`，避免后续链路继续消费旧 payload。
+- Verification:
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "concrete_media_preserved_falls_back_to_deterministic_base_when_llm_drops_embeds" -q --basetemp var/tmp_pytest_phase2b_media_preserved`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py -k "assemble_only_exposes_phase2b_contract" -q --basetemp var/tmp_pytest_phase2b_result_contract`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - `concrete/process` 的媒体正文必须遵守“占位符先定锚、结构化只允许保留或规范化”的单向保真原则，禁止后续阶段用无媒体正文覆盖已有媒体正文。
+  - 任何 `Phase2B` 增强入口只要依赖 `result.json` 作为输入，都必须先把当前 payload 落盘，再进入增强或重构阶段。
+
+## 2026-03-21 Phase2B 对 `imgneeded` 变体占位符兼容不足，导致有图却只剩占位符或模板字面量
+- Date:
+  - 2026-03-21
+- Symptom:
+  - 部分 concrete 单元在最终 Markdown 中残留：
+    - `【imgneeded_{SU501_img_01}】`
+    - `【imgneeded_{{img_id}}】`
+  - 结果是图片素材已存在、`screenshot_items` 也完整，但正文仍只显示占位符或模板字面量。
+- Root cause:
+  - `_replace_image_placeholders(...)` 之前只支持严格格式 `【imgneeded_REAL_ID】`。
+  - 当模型输出携带花括号包裹的 `img_id`，或直接把模板字面量 `{{img_id}}` 带出时，旧正则无法命中，自然也无法回填真实 embed。
+  - 对“格式错误但顺序仍合理”的场景，旧逻辑也缺少顺序兜底，只能原样泄露占位符。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 扩展 `imgneeded` 占位符正则，兼容带花括号的 `img_id` 变体。
+    - 当 `img_id` 无法解析但当前单元仍有 `screenshot_items` 时，新增顺序回填兜底，按素材顺序回填真实 `![[...]]` embed。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 新增带花括号 `img_id` 变体回归。
+    - 新增模板字面量 `{{img_id}}` 顺序回填回归。
+- Verification:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "braced_id_is_replaced or template_placeholder_uses_sequential_fallback" -q --basetemp var/tmp_pytest_phase2b_imgneeded_variants`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 占位符协议即使已经收敛，也必须对“模型轻微偏格式输出”保留兼容层；否则真实素材存在时，用户仍会看到中间协议泄漏。
+  - 后续若再扩展占位符语法，必须同步补“规范格式 + 轻微变体 + 模板字面量”三类回归，避免兼容性再次倒退。

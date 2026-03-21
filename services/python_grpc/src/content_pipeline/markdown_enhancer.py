@@ -446,6 +446,7 @@ class MarkdownEnhancer:
         # 实验开关：在结构化前，基于图片描述对正文做一次增量补全。
         # 优先读取 config.yaml；若环境变量显式设置则覆盖配置。
         self._enable_img_desc_text_augment = self._load_img_desc_augment_switch(default_value=True)
+        self._enable_supplemental_images = self._load_supplemental_images_switch(default_value=True)
 
         # 可观测性：LLM 调用明细追踪（可配置 full/summary）
         trace_cfg = self._load_llm_trace_config(default_enabled=False)
@@ -637,6 +638,32 @@ class MarkdownEnhancer:
                 logger.warning(f"Failed to load img-desc augment switch from config: {exc}")
 
         env_raw = os.getenv("MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT")
+        if env_raw is not None and str(env_raw).strip() != "":
+            enabled = self._parse_bool(env_raw, enabled)
+
+        return enabled
+
+    def _load_supplemental_images_switch(self, default_value: bool = True) -> bool:
+        """Load Supplemental images output switch from config/env."""
+        enabled = bool(default_value)
+
+        config_path = self._resolve_config_path()
+        if config_path is not None:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                content_pipeline_cfg = config.get("content_pipeline", {}) if isinstance(config, dict) else {}
+                enhancer_cfg = (
+                    content_pipeline_cfg.get("markdown_enhancer", {})
+                    if isinstance(content_pipeline_cfg, dict)
+                    else {}
+                )
+                cfg_value = enhancer_cfg.get("enable_supplemental_images", enabled)
+                enabled = self._parse_bool(cfg_value, enabled)
+            except Exception as exc:
+                logger.warning(f"Failed to load supplemental-images switch from config: {exc}")
+
+        env_raw = os.getenv("MODULE2_ENABLE_SUPPLEMENTAL_IMAGES")
         if env_raw is not None and str(env_raw).strip() != "":
             enabled = self._parse_bool(env_raw, enabled)
 
@@ -2144,6 +2171,11 @@ class MarkdownEnhancer:
             except Exception as exc:
                 logger.warning(f"Failed to sync final media-preserved markdown into semantic_units payloads: {exc}")
 
+        try:
+            self._write_json_payload(Path(result_json_path), data)
+        except Exception as exc:
+            logger.warning(f"Failed to write result.json payload: {exc}")
+
         # Step 3: 组装 Markdown（固定 group -> unit 两级）
         logger.info("Step 3: Assembling grouped markdown")
         markdown = self._assemble_markdown(title, enhanced_groups)
@@ -3416,21 +3448,29 @@ class MarkdownEnhancer:
             return aliases
 
         by_id: Dict[str, Dict[str, Any]] = {}
+        ordered_items: List[Dict[str, Any]] = []
         for item in screenshot_items:
             if not isinstance(item, dict):
                 continue
+            img_path = str(item.get("img_path", "") or item.get("path", "") or item.get("file_path", "")).strip()
+            if not img_path:
+                continue
+            ordered_items.append(item)
             for candidate_img_id in _iter_img_id_aliases(item):
                 img_id = _normalize_img_id(candidate_img_id)
                 if not img_id:
                     continue
                 by_id.setdefault(img_id, item)
 
-        if not by_id:
+        if not by_id and not ordered_items:
             return content
 
-        # 仅支持新占位符格式：【imgneeded_{img_id}】
+        # 兼容以下占位符变体：
+        # - 【imgneeded_SU001_img_01】
+        # - 【imgneeded_{SU001_img_01}】
+        # - 【imgneeded_{{img_id}}】(模型误把模板字面量带出时走顺序回填)
         pattern = re.compile(
-            r"【\s*imgneeded_([A-Za-z0-9_\-]+)\s*】",
+            r"[【\[\(]\s*imgneeded_(?:\{+)?([A-Za-z0-9_\-]+)?(?:\}+)?\s*[】\]\)]",
             flags=re.IGNORECASE,
         )
 
@@ -3444,11 +3484,12 @@ class MarkdownEnhancer:
         for i, match in enumerate(matches):
             match_img_id = _normalize_img_id(match.group(1))
             if match_img_id in by_id:
-                 last_occurrence_indices[match_img_id] = i
+                last_occurrence_indices[match_img_id] = i
 
         # Build the result string
         result_parts = []
         last_pos = 0
+        sequential_cursor = 0
         
         for i, match in enumerate(matches):
             # Append text before this match
@@ -3457,7 +3498,7 @@ class MarkdownEnhancer:
             match_img_id = _normalize_img_id(match.group(1))
             item = by_id.get(match_img_id)
             
-            replacement = match.group(0) # Default to keeping it if not found
+            replacement = match.group(0)
             
             if item:
                 if i == last_occurrence_indices.get(match_img_id):
@@ -3469,6 +3510,20 @@ class MarkdownEnhancer:
                 else:
                     # Not the last one, remove it (replace with empty string)
                     replacement = ""
+            elif ordered_items:
+                while sequential_cursor < len(ordered_items):
+                    fallback_item = ordered_items[sequential_cursor]
+                    sequential_cursor += 1
+                    img_path = str(
+                        fallback_item.get("img_path", "")
+                        or fallback_item.get("path", "")
+                        or fallback_item.get("file_path", "")
+                    ).strip()
+                    if not img_path:
+                        continue
+                    frame_reason = str(fallback_item.get("frame_reason", "") or "").strip()
+                    replacement = self._format_obsidian_embed(img_path, alias=frame_reason)
+                    break
             
             result_parts.append(replacement)
             last_pos = match.end()
@@ -4092,6 +4147,8 @@ class MarkdownEnhancer:
     def _append_missing_image_embeds(self, content: str, screenshot_items: List[Dict[str, Any]]) -> str:
         if not screenshot_items:
             return content
+        if not self._enable_supplemental_images:
+            return content
 
         missing: List[str] = []
         existing_embed_paths = self._extract_obsidian_embed_paths(content)
@@ -4157,6 +4214,38 @@ class MarkdownEnhancer:
             base += "\n"
         return base + "\n" + "Supplemental clips:\n" + "\n".join(missing)
 
+    def _restore_media_preserved_base_text(
+        self,
+        section: EnhancedSection,
+        *,
+        base_text: str,
+        structured_text: str,
+    ) -> str:
+        """
+        做什么：校验 media_preserved 分支是否完整保留了上游已回填的媒体 embed。
+        为什么：concrete/process 的媒体锚点来自 Phase2A，占位符一旦回填成真实媒体，后续结构化只能保留，不能删掉。
+        权衡：若检测到媒体丢失，则直接回退到确定性的 base_text，优先保证媒体链路稳定。
+        """
+        normalized_base_text = str(base_text or "").strip()
+        normalized_structured_text = str(structured_text or "").strip()
+        base_embed_paths = self._extract_obsidian_embed_paths(normalized_base_text)
+        if not base_embed_paths:
+            return normalized_structured_text
+
+        structured_embed_paths = self._extract_obsidian_embed_paths(normalized_structured_text)
+        missing_embed_paths = sorted(
+            embed_path for embed_path in base_embed_paths if embed_path not in structured_embed_paths
+        )
+        if not missing_embed_paths:
+            return normalized_structured_text
+
+        logger.warning(
+            "%s: media-preserved structured text dropped %d embed(s); fallback to deterministic base text",
+            section.unit_id,
+            len(missing_embed_paths),
+        )
+        return normalized_base_text
+
     def _build_deterministic_text_for_non_abstract(self, section: EnhancedSection) -> str:
         """
         Deterministic fallback for concrete/process sections.
@@ -4174,7 +4263,7 @@ class MarkdownEnhancer:
             re.search(r"\[\s*CLIP_\d+\s*\]", base_text, flags=re.IGNORECASE)
         )
 
-        if normalized_kt == "concrete" and (has_keyframe_placeholder or has_clip_placeholder):
+        if normalized_kt in {"concrete", "process"} and (has_keyframe_placeholder or has_clip_placeholder):
             keyframe_embeds, keyframe_embed_map = self._build_concrete_keyframe_embeds_for_section(
                 section,
                 image_items,
@@ -4229,6 +4318,11 @@ class MarkdownEnhancer:
         if next_title:
             adjacent_parts.append(f"- Next section: {next_title}")
         adjacent_context = "\n".join(adjacent_parts) if adjacent_parts else "(none)"
+        image_context = "(none)"
+        if image_items:
+            image_context = "\n".join(
+                [f"- img_id={item['img_id']} | img_description={item['img_description']}" for item in image_items]
+            )
         structured_system_prompt = (
             self._structured_system_preserve_img_prompt
             or self._structured_system_prompt
@@ -4241,7 +4335,7 @@ class MarkdownEnhancer:
             title=section.title,
             knowledge_type=normalized_kt,
             body_text=base_text,
-            image_context="(none)",
+            image_context=image_context,
             adjacent_context=adjacent_context,
         )
 
@@ -4289,19 +4383,28 @@ class MarkdownEnhancer:
             logger.warning(f"Structured media-preserve generation failed for {section.unit_id}: {exc}")
             structured = base_text
 
-        structured = self._replace_tutorial_keyframe_placeholders(
+        final_text = self._replace_tutorial_keyframe_placeholders(
             structured,
             keyframe_embeds,
             keyframe_embed_map=keyframe_embed_map,
         )
-        structured = self._replace_clip_placeholders(structured, clip_embeds)
-        structured = self._replace_image_placeholders(structured, image_items)
-        structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
-        structured = self._strip_imgneeded_placeholders(structured).strip()
-        structured = self._append_missing_clip_embeds(structured or base_text, clip_items)
+        final_text = self._replace_clip_placeholders(final_text, clip_embeds)
+        final_text = self._replace_image_placeholders(final_text, image_items)
+        final_text = self._replace_tutorial_legacy_placeholders(final_text, keyframe_embeds)
+        final_text = self._strip_imgneeded_placeholders(final_text).strip()
+        final_text = self._append_missing_clip_embeds(final_text or base_text, clip_items)
         if not image_items:
-            return structured or base_text
-        return self._append_missing_image_embeds(structured or base_text, image_items)
+            return self._restore_media_preserved_base_text(
+                section,
+                base_text=base_text,
+                structured_text=final_text or base_text,
+            )
+        final_text = self._append_missing_image_embeds(final_text or base_text, image_items)
+        return self._restore_media_preserved_base_text(
+            section,
+            base_text=base_text,
+            structured_text=final_text or base_text,
+        )
 
     async def _build_structured_text_for_concept(
         self, section: EnhancedSection,

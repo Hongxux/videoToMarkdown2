@@ -1224,6 +1224,114 @@ def test_concrete_imgneeded_placeholder_can_match_source_id_alias(tmp_path, monk
     assert "![[assets/SU500_img_01.png]]" in markdown
 
 
+def test_concrete_imgneeded_placeholder_with_braced_id_is_replaced(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU501_img_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU501",
+                "title": "Concrete Braced Placeholder",
+                "knowledge_type": "concrete",
+                "body_text": "braced placeholder test",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU501_img_01",
+                            "img_path": str(img_path),
+                            "img_description": "from braced imgneeded",
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient("line1\n【imgneeded_{SU501_img_01}】\nline2")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU501": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "imgneeded_{SU501_img_01}" not in markdown
+    assert "![[assets/SU501_img_01.png]]" in markdown
+
+
+def test_concrete_imgneeded_template_placeholder_uses_sequential_fallback(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU502_img_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU502",
+                "title": "Concrete Template Placeholder",
+                "knowledge_type": "concrete",
+                "body_text": "template placeholder test",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU502_img_01",
+                            "img_path": str(img_path),
+                            "img_description": "template literal fallback",
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient("line1\n【imgneeded_{{img_id}}】\nline2")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU502": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "imgneeded" not in markdown
+    assert "![[assets/SU502_img_01.png]]" in markdown
+
+
 def test_old_img_placeholder_not_replaced_but_supplemental_images_present(tmp_path, monkeypatch):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -1259,6 +1367,7 @@ def test_old_img_placeholder_not_replaced_but_supplemental_images_present(tmp_pa
 
     enhancer = MarkdownEnhancer()
     enhancer._enabled = True
+    enhancer._enable_supplemental_images = True
     enhancer._llm_client = _FakeLLMClient("line [IMG:SU150_img_01]")
 
     async def _fake_hierarchy(sections, subject):
@@ -1277,6 +1386,62 @@ def test_old_img_placeholder_not_replaced_but_supplemental_images_present(tmp_pa
     assert "[IMG:SU150_img_01]" in markdown
     assert "Supplemental images:" in markdown
     assert "![[assets/SU150_img_01.png]]" in markdown
+
+
+def test_old_img_placeholder_does_not_append_supplemental_images_when_switch_disabled(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU151_img_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU151",
+                "title": "Concrete Old Placeholder Disabled",
+                "knowledge_type": "concrete",
+                "body_text": "old placeholder body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU151_img_01",
+                            "img_path": str(img_path),
+                            "img_description": "old format sample",
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._enable_supplemental_images = False
+    enhancer._llm_client = _FakeLLMClient("line [IMG:SU151_img_01]")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU151": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "[IMG:SU151_img_01]" in markdown
+    assert "Supplemental images:" not in markdown
+    assert "![[assets/SU151_img_01.png]]" not in markdown
 
 
 def test_no_image_candidates_strip_imgneeded_tokens(tmp_path, monkeypatch):
@@ -1770,6 +1935,20 @@ def test_markdown_enhancer_img_desc_switch_env_overrides_config(tmp_path, monkey
 
     enhancer = MarkdownEnhancer()
     assert enhancer._enable_img_desc_text_augment is False
+
+
+def test_markdown_enhancer_supplemental_images_switch_env_overrides_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "content_pipeline:\n  markdown_enhancer:\n    enable_supplemental_images: true\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("MODULE2_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MODULE2_ENABLE_SUPPLEMENTAL_IMAGES", "0")
+
+    enhancer = MarkdownEnhancer()
+    assert enhancer._enable_supplemental_images is False
 
 
 def test_concrete_section_skips_img_desc_augment_without_alignment_evidence(tmp_path, monkeypatch):
@@ -2472,3 +2651,108 @@ def test_concrete_calls_preserve_prompt_after_media_backfill_and_syncs_main_cont
     semantic_obj = json.loads(semantic_path.read_text(encoding="utf-8"))
     semantic_unit = semantic_obj["knowledge_groups"][0]["units"][0]
     assert semantic_unit["main_content"] == "final concrete body\n![[assets/SU991_key_01.png|canonical frame]]"
+
+
+def test_concrete_media_preserved_falls_back_to_deterministic_base_when_llm_drops_embeds(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU992_key_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU992",
+                "title": "Concrete Preserve Unit",
+                "knowledge_type": "concrete",
+                "body_text": "legacy body",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 1,
+                        "main_content": "Review the concrete frame [KEYFRAME_1]",
+                        "instructional_keyframes": [
+                            {"timestamp_sec": 2.0, "frame_reason": "canonical frame"}
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU992_img_01",
+                            "source_id": "SU992/SU992_ss_concrete_seg_01_key_01",
+                            "img_path": str(img_path),
+                            "img_description": "canonical frame",
+                            "frame_reason": "canonical frame",
+                            "timestamp_sec": 2.0,
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+    semantic_payload = {
+        "knowledge_groups": [
+            {
+                "group_name": "Concrete Preserve Unit",
+                "reason": "test",
+                "units": [
+                    {
+                        "unit_id": "SU992",
+                        "knowledge_type": "concrete",
+                        "knowledge_topic": "Concrete Preserve Unit",
+                        "full_text": "legacy full_text",
+                        "_vl_concrete_segments": [
+                            {
+                                "segment_id": 1,
+                                "main_content": "Review the concrete frame [KEYFRAME_1]",
+                                "instructional_keyframes": [
+                                    {"timestamp_sec": 2.0, "frame_reason": "canonical frame"}
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    semantic_path = tmp_path / "semantic_units_phase2a.json"
+    semantic_path.write_text(
+        json.dumps(semantic_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._enable_supplemental_images = False
+    recorder = _RecordingStructuredLLMClient("final concrete body without media")
+    enhancer._llm_client = recorder
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU992": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    expected_embed = "![[assets/SU992_key_01.png|canonical frame]]"
+    assert len(recorder.calls) == 1
+    assert expected_embed in recorder.calls[0]["prompt"]
+    assert "final concrete body without media" not in markdown
+    assert f"Review the concrete frame {expected_embed}" in markdown
+    result_obj = json.loads(result_path.read_text(encoding="utf-8"))
+    synced_unit = result_obj["knowledge_groups"][0]["units"][0]
+    assert synced_unit["body_text"] == f"Review the concrete frame {expected_embed}"
+    assert synced_unit["main_content"] == f"Review the concrete frame {expected_embed}"
