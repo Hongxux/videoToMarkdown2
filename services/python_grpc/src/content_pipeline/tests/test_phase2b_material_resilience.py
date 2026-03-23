@@ -578,6 +578,18 @@ def test_apply_external_materials_process_degraded_branch_runs_validator(tmp_pat
     assert calls["count"] == 1
     assert unit.materials is not None
     assert unit.materials.screenshot_paths == [str(screenshot_path.resolve())]
+    assert unit.materials.metadata["material_resolution_issues"] == [
+        {
+            "kind": "screenshot_request_not_propagated",
+            "reason": "process unit is missing propagated screenshot request/path, downstream assembly must recover materials locally",
+            "unit_id": "SUX04",
+            "knowledge_type": "process",
+            "context": {
+                "request_has_screenshot": False,
+                "tutorial_stepwise": False,
+            },
+        }
+    ]
 
 
 def test_apply_external_materials_short_process_with_explicit_screenshot_runs_validator(tmp_path):

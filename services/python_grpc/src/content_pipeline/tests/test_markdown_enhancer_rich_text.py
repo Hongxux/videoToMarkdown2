@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from services.python_grpc.src.content_pipeline.markdown_enhancer import MarkdownEnhancer, EnhancedSection
+from services.python_grpc.src.content_pipeline.phase2b.pipeline_service import Phase2bUnitPipelineResult
 
 
 STRUCTURED_SYS_MARKER = "教学内容结构化助手"
@@ -568,6 +569,73 @@ def test_concrete_keyframe_direct_pass_prefers_keyframe_id_over_instructional_or
     assert markdown.index("![[assets/SU778B_key_01.png|first by id]]") < markdown.index("![[assets/SU778B_key_02.png|second by id]]")
 
 
+def test_concrete_segment_keyframe_alias_placeholder_is_replaced(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img1 = assets_dir / "SU778C_key_01.png"
+    img1.write_bytes(b"img1")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU778C",
+                "title": "Concrete Segment Placeholder",
+                "knowledge_type": "concrete",
+                "body_text": "legacy body",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 2,
+                        "main_content": "Review [concrete_segment_02_keyframe_1]",
+                        "instructional_keyframes": [
+                            {"keyframe_id": "KEYFRAME_1", "timestamp_sec": 1.0, "frame_reason": "segment alias"},
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img1)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU778C_img_01",
+                            "source_id": "SU778C/SU778C_ss_concrete_seg_02_key_01",
+                            "img_path": str(img1),
+                            "img_description": "segment alias",
+                            "frame_reason": "segment alias",
+                            "timestamp_sec": 1.0,
+                            "keyframe_id": "KEYFRAME_1",
+                        },
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FailIfCalledLLMClient()
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU778C": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "[concrete_segment_02_keyframe_1]" not in markdown
+    assert "![[assets/SU778C_key_01.png|segment alias]]" in markdown
+
+
 def test_concrete_section_prefers_semantic_units_phase2a_canonical_body(tmp_path, monkeypatch):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -777,6 +845,8 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
     )
 
     enhancer = MarkdownEnhancer()
+    enhancer._enabled = False
+    enhancer._enable_skill_pipeline = False
     markdown = asyncio.run(
         enhancer.enhance(
             str(result_path),
@@ -790,10 +860,10 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
     assert "click settings" in markdown
     assert "open network tab" in markdown
     assert "[KEYFRAME_1]" not in markdown
-    assert "- settings panel visible: ![[vl_tutorial_units/SU002/SU002_ss_step_01_key_01_open_settings.png|settings panel visible]]" in markdown
-    assert "- port value saved: ![[vl_tutorial_units/SU002/SU002_ss_step_02_key_01_change_port.png|port value saved]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_ss_step_01_key_01_open_settings.png|settings panel visible]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_ss_step_02_key_01_change_port.png|port value saved]]" in markdown
+    assert "settings panel visible: ![[" not in markdown
+    assert "port value saved: ![[" not in markdown
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_01_open_settings.mp4]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_02_change_port.mp4]]" in markdown
     assert "> ?? **" not in markdown
@@ -855,6 +925,8 @@ def test_tutorial_step_dedupes_same_keyframe_path_and_keeps_alias(tmp_path):
     )
 
     enhancer = MarkdownEnhancer()
+    enhancer._enabled = False
+    enhancer._enable_skill_pipeline = False
     markdown = asyncio.run(
         enhancer.enhance(
             str(result_path),
@@ -932,6 +1004,8 @@ def test_tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed(tmp_path
     )
 
     enhancer = MarkdownEnhancer()
+    enhancer._enabled = False
+    enhancer._enable_skill_pipeline = False
     markdown = asyncio.run(
         enhancer.enhance(
             str(result_path),
@@ -943,6 +1017,149 @@ def test_tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed(tmp_path
     assert "【imgneeded_SU003_img_01】" not in markdown
     assert "![[vl_tutorial_units/SU003/SU003_ss_step_01_key_01_install.png]]" in markdown
     assert "![[vl_tutorial_units/SU003/SU003_clip_step_01_install.mp4]]" in markdown
+
+
+def test_tutorial_process_skill_pipeline_uses_main_content_priority_and_renders_structured_output(
+    tmp_path,
+    monkeypatch,
+):
+    unit_dir = tmp_path / "vl_tutorial_units" / "SU906"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    clip1 = unit_dir / "SU906_clip_step_01_open_settings.mp4"
+    key1 = unit_dir / "SU906_ss_step_01_key_01_open_settings.png"
+    clip2 = unit_dir / "SU906_clip_step_02_change_port.mp4"
+    key2 = unit_dir / "SU906_ss_step_02_key_01_change_port.png"
+    for file_path in [clip1, key1, clip2, key2]:
+        file_path.write_bytes(b"asset")
+
+    steps_payload = {
+        "unit_id": "SU906",
+        "schema": "tutorial_stepwise_v1",
+        "raw_response": [
+            {
+                "step_id": 1,
+                "step_description": "open settings",
+                "main_content": "prefer step main content\n[KEYFRAME_1]",
+                "main_operation": "legacy step operation should stay hidden\n[KEYFRAME_1]",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 6.0,
+                "instructional_keyframes": [
+                    {
+                        "timestamp_sec": 5.4,
+                        "frame_reason": "settings panel visible",
+                    }
+                ],
+            },
+            {
+                "step_id": 2,
+                "step_description": "change port",
+                "main_operation": "fallback main operation\n[KEYFRAME_1]",
+                "clip_start_sec": 6.0,
+                "clip_end_sec": 13.0,
+                "instructional_keyframes": [
+                    {
+                        "timestamp_sec": 12.2,
+                        "frame_reason": "port value saved",
+                    }
+                ],
+            },
+        ],
+        "steps": [
+            {
+                "step_id": 1,
+                "step_description": "open settings",
+                "main_content": "prefer step main content\n[KEYFRAME_1]",
+                "main_operation": "legacy step operation should stay hidden\n[KEYFRAME_1]",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 6.0,
+                "clip_file": clip1.name,
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key1.name,
+                        "timestamp_sec": 5.4,
+                        "frame_reason": "settings panel visible",
+                    }
+                ],
+            },
+            {
+                "step_id": 2,
+                "step_description": "change port",
+                "main_operation": "fallback main operation\n[KEYFRAME_1]",
+                "clip_start_sec": 6.0,
+                "clip_end_sec": 13.0,
+                "clip_file": clip2.name,
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key2.name,
+                        "timestamp_sec": 12.2,
+                        "frame_reason": "port value saved",
+                    }
+                ],
+            },
+        ],
+    }
+    (unit_dir / "SU906_steps.json").write_text(json.dumps(steps_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU906",
+                "title": "Tutorial Skill Pipeline Unit",
+                "knowledge_type": "process",
+                "body_text": "tutorial body",
+                "mult_steps": True,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    monkeypatch.setenv("MODULE2_MARKDOWN_ENHANCER_SKILL_PIPELINE", "1")
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+
+    class _TutorialProcessPipeline:
+        def __init__(self):
+            self.calls = []
+
+        async def process_unit(self, section, prev_title="", next_title=""):
+            _ = (prev_title, next_title)
+            self.calls.append(str(section.unit_id))
+            rendered_input = "\n".join(enhancer._render_tutorial_steps(section)).strip()
+            assert "prefer step main content" in rendered_input
+            assert "legacy step operation should stay hidden" not in rendered_input
+            assert "fallback main operation" in rendered_input
+            return Phase2bUnitPipelineResult(markdown="structured tutorial output")
+
+    pipeline = _TutorialProcessPipeline()
+    enhancer._structured_unit_pipeline = pipeline
+
+    async def _fake_hierarchy(sections, subject):
+        _ = (sections, subject)
+        return {"SU906": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert pipeline.calls == ["SU906"]
+    assert "structured tutorial output" in markdown
+    assert "legacy step operation should stay hidden" not in markdown
+    assert "prefer step main content" not in markdown
 
 
 def test_tutorial_step_type_renders_note_warning_without_consuming_main_flow_index(tmp_path):
@@ -1031,6 +1248,8 @@ def test_tutorial_step_type_renders_note_warning_without_consuming_main_flow_ind
     )
 
     enhancer = MarkdownEnhancer()
+    enhancer._enabled = False
+    enhancer._enable_skill_pipeline = False
     markdown = asyncio.run(
         enhancer.enhance(
             str(result_path),
@@ -1043,8 +1262,8 @@ def test_tutorial_step_type_renders_note_warning_without_consuming_main_flow_ind
     assert "#### 2.下载安装包" in markdown
     assert "#### 2.分支：代理网络环境下改用镜像下载" not in markdown
     assert "#### 3.报错：安装时报权限不足" not in markdown
-    assert "> [!NOTE] 分支情况处理：分支：代理网络环境下改用镜像下载" in markdown
-    assert "> [!WARNING] 常见报错解决：报错：安装时报权限不足" in markdown
+    assert "> [!NOTE] Conditional step: 分支：代理网络环境下改用镜像下载" in markdown
+    assert "> [!WARNING] Troubleshooting: 报错：安装时报权限不足" in markdown
     assert "> 切换镜像地址" in markdown
     assert "> 以管理员权限重试安装" in markdown
     assert "> ![[vl_tutorial_units/SU004/SU004_ss_step_02_key_01_branch_proxy.png]]" in markdown
@@ -2470,6 +2689,8 @@ def test_tutorial_step_replaces_instructional_clip_placeholder_with_alias(tmp_pa
     )
 
     enhancer = MarkdownEnhancer()
+    enhancer._enabled = False
+    enhancer._enable_skill_pipeline = False
     markdown = asyncio.run(
         enhancer.enhance(
             str(result_path),
@@ -2480,6 +2701,74 @@ def test_tutorial_step_replaces_instructional_clip_placeholder_with_alias(tmp_pa
 
     assert "[CLIP_1]" not in markdown
     assert "![[vl_tutorial_units/SU906/SU906_clip_step_01_clip_01_action.mp4|Show the key transition]]" in markdown
+
+
+def test_tutorial_step_keyframe_reason_is_alias_only_not_body_text(tmp_path):
+    unit_dir = tmp_path / "vl_tutorial_units" / "SU906B"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    clip1 = unit_dir / "SU906B_clip_step_01_action.mp4"
+    key1 = unit_dir / "SU906B_ss_step_01_key_01_action.png"
+    clip1.write_bytes(b"asset")
+    key1.write_bytes(b"asset")
+
+    steps_payload = {
+        "unit_id": "SU906B",
+        "schema": "tutorial_stepwise_v1",
+        "steps": [
+            {
+                "step_id": 1,
+                "step_description": "alias only",
+                "main_operation": "Open the panel\n[KEYFRAME_1]",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 8.0,
+                "clip_file": clip1.name,
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key1.name,
+                        "timestamp_sec": 3.0,
+                        "frame_reason": "Focus on the finished screen",
+                    }
+                ],
+            }
+        ],
+    }
+    (unit_dir / "SU906B_steps.json").write_text(json.dumps(steps_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU906B",
+                "title": "Tutorial Keyframe Alias Only",
+                "knowledge_type": "process",
+                "body_text": "tutorial body",
+                "mult_steps": True,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = False
+    enhancer._enable_skill_pipeline = False
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "Focus on the finished screen: ![[" not in markdown
+    assert "![[vl_tutorial_units/SU906B/SU906B_ss_step_01_key_01_action.png|Focus on the finished screen]]" in markdown
 
 
 def test_concrete_clip_placeholder_is_replaced_with_alias_embed(tmp_path, monkeypatch):
@@ -2756,3 +3045,111 @@ def test_concrete_media_preserved_falls_back_to_deterministic_base_when_llm_drop
     synced_unit = result_obj["knowledge_groups"][0]["units"][0]
     assert synced_unit["body_text"] == f"Review the concrete frame {expected_embed}"
     assert synced_unit["main_content"] == f"Review the concrete frame {expected_embed}"
+
+
+def test_concrete_media_preserved_falls_back_to_deterministic_base_when_llm_drops_clip_embeds(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = assets_dir / "SU993_clip_concrete_seg_01_clip_01_demo.mp4"
+    clip_path.write_bytes(b"clip")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU993",
+                "title": "Concrete Preserve Clip Unit",
+                "knowledge_type": "concrete",
+                "body_text": "legacy body",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 1,
+                        "main_content": "Review the concrete clip [CLIP_1]",
+                        "instructional_clips": [
+                            {
+                                "clip_id": "CLIP_1",
+                                "start_sec": 1.0,
+                                "end_sec": 3.0,
+                                "clip_reason": "canonical clip",
+                            }
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clips": [str(clip_path)],
+                    "clip": str(clip_path),
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+    semantic_payload = {
+        "knowledge_groups": [
+            {
+                "group_name": "Concrete Preserve Clip Unit",
+                "reason": "test",
+                "units": [
+                    {
+                        "unit_id": "SU993",
+                        "knowledge_type": "concrete",
+                        "knowledge_topic": "Concrete Preserve Clip Unit",
+                        "full_text": "legacy full_text",
+                        "_vl_concrete_segments": [
+                            {
+                                "segment_id": 1,
+                                "main_content": "Review the concrete clip [CLIP_1]",
+                                "instructional_clips": [
+                                    {
+                                        "clip_id": "CLIP_1",
+                                        "start_sec": 1.0,
+                                        "end_sec": 3.0,
+                                        "clip_reason": "canonical clip",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    semantic_path = tmp_path / "semantic_units_phase2a.json"
+    semantic_path.write_text(
+        json.dumps(semantic_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._enable_supplemental_images = False
+    recorder = _RecordingStructuredLLMClient("final concrete body without media")
+    enhancer._llm_client = recorder
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU993": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    expected_embed = "![[assets/SU993_clip_concrete_seg_01_clip_01_demo.mp4|canonical clip]]"
+    assert len(recorder.calls) == 1
+    assert expected_embed in recorder.calls[0]["prompt"]
+    assert "final concrete body without media" not in markdown
+    assert "Supplemental clips:" not in markdown
+    assert f"Review the concrete clip {expected_embed}" in markdown
+    result_obj = json.loads(result_path.read_text(encoding="utf-8"))
+    synced_unit = result_obj["knowledge_groups"][0]["units"][0]
+    assert synced_unit["body_text"] == f"Review the concrete clip {expected_embed}"
+    assert synced_unit["main_content"] == f"Review the concrete clip {expected_embed}"

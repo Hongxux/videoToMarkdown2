@@ -253,4 +253,6 @@ def test_markdown_preserve_img_prompt_keys_are_loadable(monkeypatch):
     assert isinstance(user_prompt, str)
     assert len(system_prompt) > 10
     assert "{body_text}" in user_prompt
+    assert "{clip_context}" in user_prompt
+    assert "[CLIP_{N}]" in system_prompt
 

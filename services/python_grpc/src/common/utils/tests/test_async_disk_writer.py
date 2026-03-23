@@ -97,3 +97,33 @@ def test_async_writer_flush_supports_scope_key():
     assert flush_async_json_writes(timeout_sec=10.0, scope_key=str(scope_a)) is True
     assert json_a.exists()
     assert flush_async_json_writes(timeout_sec=20.0) is True
+
+from services.python_grpc.src.common.utils import runtime_recovery_store as runtime_store_module
+
+
+def test_runtime_recovery_store_atomic_write_retries_replace_after_windows_access_denied(monkeypatch):
+    tmp_path = _make_repo_tmp_dir("test_runtime_recovery_store_atomic_write_retries_replace_after_windows_access_denied")
+    target = tmp_path / "intermediates" / "rt" / "resume_index.json"
+    payload = {"hint_stage": "stage1", "hint_checkpoint": "step3_merge.wave_0004"}
+
+    original_replace = runtime_store_module.os.replace
+    call_counter = {"count": 0}
+
+    def flaky_replace(src, dst):
+        call_counter["count"] += 1
+        if call_counter["count"] == 1:
+            raise PermissionError(5, "Access is denied")
+        return original_replace(src, dst)
+
+    sleep_calls = []
+
+    monkeypatch.setattr(runtime_store_module.os, "replace", flaky_replace)
+    monkeypatch.setattr(runtime_store_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(runtime_store_module, "_ATOMIC_WRITE_RETRY_COUNT", 2)
+    monkeypatch.setattr(runtime_store_module, "_ATOMIC_WRITE_RETRY_MS", 1)
+
+    runtime_store_module._write_json_atomic_sync(target, payload)
+
+    assert call_counter["count"] == 2
+    assert sleep_calls == [0.001]
+    assert json.loads(target.read_text(encoding="utf-8")) == payload

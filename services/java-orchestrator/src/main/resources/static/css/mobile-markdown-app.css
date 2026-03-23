@@ -1114,6 +1114,83 @@ button:active:not(:disabled),
     background: transparent;
 }
 
+.immersive-video-shell--plyr {
+    --plyr-color-main: #60a5fa;
+    --plyr-video-background: transparent;
+    --plyr-control-radius: 10px;
+    --plyr-control-spacing: 10px;
+    --plyr-tooltip-radius: 8px;
+    --plyr-menu-radius: 12px;
+    --plyr-range-track-height: 4px;
+    --plyr-range-thumb-height: 13px;
+    --plyr-video-control-color: #e2e8f0;
+    --plyr-video-control-color-hover: #ffffff;
+    --plyr-video-controls-background: linear-gradient(180deg, rgba(15, 23, 42, 0.22) 0%, rgba(15, 23, 42, 0.78) 100%);
+    --plyr-menu-background: rgba(255, 255, 255, 0.96);
+    --plyr-menu-color: #1e293b;
+    --plyr-tooltip-background: rgba(255, 255, 255, 0.96);
+    --plyr-tooltip-color: #0f172a;
+    --plyr-focus-visible-color: #93c5fd;
+}
+
+.immersive-video-shell--plyr .plyr {
+    width: 100%;
+    min-width: 0;
+    border-radius: inherit;
+    overflow: hidden;
+    color: #e2e8f0;
+}
+
+.immersive-video-shell--plyr .plyr video {
+    max-height: var(--content-media-max-height);
+    object-fit: contain;
+    background: transparent;
+}
+
+.immersive-video-shell--plyr .plyr__video-wrapper,
+.immersive-video-shell--plyr .plyr__poster {
+    background: transparent;
+}
+
+.immersive-video-shell--plyr .plyr__poster {
+    background-size: contain;
+}
+
+.immersive-video-shell--plyr .plyr__controls {
+    backdrop-filter: saturate(150%) blur(12px);
+    -webkit-backdrop-filter: saturate(150%) blur(12px);
+}
+
+.immersive-video-shell--plyr .plyr__control {
+    min-height: 34px;
+}
+
+.immersive-video-shell--plyr .plyr__control:hover,
+.immersive-video-shell--plyr .plyr__control[aria-expanded="true"],
+.immersive-video-shell--plyr .plyr__control.plyr__tab-focus {
+    background: rgba(96, 165, 250, 0.22);
+}
+
+.immersive-video-shell--plyr .plyr__control--overlaid {
+    background: rgba(15, 23, 42, 0.54);
+    box-shadow: 0 16px 36px rgba(15, 23, 42, 0.28);
+}
+
+.immersive-video-shell--plyr .plyr__control--overlaid:hover,
+.immersive-video-shell--plyr .plyr__control--overlaid:focus-visible {
+    background: rgba(96, 165, 250, 0.32);
+}
+
+.immersive-video-shell--plyr .plyr__menu__container {
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.immersive-video-shell--plyr .plyr__progress__buffer {
+    color: rgba(226, 232, 240, 0.22);
+}
+
 @media (max-width: 900px) {
     .markdown-body .md-media-flow-row > p {
         flex-basis: clamp(140px, 48vw, 220px);

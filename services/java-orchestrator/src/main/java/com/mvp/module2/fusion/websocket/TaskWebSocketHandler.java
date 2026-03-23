@@ -13,16 +13,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
-import org.springframework.web.socket.PingMessage;
 import org.springframework.web.socket.PongMessage;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
-import java.io.IOException;
 import java.net.URLDecoder;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,8 +29,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @Component
 public class TaskWebSocketHandler extends TextWebSocketHandler {
@@ -42,10 +37,11 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
     private static final int SEND_TIME_LIMIT_MS = 10_000;
     private static final int SEND_BUFFER_SIZE_LIMIT_BYTES = 512 * 1024;
     private static final String WEB_TASK_UPDATES_STREAM_KEY = "web-task-updates";
-    private static final Pattern PING_ACTION_PATTERN =
-            Pattern.compile("\"action\"\\s*:\\s*\"ping\"", Pattern.CASE_INSENSITIVE);
-    private static final Pattern CLIENT_TIME_PATTERN =
-            Pattern.compile("\"clientTime\"\\s*:\\s*(-?\\d+)");
+    private static final int FAST_PING_MIN_LENGTH = 17;
+    private static final int FAST_PING_MAX_LENGTH = 512;
+    private static final String ACTION_FIELD_NAME = "action";
+    private static final String CLIENT_TIME_FIELD_NAME = "clientTime";
+    private static final String PING_ACTION_VALUE = "ping";
 
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> userSessions =
             new ConcurrentHashMap<>();
@@ -854,33 +850,335 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             String rawPayload,
             long now
     ) {
-        String payload = normalizeText(rawPayload);
-        if (payload.isEmpty() || payload.charAt(0) != '{') {
+        // 心跳是高频热路径，这里先做有效长度过滤，再做字符扫描，避免正则和 JSON 反序列化分配。
+        if (rawPayload == null || rawPayload.isEmpty()) {
             return false;
         }
-        if (!payload.contains("\"action\"") || !payload.contains("\"ping\"")) {
+        int payloadStart = findLeadingNonWhitespace(rawPayload);
+        if (payloadStart < 0) {
             return false;
         }
-        if (!PING_ACTION_PATTERN.matcher(payload).find()) {
+        int payloadEndExclusive = findTrailingNonWhitespaceExclusive(rawPayload);
+        int effectiveLength = payloadEndExclusive - payloadStart;
+        if (effectiveLength < FAST_PING_MIN_LENGTH || effectiveLength > FAST_PING_MAX_LENGTH) {
             return false;
         }
-        handlePing(session, extractLongField(CLIENT_TIME_PATTERN, payload), now);
+        if (rawPayload.charAt(payloadStart) != '{' || rawPayload.charAt(payloadEndExclusive - 1) != '}') {
+            return false;
+        }
+        int objectStart = payloadStart + 1;
+        int objectEndExclusive = payloadEndExclusive - 1;
+        int cursor = skipJsonWhitespace(rawPayload, objectStart, objectEndExclusive);
+        boolean actionMatched = false;
+        long clientTime = 0L;
+        while (cursor < objectEndExclusive) {
+            if (rawPayload.charAt(cursor) != '"') {
+                return false;
+            }
+            int fieldNameEnd = findJsonStringEnd(rawPayload, cursor + 1, objectEndExclusive);
+            if (fieldNameEnd < 0) {
+                return false;
+            }
+            int fieldNameStart = cursor + 1;
+            cursor = skipJsonWhitespace(rawPayload, fieldNameEnd + 1, objectEndExclusive);
+            if (cursor >= objectEndExclusive || rawPayload.charAt(cursor) != ':') {
+                return false;
+            }
+            cursor = skipJsonWhitespace(rawPayload, cursor + 1, objectEndExclusive);
+            if (cursor >= objectEndExclusive) {
+                return false;
+            }
+            if (matchesAsciiJsonToken(rawPayload, fieldNameStart, fieldNameEnd, ACTION_FIELD_NAME)) {
+                int actionValueEnd = matchJsonStringLiteral(rawPayload, cursor, objectEndExclusive, PING_ACTION_VALUE);
+                if (actionValueEnd < 0) {
+                    return false;
+                }
+                actionMatched = true;
+                cursor = actionValueEnd;
+            } else if (matchesAsciiJsonToken(rawPayload, fieldNameStart, fieldNameEnd, CLIENT_TIME_FIELD_NAME)) {
+                if (isJsonNumberStart(rawPayload.charAt(cursor))) {
+                    int numberEnd = skipJsonNumber(rawPayload, cursor, objectEndExclusive);
+                    if (numberEnd < 0) {
+                        return false;
+                    }
+                    clientTime = parseSignedLongOrDefault(rawPayload, cursor, numberEnd, 0L);
+                    cursor = numberEnd;
+                } else {
+                    cursor = skipJsonValue(rawPayload, cursor, objectEndExclusive);
+                    if (cursor < 0) {
+                        return false;
+                    }
+                }
+            } else {
+                cursor = skipJsonValue(rawPayload, cursor, objectEndExclusive);
+                if (cursor < 0) {
+                    return false;
+                }
+            }
+            cursor = skipJsonWhitespace(rawPayload, cursor, objectEndExclusive);
+            if (cursor >= objectEndExclusive) {
+                break;
+            }
+            if (rawPayload.charAt(cursor) != ',') {
+                return false;
+            }
+            cursor = skipJsonWhitespace(rawPayload, cursor + 1, objectEndExclusive);
+        }
+        if (!actionMatched) {
+            return false;
+        }
+        handlePing(session, clientTime, now);
         return true;
     }
 
-    private long extractLongField(Pattern fieldPattern, String payload) {
-        if (fieldPattern == null || payload == null) {
-            return 0L;
+    private int findLeadingNonWhitespace(String payload) {
+        for (int i = 0; i < payload.length(); i++) {
+            if (!Character.isWhitespace(payload.charAt(i))) {
+                return i;
+            }
         }
-        Matcher matcher = fieldPattern.matcher(payload);
-        if (!matcher.find()) {
-            return 0L;
+        return -1;
+    }
+
+    private int findTrailingNonWhitespaceExclusive(String payload) {
+        int index = payload.length();
+        while (index > 0 && Character.isWhitespace(payload.charAt(index - 1))) {
+            index--;
         }
-        try {
-            return Long.parseLong(matcher.group(1));
-        } catch (Exception ignored) {
-            return 0L;
+        return index;
+    }
+
+    private int skipJsonWhitespace(String payload, int start, int endExclusive) {
+        int cursor = start;
+        while (cursor < endExclusive && Character.isWhitespace(payload.charAt(cursor))) {
+            cursor++;
         }
+        return cursor;
+    }
+
+    private int findJsonStringEnd(String payload, int start, int endExclusive) {
+        boolean escaped = false;
+        for (int cursor = start; cursor < endExclusive; cursor++) {
+            char current = payload.charAt(cursor);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (current == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (current == '"') {
+                return cursor;
+            }
+        }
+        return -1;
+    }
+
+    private boolean matchesAsciiJsonToken(
+            String payload,
+            int start,
+            int endExclusive,
+            String expected
+    ) {
+        if (endExclusive - start != expected.length()) {
+            return false;
+        }
+        for (int i = 0; i < expected.length(); i++) {
+            if (toLowerAscii(payload.charAt(start + i)) != toLowerAscii(expected.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private int matchJsonStringLiteral(
+            String payload,
+            int start,
+            int endExclusive,
+            String expected
+    ) {
+        if (start >= endExclusive || payload.charAt(start) != '"') {
+            return -1;
+        }
+        int cursor = start + 1;
+        for (int i = 0; i < expected.length(); i++) {
+            if (cursor >= endExclusive || payload.charAt(cursor) == '\\') {
+                return -1;
+            }
+            if (toLowerAscii(payload.charAt(cursor)) != toLowerAscii(expected.charAt(i))) {
+                return -1;
+            }
+            cursor++;
+        }
+        if (cursor >= endExclusive || payload.charAt(cursor) != '"') {
+            return -1;
+        }
+        return cursor + 1;
+    }
+
+    private int skipJsonValue(String payload, int start, int endExclusive) {
+        if (start >= endExclusive) {
+            return -1;
+        }
+        char current = payload.charAt(start);
+        if (current == '"') {
+            int stringEnd = findJsonStringEnd(payload, start + 1, endExclusive);
+            return stringEnd >= 0 ? stringEnd + 1 : -1;
+        }
+        if (current == '{' || current == '[') {
+            return skipJsonCompositeValue(payload, start, endExclusive);
+        }
+        if (isJsonNumberStart(current)) {
+            return skipJsonNumber(payload, start, endExclusive);
+        }
+        if (matchesJsonLiteral(payload, start, endExclusive, "true")) {
+            return start + 4;
+        }
+        if (matchesJsonLiteral(payload, start, endExclusive, "false")) {
+            return start + 5;
+        }
+        if (matchesJsonLiteral(payload, start, endExclusive, "null")) {
+            return start + 4;
+        }
+        return -1;
+    }
+
+    private int skipJsonCompositeValue(String payload, int start, int endExclusive) {
+        int objectDepth = 0;
+        int arrayDepth = 0;
+        for (int cursor = start; cursor < endExclusive; cursor++) {
+            char current = payload.charAt(cursor);
+            if (current == '"') {
+                int stringEnd = findJsonStringEnd(payload, cursor + 1, endExclusive);
+                if (stringEnd < 0) {
+                    return -1;
+                }
+                cursor = stringEnd;
+                continue;
+            }
+            if (current == '{') {
+                objectDepth++;
+                continue;
+            }
+            if (current == '}') {
+                objectDepth--;
+                if (objectDepth < 0) {
+                    return -1;
+                }
+                if (objectDepth == 0 && arrayDepth == 0) {
+                    return cursor + 1;
+                }
+                continue;
+            }
+            if (current == '[') {
+                arrayDepth++;
+                continue;
+            }
+            if (current == ']') {
+                arrayDepth--;
+                if (arrayDepth < 0) {
+                    return -1;
+                }
+                if (objectDepth == 0 && arrayDepth == 0) {
+                    return cursor + 1;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private boolean isJsonNumberStart(char current) {
+        return current == '-' || (current >= '0' && current <= '9');
+    }
+
+    private int skipJsonNumber(String payload, int start, int endExclusive) {
+        int cursor = start;
+        if (cursor < endExclusive && payload.charAt(cursor) == '-') {
+            cursor++;
+        }
+        int integerStart = cursor;
+        while (cursor < endExclusive && Character.isDigit(payload.charAt(cursor))) {
+            cursor++;
+        }
+        if (cursor == integerStart) {
+            return -1;
+        }
+        if (cursor < endExclusive && payload.charAt(cursor) == '.') {
+            cursor++;
+            int fractionStart = cursor;
+            while (cursor < endExclusive && Character.isDigit(payload.charAt(cursor))) {
+                cursor++;
+            }
+            if (cursor == fractionStart) {
+                return -1;
+            }
+        }
+        if (cursor < endExclusive) {
+            char exponentFlag = payload.charAt(cursor);
+            if (exponentFlag == 'e' || exponentFlag == 'E') {
+                cursor++;
+                if (cursor < endExclusive) {
+                    char exponentSign = payload.charAt(cursor);
+                    if (exponentSign == '+' || exponentSign == '-') {
+                        cursor++;
+                    }
+                }
+                int exponentStart = cursor;
+                while (cursor < endExclusive && Character.isDigit(payload.charAt(cursor))) {
+                    cursor++;
+                }
+                if (cursor == exponentStart) {
+                    return -1;
+                }
+            }
+        }
+        return cursor;
+    }
+
+    private boolean matchesJsonLiteral(String payload, int start, int endExclusive, String literal) {
+        if (start + literal.length() > endExclusive) {
+            return false;
+        }
+        for (int i = 0; i < literal.length(); i++) {
+            if (payload.charAt(start + i) != literal.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private long parseSignedLongOrDefault(String payload, int start, int endExclusive, long fallback) {
+        if (start >= endExclusive) {
+            return fallback;
+        }
+        boolean negative = payload.charAt(start) == '-';
+        int cursor = negative ? start + 1 : start;
+        if (cursor >= endExclusive) {
+            return fallback;
+        }
+        long limit = negative ? Long.MIN_VALUE : -Long.MAX_VALUE;
+        long result = 0L;
+        while (cursor < endExclusive) {
+            char current = payload.charAt(cursor);
+            if (current < '0' || current > '9') {
+                return fallback;
+            }
+            int digit = current - '0';
+            if (result < (limit + digit) / 10L) {
+                return fallback;
+            }
+            result = result * 10L - digit;
+            cursor++;
+        }
+        return negative ? result : -result;
+    }
+
+    private char toLowerAscii(char current) {
+        if (current >= 'A' && current <= 'Z') {
+            return (char) (current + ('a' - 'A'));
+        }
+        return current;
     }
 
     private void handlePing(WebSocketSession session, long clientTime, long now) {

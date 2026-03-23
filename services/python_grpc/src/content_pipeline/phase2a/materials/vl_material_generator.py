@@ -6268,6 +6268,21 @@ class VLMaterialGenerator:
             abs_ts = max(unit_start_sec, min(abs_ts, unit_end_sec))
             ss_item["timestamp_sec"] = abs_ts
 
+        if analysis_result.screenshot_requests and self.screenshot_config.get("enabled", True):
+            analysis_result.screenshot_requests = await self._apply_screenshot_optimization_with_bypass(
+                video_path=original_video_path,
+                screenshot_requests=list(analysis_result.screenshot_requests or []),
+            )
+        if analysis_result.screenshot_requests:
+            analysis_result.screenshot_requests = self._dedupe_incremental_legacy_drop_tail_screenshots(
+                video_path=original_video_path,
+                screenshot_requests=list(analysis_result.screenshot_requests or []),
+            )
+            if self.screenshot_config.get("enabled", True):
+                analysis_result.screenshot_requests = self._mark_streamed_screenshot_requests_finalized(
+                    list(analysis_result.screenshot_requests or [])
+                )
+
         if str(meta.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise":
             export_from_original = bool(
                 self.tutorial_export_from_original_clip_when_prepruned
@@ -7881,6 +7896,21 @@ class VLMaterialGenerator:
                 screenshot_requests=merged_requests,
             )
         return merged_requests
+
+    @staticmethod
+    def _mark_streamed_screenshot_requests_finalized(
+        screenshot_requests: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """标记单元级截图已完成最终优化，避免 generate 末尾重复整批处理。"""
+        finalized_requests: List[Dict[str, Any]] = []
+        for request in list(screenshot_requests or []):
+            if not isinstance(request, dict):
+                continue
+            updated_request = dict(request)
+            updated_request["_skip_cv_optimization"] = True
+            updated_request["_stream_unit_screenshot_finalized"] = True
+            finalized_requests.append(updated_request)
+        return finalized_requests
 
     def _is_legacy_action_drop_tail_screenshot_request(self, request: Dict[str, Any]) -> bool:
         """判断请求是否属于 process 静态主导降级分支的 drop-tail 截图。"""

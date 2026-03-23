@@ -3,6 +3,7 @@ package com.mvp.module2.fusion.controller;
 import com.mvp.module2.fusion.service.CardStorageService;
 import com.mvp.module2.fusion.service.DeepSeekAdvisorService;
 import com.mvp.module2.fusion.service.Phase2bArticleLinkService;
+import com.mvp.module2.fusion.service.Phase2bPipelineService;
 import com.mvp.module2.fusion.service.SelectionSyntaxRefineService;
 import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import org.slf4j.Logger;
@@ -65,6 +66,9 @@ public class MobileCardController {
 
     @Autowired(required = false)
     private Phase2bArticleLinkService phase2bArticleLinkService;
+
+    @Autowired(required = false)
+    private Phase2bPipelineService phase2bPipelineService;
 
     @Autowired(required = false)
     private TaskWebSocketHandler taskWebSocketHandler;
@@ -456,7 +460,7 @@ public class MobileCardController {
         return ResponseEntity.ok(payload);
     }
 
-    @PostMapping("/phase2b/structured-markdown")
+    @PostMapping({"/phase2b", "/phase2b/structured-markdown"})
     public ResponseEntity<?> phase2bStructuredMarkdown(@RequestBody(required = false) Phase2bStructuredMarkdownRequest request) {
         if (request == null) {
             return ResponseEntity.badRequest().body(Map.of("message", "request body is required"));
@@ -506,29 +510,74 @@ public class MobileCardController {
             }
 
             AtomicInteger chunkIndex = new AtomicInteger(0);
-            emitPhase2bProgress(progressChannel, progressRequestId, "phase2b_deep", "Phase2B 深度重构中...", false, false);
-            DeepSeekAdvisorService.Phase2bMarkdownResult phase2bResult =
-                    deepSeekAdvisorService.requestPhase2bStructuredMarkdownStreamedResult(
-                    llmSourceText,
-                    "",
-                    blendMode,
-                    (delta) -> emitPhase2bMarkdownDelta(
-                            progressChannel,
-                            progressRequestId,
-                            String.valueOf(delta == null ? "" : delta),
-                            chunkIndex.getAndIncrement()
-                    )
+            boolean pipelineAvailable = phase2bPipelineService != null && phase2bPipelineService.isPipelineEnabled();
+            emitPhase2bProgress(
+                    progressChannel,
+                    progressRequestId,
+                    "phase2b_deep",
+                    pipelineAvailable ? "Phase2B 三阶段管道处理中..." : "Phase2B 深度重构中...",
+                    false,
+                    false
             );
-            emitPhase2bProgress(progressChannel, progressRequestId, "post_processing", "正在整理最终 Markdown...", false, false);
-            String finalMarkdown = String.valueOf(phase2bResult == null ? "" : phase2bResult.markdown).trim();
+
+            String finalMarkdown;
+            String source;
+            String provider;
+            boolean degraded;
+            boolean pipelineUsed = false;
+            Map<String, Object> pipelinePayload = Map.of();
+            if (pipelineAvailable) {
+                Phase2bPipelineService.Phase2bPipelineResult pipelineResult =
+                        phase2bPipelineService.executePipeline(
+                                llmSourceText,
+                                blendMode,
+                                (stageMessage) -> emitPhase2bProgress(
+                                        progressChannel,
+                                        progressRequestId,
+                                        "phase2b_pipeline",
+                                        safePhase2bProgressMessage(stageMessage),
+                                        false,
+                                        false
+                                )
+                        );
+                emitPhase2bProgress(progressChannel, progressRequestId, "post_processing", "正在整理最终 Markdown...", false, false);
+                finalMarkdown = String.valueOf(pipelineResult == null ? "" : pipelineResult.markdown).trim();
+                source = pipelineResult == null ? "" : pipelineResult.source;
+                provider = pipelineResult == null ? "" : pipelineResult.provider;
+                degraded = pipelineResult != null && pipelineResult.degraded;
+                pipelineUsed = pipelineResult != null && pipelineResult.pipelineUsed;
+                pipelinePayload = pipelineResult == null ? Map.of() : pipelineResult.toPayload();
+            } else {
+                DeepSeekAdvisorService.Phase2bMarkdownResult phase2bResult =
+                        deepSeekAdvisorService.requestPhase2bStructuredMarkdownStreamedResult(
+                                llmSourceText,
+                                "",
+                                blendMode,
+                                (delta) -> emitPhase2bMarkdownDelta(
+                                        progressChannel,
+                                        progressRequestId,
+                                        String.valueOf(delta == null ? "" : delta),
+                                        chunkIndex.getAndIncrement()
+                                )
+                        );
+                emitPhase2bProgress(progressChannel, progressRequestId, "post_processing", "正在整理最终 Markdown...", false, false);
+                finalMarkdown = String.valueOf(phase2bResult == null ? "" : phase2bResult.markdown).trim();
+                source = phase2bResult == null ? "" : phase2bResult.source;
+                provider = phase2bResult == null ? "" : phase2bResult.provider;
+                degraded = phase2bResult != null && phase2bResult.degraded;
+            }
             emitPhase2bMarkdownFinal(progressChannel, progressRequestId, finalMarkdown, chunkIndex.get());
 
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("success", true);
             payload.put("markdown", finalMarkdown);
-            payload.put("source", phase2bResult == null ? "" : phase2bResult.source);
-            payload.put("provider", phase2bResult == null ? "" : phase2bResult.provider);
-            payload.put("degraded", phase2bResult != null && phase2bResult.degraded);
+            payload.put("source", source);
+            payload.put("provider", provider);
+            payload.put("degraded", degraded);
+            payload.put("pipelineUsed", pipelineUsed);
+            if (!pipelinePayload.isEmpty()) {
+                payload.put("pipeline", pipelinePayload);
+            }
             payload.put("links", buildPhase2bLinkPayload(extractedArticles));
             if (!linkWarnings.isEmpty()) {
                 payload.put("linkWarnings", linkWarnings);

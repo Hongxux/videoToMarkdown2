@@ -40,9 +40,9 @@ def _install_prompt_loader_stub(monkeypatch):
         PromptKeys.DEEPSEEK_MD_COMBINED_SYSTEM: "COMBINED_SYSTEM_TEMPLATE",
         PromptKeys.DEEPSEEK_MD_COMBINED_USER: "COMBINED_USER_TEMPLATE::{title}|{level_info}|{body_text}|{ocr_text}|{action_info}",
         PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM: "STRUCTURED_SYSTEM_TEMPLATE",
-        PromptKeys.DEEPSEEK_MD_STRUCTURED_USER: "USER_STRUCTURED_TEMPLATE::{title}|{knowledge_type}|{body_text}|{image_context}",
+        PromptKeys.DEEPSEEK_MD_STRUCTURED_USER: "USER_STRUCTURED_TEMPLATE::{title}|{knowledge_type}|{body_text}|{image_context}|{clip_context}",
         PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG: "STRUCTURED_SYSTEM_PRESERVE_TEMPLATE",
-        PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG: "USER_STRUCTURED_PRESERVE_TEMPLATE::{title}|{knowledge_type}|{body_text}|{image_context}|{adjacent_context}",
+        PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG: "USER_STRUCTURED_PRESERVE_TEMPLATE::{title}|{knowledge_type}|{body_text}|{image_context}|{clip_context}|{adjacent_context}",
         PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM: "IMG_DESC_SYSTEM_TEMPLATE",
         PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_USER: "USER_IMG_DESC_TEMPLATE::{body_text}|{image_evidence}",
     }
@@ -178,6 +178,39 @@ def test_markdown_enhancer_runtime_paths_use_loader_templates(monkeypatch, tmp_p
     assert any(call["system_message"] == "STRUCTURED_SYSTEM_PRESERVE_TEMPLATE" for call in enhancer._llm_client.text_calls)
     assert all(not call["prompt"].startswith("USER_IMG_DESC_TEMPLATE::") for call in enhancer._llm_client.text_calls)
     assert any(call["prompt"].startswith("USER_STRUCTURED_PRESERVE_TEMPLATE::") for call in enhancer._llm_client.text_calls)
+
+    clip_path = tmp_path / "assets" / "SU010_clip_01.mp4"
+    clip_path.write_bytes(b"clip")
+    process_section = EnhancedSection(
+        unit_id="SU010",
+        title="Process Unit",
+        knowledge_type="process",
+        level=2,
+        parent_id=None,
+        original_body="process body",
+        enhanced_body="",
+        structured_content="",
+        screenshots=[],
+        screenshot_items=[],
+        validated_screenshots=[],
+        action_classifications=[],
+        video_clip=str(clip_path),
+        video_clips=[str(clip_path)],
+    )
+
+    process_md = asyncio.run(
+        enhancer._build_structured_text_for_media_preserved_section(
+            process_section,
+            prev_title="Prev",
+            next_title="Next",
+        )
+    )
+    assert "![[assets/SU010_clip_01.mp4]]" in process_md
+    assert any(
+        call["prompt"].startswith("USER_STRUCTURED_PRESERVE_TEMPLATE::")
+        and "- clip_embed=![[assets/SU010_clip_01.mp4]]" in call["prompt"]
+        for call in enhancer._llm_client.text_calls
+    )
 
 
 def test_markdown_enhancer_routes_deepseek_calls_through_gateway(monkeypatch):

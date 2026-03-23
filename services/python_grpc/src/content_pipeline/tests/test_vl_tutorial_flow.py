@@ -2432,8 +2432,9 @@ def test_generate_uses_stream_unit_pipeline_when_enabled(monkeypatch, tmp_path):
         all_clip_requests: list[dict[str, Any]],
         all_screenshot_requests: list[dict[str, Any]],
         token_stats: dict[str, Any],
+        on_unit_result_streamed=None,
     ):
-        _ = (video_path, semantic_units, resolved_output_dir)
+        _ = (video_path, semantic_units, resolved_output_dir, on_unit_result_streamed)
         called["stream"] += 1
         token_stats["vl_units"] = 1
         token_stats["prompt_tokens_actual"] = 10
@@ -2476,6 +2477,95 @@ def test_generate_uses_stream_unit_pipeline_when_enabled(monkeypatch, tmp_path):
     assert called["legacy_split"] == 0
     assert len(result.clip_requests) == 1
     assert len(result.screenshot_requests) == 1
+
+
+def test_generate_stream_unit_pipeline_emits_unit_result_callback(monkeypatch, tmp_path):
+    config = _build_generator_config()
+    config["vl_analysis"] = {
+        "parallel_workers": 2,
+        "parallel_hard_cap": 8,
+        "stream_unit_pipeline_enabled": True,
+        "stream_pipeline_knowledge_types": ["process", "concrete"],
+    }
+    generator = VLMaterialGenerator(config)
+
+    video_path = Path(tmp_path) / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = Path(tmp_path) / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    semantic_units = [
+        {
+            "unit_id": "SU_STREAM_CONCRETE_001",
+            "knowledge_type": "concrete",
+            "mult_steps": False,
+            "start_sec": 0.0,
+            "end_sec": 12.0,
+        }
+    ]
+
+    streamed_outputs: list[dict[str, Any]] = []
+
+    async def _fake_stream_pipeline(
+        *,
+        video_path: str,
+        semantic_units: list[dict[str, Any]],
+        resolved_output_dir: str,
+        all_clip_requests: list[dict[str, Any]],
+        all_screenshot_requests: list[dict[str, Any]],
+        token_stats: dict[str, Any],
+        on_unit_result_streamed=None,
+    ):
+        _ = (video_path, semantic_units, resolved_output_dir)
+        token_stats["vl_units"] = 1
+        token_stats["prompt_tokens_actual"] = 9
+        token_stats["completion_tokens_actual"] = 4
+        token_stats["total_tokens_actual"] = 13
+        unit_output = {
+            "unit_id": "SU_STREAM_CONCRETE_001",
+            "success": True,
+            "analysis_mode": "concrete",
+            "raw_response_json": [
+                {
+                    "segment_id": 1,
+                    "main_content": "鍏蜂綋鍗曞厓 [KEYFRAME_1]",
+                    "clip_start_sec": 0.0,
+                    "clip_end_sec": 6.0,
+                }
+            ],
+            "metadata": {
+                "unit_id": "SU_STREAM_CONCRETE_001",
+                "semantic_unit": {"unit_id": "SU_STREAM_CONCRETE_001", "knowledge_type": "concrete"},
+            },
+            "clip_requests": [],
+            "screenshot_requests": [],
+            "raw_llm_interactions": [],
+        }
+        if on_unit_result_streamed is not None:
+            callback_result = on_unit_result_streamed(unit_output)
+            if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                await callback_result
+        return [], [], {}, 0
+
+    async def _on_unit_result_streamed(unit_output: dict[str, Any]) -> None:
+        streamed_outputs.append(dict(unit_output))
+
+    monkeypatch.setattr(generator, "_run_stream_unit_pipeline", _fake_stream_pipeline)
+    monkeypatch.setattr(generator, "_serialize_unit_analysis_outputs", lambda **kwargs: [])
+
+    result = asyncio.run(
+        generator.generate(
+            video_path=str(video_path),
+            semantic_units=semantic_units,
+            output_dir=str(output_dir),
+            on_unit_result_streamed=_on_unit_result_streamed,
+        )
+    )
+
+    assert result.success is True
+    assert len(streamed_outputs) == 1
+    assert streamed_outputs[0]["unit_id"] == "SU_STREAM_CONCRETE_001"
+    assert streamed_outputs[0]["analysis_mode"] == "concrete"
+    assert streamed_outputs[0]["raw_response_json"][0]["main_content"] == "鍏蜂綋鍗曞厓 [KEYFRAME_1]"
 
 
 def test_generate_uses_hybrid_stream_pipeline_for_mixed_units(monkeypatch, tmp_path):
@@ -2529,8 +2619,9 @@ def test_generate_uses_hybrid_stream_pipeline_for_mixed_units(monkeypatch, tmp_p
         all_clip_requests: list[dict[str, Any]],
         all_screenshot_requests: list[dict[str, Any]],
         token_stats: dict[str, Any],
+        on_unit_result_streamed=None,
     ):
-        _ = (video_path, resolved_output_dir)
+        _ = (video_path, resolved_output_dir, on_unit_result_streamed)
         called["stream_units"] = [str(unit.get("unit_id", "") or "") for unit in semantic_units]
         token_stats["vl_units"] += 1
         token_stats["prompt_tokens_actual"] += 10
@@ -4470,6 +4561,137 @@ def test_annotate_screenshot_requests_with_unit_context_sets_concrete_window_sta
     assert requests[0]["_prefetch_chunk_max_requests"] == 64
     assert requests[0]["_prefetch_sample_rate"] == 3
     assert requests[0]["_prefetch_target_height"] == 240
+
+
+def test_consume_unit_analysis_result_streaming_finalizes_unit_screenshots(monkeypatch, tmp_path):
+    config = _build_generator_config()
+    config["screenshot_optimization"]["enabled"] = True
+    config["screenshot_optimization"]["best_frame_vision_select_enabled"] = False
+    generator = VLMaterialGenerator(config)
+
+    captured: Dict[str, Any] = {"optimized": [], "deduped": []}
+
+    async def _fake_optimize_with_bypass(*, video_path: str, screenshot_requests: list[Dict[str, Any]]):
+        captured["video_path"] = video_path
+        captured["optimized"] = [dict(item) for item in screenshot_requests]
+        optimized: list[Dict[str, Any]] = []
+        for item in screenshot_requests:
+            updated = dict(item)
+            updated["timestamp_sec"] = float(updated.get("timestamp_sec", 0.0)) + 0.5
+            updated["_optimized_by_cv"] = True
+            optimized.append(updated)
+        return optimized
+
+    def _fake_dedupe_incremental(*, video_path: str, screenshot_requests: list[Dict[str, Any]]):
+        captured["dedupe_video_path"] = video_path
+        captured["deduped"] = [dict(item) for item in screenshot_requests]
+        return [dict(item) for item in screenshot_requests]
+
+    async def _fake_rerun_should_type_concrete_with_concrete_mode(*, analysis_result, meta):
+        _ = meta
+        return analysis_result, False
+
+    monkeypatch.setattr(generator, "_apply_screenshot_optimization_with_bypass", _fake_optimize_with_bypass)
+    monkeypatch.setattr(generator, "_dedupe_incremental_legacy_drop_tail_screenshots", _fake_dedupe_incremental)
+    monkeypatch.setattr(generator, "_rerun_should_type_concrete_with_concrete_mode", _fake_rerun_should_type_concrete_with_concrete_mode)
+
+    analysis_result = SimpleNamespace(
+        success=True,
+        analysis_mode="concrete",
+        error_msg="",
+        raw_response_json=[
+            {
+                "segment_id": 1,
+                "main_content": "具体内容 [KEYFRAME_1]",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 5.0,
+            }
+        ],
+        raw_llm_interactions=[],
+        analysis_results=[],
+        clip_requests=[],
+        screenshot_requests=[
+            {
+                "screenshot_id": "SU301/SU301_ss_concrete_seg_01_key_01",
+                "timestamp_sec": 2.0,
+                "semantic_unit_id": "SU301",
+                "analysis_mode": "concrete",
+                "knowledge_type": "concrete",
+            }
+        ],
+        token_usage={
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+        },
+    )
+    semantic_unit = {
+        "unit_id": "SU301",
+        "knowledge_type": "concrete",
+        "start_sec": 0.0,
+        "end_sec": 10.0,
+    }
+    meta = {
+        "unit_id": "SU301",
+        "analysis_mode": "concrete",
+        "wave_id": "wave_0001",
+        "input_fingerprint": "fp-demo",
+        "semantic_unit": semantic_unit,
+        "start_sec": 0.0,
+        "end_sec": 10.0,
+        "unit_duration": 10.0,
+        "clip_path": "orig.mp4",
+        "vl_clip_path": "vl.mp4",
+        "pre_prune": {},
+    }
+    token_stats = {
+        "should_type_concrete_reanalysis_units": 0,
+        "no_needed_video_units": 0,
+        "should_type_abstract_units": 0,
+        "should_type_concrete_units": 0,
+        "prompt_tokens_actual": 0,
+        "completion_tokens_actual": 0,
+        "total_tokens_actual": 0,
+        "input_tokens_actual": 0,
+        "output_tokens_actual": 0,
+        "text_input_tokens_actual": 0,
+        "image_input_tokens_actual": 0,
+        "audio_input_tokens_actual": 0,
+        "video_input_tokens_actual": 0,
+        "media_input_tokens_actual": 0,
+        "prompt_tokens_baseline_est": 0,
+        "completion_tokens_baseline_est": 0,
+        "total_tokens_baseline_est": 0,
+        "input_tokens_baseline_est": 0,
+        "output_tokens_baseline_est": 0,
+    }
+    all_clip_requests: list[Dict[str, Any]] = []
+    all_screenshot_requests: list[Dict[str, Any]] = []
+
+    asyncio.run(
+        generator._consume_unit_analysis_result_streaming(
+            result_index=0,
+            analysis_result=analysis_result,
+            meta=meta,
+            legacy_fallback_materials={},
+            all_clip_requests=all_clip_requests,
+            all_screenshot_requests=all_screenshot_requests,
+            token_stats=token_stats,
+            resolved_output_dir=str(tmp_path),
+            original_video_path="video.mp4",
+        )
+    )
+
+    assert captured["video_path"] == "video.mp4"
+    assert captured["dedupe_video_path"] == "video.mp4"
+    assert captured["optimized"][0]["timestamp_sec"] == 2.0
+    assert captured["deduped"][0]["timestamp_sec"] == 2.5
+    assert analysis_result.screenshot_requests[0]["timestamp_sec"] == 2.5
+    assert analysis_result.screenshot_requests[0]["_optimized_by_cv"] is True
+    assert analysis_result.screenshot_requests[0]["_skip_cv_optimization"] is True
+    assert analysis_result.screenshot_requests[0]["_stream_unit_screenshot_finalized"] is True
+    assert all_screenshot_requests[0]["timestamp_sec"] == 2.5
+    assert all_screenshot_requests[0]["_stream_unit_screenshot_finalized"] is True
 
 
 def test_build_screenshot_prefetch_chunks_respects_concrete_profile_overrides():

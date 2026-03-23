@@ -279,6 +279,17 @@ class RuntimeRecoverySqliteIndex:
             return
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_ddl}")
 
+    @staticmethod
+    def _is_missing_table_error(error: BaseException) -> bool:
+        return "no such table" in str(error or "").lower()
+
+    def _repair_schema_after_missing_table(self) -> None:
+        normalized_path = str(self.db_path)
+        self._reset_process_local_state()
+        with self._schema_lock:
+            self._initialized_paths.discard(normalized_path)
+        self._ensure_schema()
+
     def _ensure_schema(self) -> None:
         normalized_path = str(self.db_path)
         if normalized_path in self._initialized_paths:
@@ -836,6 +847,10 @@ class RuntimeRecoverySqliteIndex:
                     except Exception:
                         pass
                     lowered = str(error).lower()
+                    if self._is_missing_table_error(error):
+                        self._repair_schema_after_missing_table()
+                        last_error = error
+                        continue
                     if "closed" in lowered:
                         self._invalidate_write_connection()
                         last_error = error
@@ -868,6 +883,19 @@ class RuntimeRecoverySqliteIndex:
                 connection.close()
             except Exception:
                 pass
+            connection = self._connect()
+            self._thread_local.read_connection = connection
+            self._register_read_connection(connection)
+            return callback(connection)
+        except sqlite3.OperationalError as error:
+            if not self._is_missing_table_error(error):
+                raise
+            try:
+                connection.close()
+            except Exception:
+                pass
+            self._thread_local.read_connection = None
+            self._repair_schema_after_missing_table()
             connection = self._connect()
             self._thread_local.read_connection = connection
             self._register_read_connection(connection)

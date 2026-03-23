@@ -166,6 +166,11 @@ class TaskProcessingWorkerRecoveryStatusTest {
                 invokeBuildRecoveredIoPhaseResult(worker, task, task.outputDir, resumeDecision);
 
         assertEquals(semanticUnitsPath, ioResult.phase2aSemanticUnitsPath);
+        assertNotNull(ioResult.stage1Result);
+        assertEquals(true, ioResult.stage1Result.success);
+        assertEquals("", ioResult.stage1Result.step2JsonPath);
+        assertEquals("", ioResult.stage1Result.step6JsonPath);
+        assertEquals("", ioResult.stage1Result.sentenceTimestampsPath);
     }
     private static TaskQueueManager newQueueManager() throws Exception {
         TaskQueueManager queueManager = new TaskQueueManager(1);

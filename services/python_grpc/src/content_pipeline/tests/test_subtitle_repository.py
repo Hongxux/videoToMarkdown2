@@ -202,3 +202,57 @@ def test_set_raw_sentence_timestamps_supports_in_memory_lookup():
     timestamps = repository.build_sentence_timestamps(prefer_external=False)
     assert timestamps == {"S010": {"start_sec": 10.0, "end_sec": 12.0}}
 
+
+
+def test_runtime_payload_precedes_legacy_intermediate_files(tmp_path):
+    output_dir = tmp_path / "out"
+    inter_dir = output_dir / "intermediates"
+    inter_dir.mkdir(parents=True, exist_ok=True)
+
+    (inter_dir / "step2_correction_output.json").write_text(
+        json.dumps(
+            {
+                "output": {
+                    "corrected_subtitles": [
+                        {"subtitle_id": "LEGACY001", "corrected_text": "legacy", "start_sec": 9.0, "end_sec": 10.0}
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (inter_dir / "step6_merge_cross_output.json").write_text(
+        json.dumps(
+            {
+                "output": {
+                    "pure_text_script": [
+                        {"paragraph_id": "P-LEGACY", "text": "legacy paragraph", "source_sentence_ids": ["LEGACY001"]}
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (inter_dir / "sentence_timestamps.json").write_text(
+        json.dumps({"LEGACY001": {"start_sec": 9.0, "end_sec": 10.0}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    repository = SubtitleRepository.from_output_dir(output_dir=str(output_dir))
+    repository.set_raw_subtitles([
+        {"subtitle_id": "MEM001", "text": "memory", "start_sec": 0.0, "end_sec": 1.0}
+    ], clear_sentence_timestamps=False)
+    repository.set_raw_paragraphs([
+        {"paragraph_id": "P-MEM", "text": "memory paragraph", "source_sentence_ids": ["MEM001"], "merge_type": "runtime"}
+    ])
+    repository.set_raw_sentence_timestamps({
+        "MEM001": {"start_sec": 0.0, "end_sec": 1.0}
+    })
+
+    assert repository.load_step2_subtitles()[0]["subtitle_id"] == "MEM001"
+    assert repository.load_step6_paragraphs()[0]["paragraph_id"] == "P-MEM"
+    assert repository.build_sentence_timestamps(prefer_external=True) == {
+        "MEM001": {"start_sec": 0.0, "end_sec": 1.0}
+    }

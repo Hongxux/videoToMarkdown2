@@ -1,4 +1,229 @@
-﻿# Architecture Upgrade Log
+﻿ufeff﻿# Architecture Upgrade Log
+
+## 2026-03-23 Phase2/Phase2B Runtime-State-First 运行时投影收敛
+- Date: 2026-03-23
+- Background:
+  - Stage1 产物已经在运行时内存中具备 `step2_subtitles / step6_paragraphs / sentence_timestamps`，但 Phase2A / Phase2B 仍需要回落读取 `step2_correction_output.json`、`step6_merge_cross_output.json`、`sentence_timestamps.json`。
+  - 运行时 payload 与落盘 JSON 双轨并存，放大了状态分叉和恢复链路的复杂度。
+- First principles:
+  - Phase2A / Phase2B 的下游输入应该依赖单一的 canonical runtime payload，而不是文件系统快照。
+  - 恢复链路需要优先消费内存态/SQLite 投影，JSON 文件只保留兼容与诊断职责。
+  - legacy JSON 可以继续输出，但不应再成为阶段边界上的真实状态来源。
+- Reusable leverage:
+  - `stage1_runtime_repository` 已经能承载 `step2_subtitles / step6_paragraphs / sentence_timestamps`。
+  - `RichTextPipeline` 与 `SubtitleRepository` 已具备直接消费这些结构化运行时数据的能力。
+  - 现有 runtime recovery resolver 可以负责兼容性投影与路径补齐。
+- Decisions:
+  - Decision 1: 以 `Stage1 runtime payload` 作为 Phase2A / Phase2B 的 canonical downstream transport，不再把 `step2/step6/sentence_timestamps` JSON 视为主数据源。
+  - Decision 2: `RuntimeRecoveryResolver.materialize_stage1_recovery_artifacts(...)` 只在兼容路径上物化 Stage1 JSON，并回填 `step2_json_path / step6_json_path / sentence_timestamps_path`。
+  - Decision 3: `grpc_service_impl` 在 Stage1 完成时继续输出 `sentence_timestamps` 到 `intermediates/sentence_timestamps.json`，但 Phase2A / Phase2B 优先读取 runtime payload。
+  - Decision 4: Java 侧恢复逻辑继续兼容 legacy path，但 Stage1 结果进入 `phase2a / asset_extract_java / phase2b / completed` 时统一复用 `Stage1Result`。
+  - Decision 5: 新增的 `step2/step6/sentence_timestamps` 物化文件全部降级为 compatibility-only，避免后续链路再把它们当作权威状态。
+- Verification:
+  - 新增 Python resolver 用例：
+    - `test_materialize_stage1_recovery_artifacts_prefers_runtime_payload_without_writing_files`
+    - `test_resolve_runtime_recovery_context_returns_completed_when_phase2b_outputs_ready`
+  - `python -m py_compile services/python_grpc/src/server/runtime_recovery_context.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_runtime_recovery_context.py services/python_grpc/src/server/tests/test_recover_runtime_context.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/tests/test_subtitle_repository.py`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" "-Dtest=VideoProcessingOrchestratorPhase2RecoveryTest,TaskProcessingWorkerRecoveryStatusTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dmaven.repo.local=var/tmp_m2" -DskipTests compile -q`
+- Impact:
+  - Phase2A / Phase2B 恢复链路默认直接消费 runtime payload。
+  - 旧 Stage1 JSON 仍可读，但只用于兼容、诊断与导出，不再承担阶段状态同步职责。
+
+## 2026-03-23 实时会话、租约续期与 Sweep/DLQ 生产级边界收敛
+- Date: 2026-03-23
+- Background:
+  - 在收敛 `MySQL + S3 兼容对象存储` 之后，系统还缺少一层真正生产级的“运行中故障处理”边界：前端多设备 / 多标签页 ACK cursor 如何定义、RabbitMQ 与 sweep 如何分工、lease 过期后谁负责重新接管，以及 `Java` 和 `Python` 之间的 watchdog 对续租到底有什么约束。
+  - 若这些边界不写清楚，后续实现很容易误入三类高风险路径：
+    - 把 transport 级连接身份误当成稳定 ACK cursor 身份；
+    - 把 RabbitMQ 当成任务执行真相，而不是 wakeup hint；
+    - 没有 `fencing token`，导致 sweep 接管后旧 worker 仍然可以继续写 committed truth。
+- First principles:
+  - 前端终态 replay 的正确主键，不是瞬时连接，而是“稳定页面会话 + 设备 + 用户”。
+  - lease 只回答“理论上谁该拥有执行权”；只有再叠加 `fencing token`，系统才能真正阻止旧 owner 延迟写入。
+  - sweep 不应该猜测运行中任务是不是“慢”，它只应重新发现“已经失去续租资格、理论上可接管”的对象。
+  - MQ 是唤醒通道，DLQ 是 poison message 隔离区；它们都不是真相库，也不负责业务任务恢复判断。
+- Reusable leverage:
+  - 现有 WebSocket 已经具备 `transport/application heartbeat` 与终态 replay 语义，可继续复用为前端活性和 ACK cursor 的输入信号。
+  - 现有 `TaskProgressWatchdogBridge / RuntimeStageSession` 已经具备 `soft/hard heartbeat` 语义，可直接作为 Java 续租门槛。
+  - 现有 `lease + claim + retry` 方向已经明确，只需再叠加 `fencing token` 与统一 claim 口径。
+- Decisions:
+  - Decision 1: 前端身份至少拆分为 `user_id / device_id / transport_session_id`；若终态 ACK 需要跨断线保留但又不希望同设备多标签页共享 cursor，则必须进一步引入稳定的 `page_session_id`。
+  - Decision 2: 客户端重连顺序固定为：`replay terminal -> snapshot/changes -> resubscribe`；超过 replay 保留窗口后直接 `full snapshot`，不再逐条补发。
+  - Decision 3: Java 是唯一 lease 续期者；Python 不直接续租，只通过 `soft/hard heartbeat` 向 Java 证明“仍存活且仍有推进”。
+  - Decision 4: Java 只有在 `MySQL` 可达、当前 token 仍有效、`soft heartbeat` 新鲜且 `hard heartbeat` 未超过阶段无推进预算时，才允许续租；任一条件失效即停止续租并 self-fencing。
+  - Decision 5: 每次 claim 必须轮转新的 `task_lease_token`；所有 committed 写都必须校验 token。必要时后续再引入 `stage_execution_token` 细化到阶段粒度。
+  - Decision 6: RabbitMQ 只做低延迟 wakeup，consumer 在 **claim 成功后立即 ACK**，不等待任务真正跑完；lease 过期的运行中任务由 sweep 基于 DB 真相重新发现。
+  - Decision 7: DLQ 只处理 poison message（反序列化失败、envelope 非法、消费 wakeup envelope 时持续抛不可恢复异常），不承担业务恢复。
+  - Decision 8: 生产级 sweep 按对象拆分为：
+    - `Execution Lease Object`
+    - `Dispatch Redrive Object`
+    - `Recovery Blob Object`
+    - `Session Cursor Object`
+    不再单列“卡死对象 sweep”；运行中卡死应由 owner 因 `soft/hard heartbeat` 失效而停止续租，后续接管仍通过 expired lease reclaim 完成。
+  - Decision 9: `Dispatch Redrive` 不得用过短固定值；其 timeout 应至少大于 `P99 enqueue-to-claim latency` 与 backlog 窗口，初始建议 `120s ~ 300s`。
+  - Decision 10: 推荐初始参数：
+    - `lease_duration = 30s`
+    - `renew_interval = 10s`
+    - `expired_lease_reclaim_sweep = 5s ~ 10s`
+    - `dispatch_redrive_sweep = 30s`
+    - `recovery_blob_sweep = 15m`
+    - `session_cursor_sweep = 5m`
+  - Decision 11: 系统整体定位收敛为 `CP truth + BASE edges`，不再用“整体纯 BASE”或“整体纯 CP”这种失真的全局描述。
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-03-23 运行态恢复真源迁移为 MySQL + S3 兼容对象存储
+- Date: 2026-03-23
+- Background:
+  - 当前恢复真源仍以任务目录内 `intermediates/rt/runtime_state.db` 为 authoritative source。该设计在单机或单 Python worker 阶段成立，但在 `Java` 控制面与 `Python` 计算面都走向多实例后，恢复正确性仍然被 task-local 磁盘绑定。
+  - 近期设计讨论已经明确：任务失败或中断时，最值钱的是已 committed 的 `llm_call / chunk / projection` 事实与能够定位它们的恢复索引；这类数据需要中心化，而不是继续依赖“回到原 Python 节点”。
+  - 同时也已收敛两条硬约束：
+    - 恢复包只对失败 / 中断任务保留，窗口为 `72h`。
+    - 轻量恢复索引与重恢复资产必须同 TTL 同清理；恢复资产一旦不存在，系统就直接进入 `FULL_RERUN_REQUIRED`，而不是保留“假可恢复”的空索引。
+- First principles:
+  - 真正需要去本地化的不是 `SQLite` 文件形态，而是其中承载的 committed facts 与恢复边界。
+  - `MySQL` 适合承载关系、索引、状态机、恢复入口与 TTL 语义；对象存储适合承载不可变、只追加、只读取的大正文内容。
+  - 恢复真相只能有一套。长期保留 `SQLite + MySQL` 双真源，只会制造“Java 信中心库、Python 信本地盘”的恢复边界分裂。
+- Reusable leverage:
+  - 现有 task-local SQLite 逻辑模型已经稳定，不需要重发明恢复语义：
+    - `task_meta`
+    - `stage_snapshots`
+    - `scope_nodes / scope_edges`
+    - `llm_records / llm_record_content`
+    - `chunk_records / chunk_record_content`
+    - `scope_hint_plan / scope_hint_latest`
+  - 现有 `storage_key / stage / chunk / projection` 命名体系可直接复用为对象 key 组织方式。
+  - 现有 `task_cleanup_queue` 与终态清理思路可复用为运行态恢复包的 TTL 回收入口。
+- Decisions:
+  - Decision 1: 废止 `runtime_state.db` 作为 authoritative 恢复真源；运行态恢复模型整体迁入 `MySQL`。
+  - Decision 2: `MySQL` 成为唯一恢复真源，保存所有恢复索引、状态机字段、依赖图、attempt 边界与 blob locator；对象存储只保存不可变正文内容，不承担恢复入口判断。
+  - Decision 3: 运行态恢复边界至少按 `(task_id, attempt_no)` 隔离；`task_id` 单独不足以隔离多次失败、重跑与恢复上下文。
+  - Decision 4: 对象存储采用 S3 兼容抽象；本地开发统一使用 `MinIO`，线上保持 `S3 / OSS / COS / OBS` 可切换，不把业务代码绑死到单一云厂商。
+  - Decision 5: 对象 key 初期采用 `task + attempt` 作用域，不直接上全局内容寻址池；目标是先保证恢复包整包读取与整包清理，避免过早引入跨任务引用计数和 GC 复杂度。
+  - Decision 6: 不可变正文采用同步提交：
+    - 先写对象存储；
+    - 对象成功后再开启 `MySQL` 事务封口 committed 索引与恢复状态；
+    - 只有 `MySQL` 事务提交成功，才视为 committed fact 真正成立。
+  - Decision 7: 接受“对象已写成功但 `MySQL` 事务失败”产生少量 orphan blob，并由后台 sweep 对账清理；不接受“索引存在但正文缺失”的恢复不一致。
+  - Decision 8: `Recovery Package` 仅对失败 / 中断 / `MANUAL_RETRY_REQUIRED` 任务保留 `72h`；正常完成任务在最终产物 durable 落地并完成发布后立即清理恢复包。
+  - Decision 9: 重恢复资产（`llm/chunk/projection` 正文）与轻量恢复索引（`stage_snapshots / scope graph / scope hints`）同 TTL 同清理；恢复包过期后任务显式进入 `FULL_RERUN_REQUIRED`。
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-03-22 任务提交入口 V2 收敛 Redis 实时通知边界
+- Date: 2026-03-22
+- Background:
+  - `任务提交入口设计_V2.md` 已经明确了受理层的强弱事实源分离，但对“任务进行态走 Redis Pub/Sub、任务终态走 Redis Stream”之后，**用户活性判断应该放在生产前还是投递前** 仍缺少清晰边界。
+  - 当前预期的部署前提是：WebSocket 网关多实例部署，且同一 `userId` 可能同时存在多个在线会话/设备。
+  - 如果不先把这一层边界写死，后续实现很容易把“会话活性”错误上卷到任务生产侧，使 Redis 发布逻辑与 WebSocket 拓扑、前端页面状态纠缠在一起。
+- First principles:
+  - **任务事实** 与 **投递事实** 必须拆开。任务进行到了哪、任务是否进入终态，属于业务事实；某个连接是否活跃、是否订阅、是否该接收该条消息，属于投递事实。
+  - 进行态只是可丢的快照提示；终态是不可逆的用户可见结论，必须拥有可回放、可确认、可恢复的可靠投递边界。
+  - 多实例 + 多会话场景下，任何用户级粗粒度开关都会误伤真正仍在前台、仍在订阅的会话，因此“是否发送进行态”必须下降到 `session + subscription + activity` 粒度。
+- Reusable leverage:
+  - 现有 WebSocket 体系已经具备：
+    - `TaskWebSocketHeartbeatCoordinator` 的活性判定与 `suspended` 语义；
+    - `TaskWebSocketHandler` 的任务级、合集级、用户级订阅扇出；
+    - `TaskTerminalEventService` 的终态 `enqueue / replay / acknowledge` 补偿语义。
+  - 这意味着系统不需要重新发明“可靠终态通道”或“会话活性门控”，而是需要把已有语义提升为 Redis 分层后的正式架构约束。
+- Decisions:
+  - Decision 1: 任务进行态统一视为 Snapshot Hint，生产侧发布到 Redis Pub/Sub，但**不在写入 Redis 前**依据用户活性进行截流。
+  - Decision 2: 进行态的遏制权收敛到 WebSocket 网关最后一跳，只向显式订阅且状态为 `ACTIVE` 的会话扇出；同一 `userId` 的多个会话各自独立判断，不做用户级一刀切广播，也不做用户级唯一 leader 选举。
+  - Decision 3: 任务终态必须先进入 Durable 真源或其 Outbox，再投递到 Redis Stream；Redis Stream 承担的是“可回放投递日志”，不能越级替代真源。
+  - Decision 4: 会话活性信号只由 WebSocket 网关根据 application heartbeat + transport pong 推导；网关本地内存态是投递判定真源，Redis Presence 只作为短 TTL 的跨实例 Hint，不得充当 correctness gate。
+  - Decision 5: Redis Stream 的 consumer ACK 只代表“网关已经消费”；客户端 ACK 才代表“用户已经收到并确认”。二者必须分离，客户端回放游标不能被 consumer group 的确认语义偷换。
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-03-22 Python Phase2B 技能化流水线与三阶段提示词收敛
+- Date: 2026-03-22
+- Background:
+  - 需要把 Java 侧已经落地的技能化 structured prompt 体系同步到 Python `markdown_enhancer`，让 Phase2B 在双端保持一致的 section/tag 语义。
+  - 旧版 `MarkdownEnhancer.enhance(...)` 主要依赖单次 prompt 或 preserve prompt，难以稳定表达 Phase1/2/3 的阶段分工。
+  - Python 侧还需要与 Java 侧保持 `imgneeded`、`main_content/body_text`、`result.json`、`semantic_units` 的媒体保真语义一致。
+- First principles:
+  - Phase2B 的提示词应该分阶段组织，便于后续按能力扩展而不是持续堆叠单个 prompt。
+  - 技能应当是可组合、可按标签装配的最小能力单元，而不是把所有规则硬编码进主提示词。
+  - Python 侧保留 keyframe/clip 的媒体上下文，才能让 Phase3 做事实核对与保真兜底。
+- Reusable leverage:
+  - 复用 `MarkdownEnhancer` 现有能力：
+    - `RuntimeRecoveryStore` / `_execute_recoverable_llm_call(...)`
+    - `imgneeded` / keyframe / clip 的 media-preserved 语义
+    - `result_document` 与 `semantic_units` 产物
+  - 复用 Java 端已有的 `logic_* / scene_* / obsidian_enhancements` 技能拆分思路。
+  - 新增 Python 端技能：`image_embed / cross_unit_bridge / proving_unit`。
+- Decisions:
+  - Decision 1: 新增 `services/python_grpc/src/content_pipeline/phase2b/pipeline_service.py`，统一封装 `EnhancedSection` 三阶段流水线：
+    - Phase1?`structured_system_core_py.md` + `structured_system_core_user_py.md`
+    - Phase2 按 section 的 `logic_tags / scene_tags` 装配 shared skills + Python-specific skills
+    - Phase3 使用 `phase3_factcheck_py.md` + keyframe/clip 上下文 + media-preserved 文档
+  - Decision 2: `MarkdownEnhancer.enhance(...)` 接入 skill pipeline 开关：
+    - config: `content_pipeline.markdown_enhancer.skill_pipeline.enabled`
+    - env override: `MODULE2_MARKDOWN_ENHANCER_SKILL_PIPELINE`
+  - Decision 3: 在并发模型上继续沿用 skill pipeline：
+    - 保持 `_section_max_inflight` 作为 semaphore 上限
+    - section 级任务仍通过 `asyncio.create_task(...)` 并发调度
+    - 单个 section 内严格遵守 `Phase1 -> Phase2 -> Phase3`
+  - Decision 4: Phase3 事实核对统一读取多源上下文：
+    - `phase2b result_document`
+    - `phase2a semantic_units`
+    - `result.json`
+    - 保证媒体保真与文本事实核对在同一阶段完成
+  - Decision 5: `knowledge_type=proving` 时追加 `proving_unit` skill，并在 Phase3 前置 `lead label` 提示词强化证明型表达。
+- Verification:
+  - `python -X utf8 -m py_compile services/python_grpc/src/content_pipeline/phase2b/pipeline_service.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/infra/llm/prompt_registry.py`
+  - `python -X utf8 -m pytest services/python_grpc/src/content_pipeline/tests/test_phase2b_unit_pipeline.py -q --basetemp var/tmp_pytest_phase2b_unit_pipeline`
+  - `python -X utf8 -m pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py -q --basetemp var/tmp_pytest_prompt_loader_usage`
+  - `python -X utf8 -m pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "concrete_imgneeded_placeholders_are_replaced or no_image_candidates_strip_imgneeded_tokens" -q --basetemp var/tmp_pytest_phase2b_rich_text_subset`
+- Performance / streaming notes:
+  - 三阶段流水线会增加单 section 的 prompt 长度，但换来更稳定的技能化扩展与更少的后处理补丁逻辑。
+  - skill pipeline 继续受 `_section_max_inflight` 限流，必要时可通过 benchmark 重新评估吞吐与成本平衡点。
+
+## 2026-03-22 `/api/mobile/cards/phase2b` 技能化结构化 Markdown 路由落地
+- Date: 2026-03-22
+- Background:
+  - 需要在 Java 侧为 `POST /api/mobile/cards/phase2b/structured-markdown` 建立技能化 prompt 管线，统一 `structured_system_core.md / phase2_refine_system.md / phase3_factcheck_system.md` 与 `logic_* / scene_*` skills。
+  - `structured_system_core.md` 负责抽取 `contrast / conditional` 等标签，`structured_system_core_user.md` 负责把 Phase1 输出约束成四类 `logic_tags`。
+  - 旧的 `POST /api/mobile/cards/phase2b` 输出经常缺少稳定的 `## sN` section header，难以支撑后续精修。
+- First principles:
+  - 结构化 Markdown 应该由阶段化 prompt 明确建模，而不是依赖单个大 prompt 硬推。
+  - skills 必须由 `logic_tags / scene_tags` 驱动，保证 prompt 组合和 section 语义一一对应。
+  - section title 与 pipeline 输出应始终具备稳定的 `##` 标题层级，便于前端与后处理消费。
+- Reusable leverage:
+  - 复用 `DeepSeekAdvisorService` 的 provider/fallback/retry/prompt template 基础设施，无需重造 LLM client。
+  - 复用 `prompts/ai-structrued/skills/*.md` 作为技能 prompt 资源目录。
+  - 复用 `MobileCardController.phase2bStructuredMarkdown(...)` 作为 Phase2B 专用 `/phase2b/structured-markdown` 入口。
+- Decisions:
+  - Decision 1: 新增 `Phase2bPipelineService` 作为 `phase2b` 三阶段编排器：
+    - Phase1 负责 section/tag 规划
+    - Phase2 负责 section 精修
+    - Phase3 负责事实核对与统一收口
+  - Decision 2: `DeepSeekAdvisorService` 负责：
+    - Phase1/Phase2/Phase3 prompt 装配
+    - `loadSkillContent(String skillId)` 读取 skill 内容
+    - provider/fallback/retry
+  - Decision 3: skill 装配由 prompt 标签驱动，Java 侧统一映射 `logic_tags / scene_tags`：
+    - `logic_<tag>`
+    - `scene_<tag>`
+    - 额外追加 `obsidian_enhancements`
+  - Decision 4: 保留 `POST /api/mobile/cards/phase2b` 兼容入口，同时新增 `POST /api/mobile/cards/phase2b/structured-markdown` 独立路由。
+  - Decision 5: 若输出缺少 `## sN` 或 section title，则由 pipeline 补齐稳定 header。
+  - Decision 6: `structured_system_core_user.md` 继续教授 `contrast / conditional` 等 Phase1 标签与 skill 的对应关系。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=DeepSeekAdvisorServiceTest,Phase2bPipelineServiceTest,MobileCardControllerPhase2bRouteTest" test -q`
+  - 手工对照 `services/java-orchestrator/src/main/resources/prompts/ai-structrued/test.md`：
+    - 单次 prompt 输出：`tmp_manual_phase2b_skill_demo_v2/before_single.md`
+    - 三阶段 pipeline 输出：`tmp_manual_phase2b_skill_demo_v2/after_pipeline.md`
+    - skill 规划结果：`tmp_manual_phase2b_skill_demo_v2/skill_plan.txt`
+- Experience:
+  - skill 粒度应保持小而明确，避免再次退回“大 prompt 塞所有规则”的模式。
+  - section/tag 分析是 skill 组合的核心锚点，skills 目录与 prompt 目录必须持续同步演进。
 
 ## 2026-03-21 Phase2B 视频分类改为整片证据驱动，并修复 category prompt 占位符
 - Date: 2026-03-21
@@ -617,6 +842,35 @@
 - Verification:
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-21 VL concrete 单元改为“结果即投影”的流式语义回写
+- Date:
+  - 2026-03-21
+- Change:
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 为 `generate(...)` 新增 `on_unit_result_streamed` 回调。
+    - 统一把 `_consume_unit_analysis_result_streaming(...)` 完成后的单元结果序列化后向外透传。
+    - `stream_unit_pipeline` 与 legacy 并发分析路径共用这条“单元完成后通知”链路，避免 concrete 结果只能在整批结束后才能被上层消费。
+    - 将 screenshot optimization 与 legacy drop-tail 增量去重前移到 `_consume_unit_analysis_result_streaming(...)`，让单元回调拿到的 `screenshot_requests` 已接近最终态，并通过 `_skip_cv_optimization` 标记避免 `generate()` 尾部重复整批跑一次。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_normalize_vl_concrete_segments(...)` 与 `_apply_streamed_vl_unit_output_to_semantic_nodes(...)`。
+    - 在 `AnalyzeWithVL` 内部为 VL 生成器注册单元级回调：当 concrete 单元已完成 VL 后处理时，立刻把 `knowledge_type/_vl_route_override/full_text/text/_vl_concrete_segments/material_requests` 投影回 `semantic_units` 运行态投影。
+    - 最终整批持久化阶段优先复用这份 streamed projection，避免后续批量汇总把前面已经完成的 concrete canonical 结果重新覆盖回旧状态。
+- Why:
+  - 之前 concrete 单元虽然在 `VLMaterialGenerator` 内部已经完成 unit 级 `main_content` 后处理，但 gRPC 层要等整批 `vl_unit_analysis_outputs` 全部返回后，才统一把 concrete canonical 内容写回 `semantic_units`。
+  - 这导致 concrete 的“VL 结果 -> canonical 语义回写”之间还存在一层批处理屏障，表现上不像 process 那样单元一完成就能被后续链路消费。
+  - 现有链路最大的杠杆不是重写并发器，而是复用已经存在的 `_consume_unit_analysis_result_streaming(...)` 和 `semantic_units` projection，把“单元已完成”事件显式暴露给上层。
+- Trade-off:
+  - 代价是 `AnalyzeWithVL` 多了一条单元级投影写入路径，日志与运行态 projection 更新频率会变高。
+  - 收益是 concrete 单元不再被整批 concrete 阻塞；一旦该单元的 canonical `main_content` 与单元级截图优化结果形成，就能立即进入语义投影，而不必等最后统一汇总。
+  - 目前仍保留最终批量阶段统一做全局去重/排序，因此 streamed `material_requests` 是“单元最终态优先、全局汇总兜底”的双层结构，而不是彻底删除尾部 finalize。
+- Verification:
+  - `python -m pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "stream_unit_pipeline or emits_unit_result_callback or finalizes_unit_screenshots"`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `python -m py_compile services/python_grpc/src/server/tests/test_vl_streamed_semantic_updates.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
 
 ## 2026-03-21 Phase2B concrete/process 媒体保真链路补强（result.json 预落盘 + media-preserved 强制保 embed）
 - Date:
@@ -16238,3 +16492,149 @@ body` and task metadata is still present.
 - Verification:
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
+\n
+## 2026-03-22：任务提交入口架构设计改进（评审阶段）
+
+**【改动动机】**  
+针对“任务提交入口设计”方案进行了深度评审，识别出在宽洪峰高并发下对正确性、幂等以及跨用户越权方面的设计漏洞，提出了10项架构修复建议。
+
+**【变更详情与架构边界变化】**  
+1. **快路径幂等兜底**：修正了原方案中快路径不产生 `submission_request` 的问题；强制快路径返回 200 后异步落库以供应 `Idempotency-Key` 恢复。
+2. **权限边界修复**：对于私域资源，明确要求 `canonical_resource_id` 必须纳入 `user_id` 进行哈希，补齐了跨用户隔离的隐患。
+3. **并发安全升级**：梳理 `attempt_no` 生成机制，抛弃可能产生 TOCTOU 竞态的并发查询，改用 DB-level 原子递增 CAS (`latest_attempt_no`)。
+4. **状态机与生命周期同步**：
+   - 细化 `resolution_type` 状态（由原本模糊的 `NEW` 拆分为 `NEW_JOB` / `NEW_ATTEMPT` / `REUSED`）。
+   - 收束 MQ 后台补偿 (`sweep`) 与消费认领 (`claim`) 边界，强制判断条件绝对对齐。
+   - 补充 Redis 幂等缓存过期后回查 MySQL 进行状态重建 (`Re-hydrate`) 的规则。
+   - 确保 `publish_audit_log` 审计记录完全依托于数据库发布单事务进行原子写，规避 MQ at-least-once 造成的乱序与丢失缺口。
+
+此提交目前仅涉及《任务提交入口设计.md》的纸面演进，将作为下一阶段重构业务代码蓝图的直接准则。
+
+## 2026-03-23 阅读返回任务列表时补一次强制增量对账
+- Date:
+  - 2026-03-23
+- Reusable leverage:
+  - 复用 `services/java-orchestrator/src/main/resources/static/lib/mobile-view-navigation.js` 提供的 `onViewChanged(nextView, previousView)` 统一导航回调，而不是在返回按钮和边缘返回手势上分别补逻辑。
+  - 复用 `services/java-orchestrator/src/main/resources/static/index.html` 内已有的 `taskListRefreshPolicy` 统一任务列表对账入口，不新增独立轮询器或第二套 reconcile controller。
+  - 复用现有 `/api/mobile/tasks/changes` 增量对账链路与 `refreshTaskListIncrementally(...)` 的自动 resync fallback。
+- Change:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - `createTaskListRefreshPolicy().onViewChange(...)` 新增 `return-from-reading` 分支。
+    - 当 `content/outline -> tasks` 时，即使当前没有活跃任务，也执行一次 `refresh('return-from-reading', { force: true, showLoading: false })`。
+    - 原有 `view-enter` 自动刷新门控保持不变，仍只负责“可自动轮询的任务态页面”。
+  - `tests/frontend/test_task_list_refresh_policy.js`
+    - 新增前端回归脚本，验证“阅读返回列表”会触发一次对账，且非阅读路径不会误触发。
+- Call-chain change:
+  - Old: `content/outline -> tasks -> taskListRefreshPolicy.onViewChange -> shouldAutoRefreshTaskState('tasks') == false -> no reconcile`
+  - New: `content/outline -> tasks -> taskListRefreshPolicy.onViewChange -> refresh('return-from-reading', force) -> refreshTaskListIncrementally`
+- Why:
+  - 阅读返回任务列表是显式的一致性边界。阅读期间列表视图没有重绘，但其他任务的状态、标题、分类或终态可能已经变化。
+  - 如果只复用“是否存在活跃任务”的后台轮询门控，这条回流链路会漏掉必要的列表校准。
+- Trade-off:
+  - 代价是每次从阅读返回列表都会多一次轻量增量请求。
+  - 收益是把“用户显式回到列表时看到旧快照”的风险压掉，同时不破坏“全终态集合停止后台自动轮询”的节流边界。
+- Verification:
+  - `node tests/frontend/test_task_list_refresh_policy.js`
+  - 提取 `services/java-orchestrator/src/main/resources/static/index.html` 主内联脚本后执行 `node --check`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-23 教程型 process 改为 main_content 优先进入 Phase2B 结构化链路
+- Date:
+  - 2026-03-23
+- Change:
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 教程步骤标准化新增 `main_content` 字段，并在 raw/manifest 合并时保留。
+    - 新增 `_resolve_process_base_text(...)`，让教程型 `process` 也先收敛 canonical 输入，再进入统一结构化链路。
+    - 移除教程型 `process` 在 `_process_one(...)` 中的 passthrough 短路。
+    - `_render_section(...)` 改为优先渲染 `structured_content/enhanced_body`，仅在结构化结果为空时回退 `_render_tutorial_steps(...)`。
+    - 取消教程型 `process` 在最终 `main_content`/`body_text` 回写阶段的跳过逻辑。
+  - `services/python_grpc/src/content_pipeline/phase2b/pipeline_service.py`
+    - `process` 单元 phase1 输入改为统一走 `_resolve_process_base_text(...)`，从而实现 `step.main_content -> step.main_operation -> step.main_action` 的优先级。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 新增教程型 `process` 进入 skill pipeline 的回归测试。
+    - 旧 tutorial deterministic 测试显式关闭 `_enable_skill_pipeline`，继续验证本地渲染路径，不再隐式依赖环境里的 LLM 配置。
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_unit_pipeline.py`
+    - 为并发测试补充 fake hierarchy，去除环境依赖。
+- Why:
+  - 之前教程型 `process` 即使已经具备更好的步骤正文来源，也会在 Phase2B 被两层短路吞掉：
+    - 运行时短路：`_process_one(...)` 直接 passthrough，不进入结构化管线。
+    - 渲染时短路：`_render_section(...)` 无条件重走 `_render_tutorial_steps(...)`，忽略 `structured_content`。
+  - 结果是 tutorial `process` 无法与 `concrete / abstract / proving` 一样共享统一的 skill pipeline，也无法把步骤级 `main_content` 作为正式结构化输入源。
+- Decision:
+  - 不新增 tutorial 专用 Phase2B 分支。
+  - 直接把教程型 `process` 接入既有 `skill_pipeline / media_preserved` 主链路。
+  - 保留教程步骤的骨架、媒体嵌入与占位符回填逻辑，只调整步骤正文来源优先级。
+- Trade-off:
+  - 代价是 tutorial 相关测试必须显式声明自己要验证的是哪条路径：
+    - 结构化路径：fake pipeline / fake hierarchy；
+    - 本地 deterministic 路径：显式关闭 `_enable_skill_pipeline`。
+  - 收益是 tutorial `process` 不再是 Phase2B 的例外分支，后续扩展 `process` 结构化规则时不需要同时维护两套调用链。
+- Verification:
+  - `python -X utf8 -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/pipeline_service.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py services/python_grpc/src/content_pipeline/tests/test_phase2b_unit_pipeline.py`
+  - 手工 harness 回归：
+    - `test_tutorial_process_skill_pipeline_uses_main_content_priority_and_renders_structured_output`
+    - `test_process_multistep_renders_ordered_steps_with_assets`
+    - `test_tutorial_step_dedupes_same_keyframe_path_and_keeps_alias`
+    - `test_tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed`
+    - `test_tutorial_step_type_renders_note_warning_without_consuming_main_flow_index`
+    - `test_phase2b_structured_unit_pipeline_runs_phase1_phase2_phase3_in_order`
+    - `test_markdown_enhancer_skill_pipeline_ignores_section_inflight_cap`
+
+## 2026-03-23 Phase2B keyframe placeholder normalization and alias-only rendering
+- Date:
+  - 2026-03-23
+- Change:
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - keyframe placeholder 替换逻辑从仅识别 `[KEYFRAME_n]` 扩展为识别任意可归一化到 `KEYFRAME_n` 的 bracket token，例如 `[concrete_segment_02_keyframe_1]`。
+    - tutorial/process 的 keyframe 渲染改为 alias-only：正文中只保留 embed，自然把 `frame_reason` 留在 embed alias 里，不再追加 `reason: embed` 说明行。
+    - concrete keyframe 候选匹配优先级收敛为：显式 `keyframe_id` -> 时间戳 -> 顺序占位符 -> 剩余候选，修复 alias 与图片路径错绑。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 新增 concrete segment-style keyframe token 替换回归。
+    - 新增 tutorial/process keyframe reason 只作为 alias、不进入正文的回归。
+    - 调整已有 tutorial 测试断言，明确不再接受 `reason: embed` 正文输出。
+- Why:
+  - 之前 Phase2B 已经能把媒体替换成 embed，但一旦正文里出现 segment-style keyframe token，旧替换器会漏掉它，导致中间协议残留到最终文档。
+  - tutorial/process 侧的 `frame_reason` 同时进入正文和 alias，会让文档正文变得啰嗦，且和 concrete 的 alias-only 风格不一致。
+- Trade-off:
+  - 代价是 keyframe 占位符识别规则更宽，需要通过测试约束住不要误伤非 keyframe token。
+  - 收益是 concrete 与 process 的媒体呈现风格收敛，Phase2B 最终正文不再泄漏 placeholder 协议或重复 reason 文案。
+- Verification:
+  - `python -X utf8 -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+  - 手工 harness 回归：
+    - `test_concrete_keyframe_direct_pass_replaces_in_place_without_structured_llm`
+    - `test_concrete_keyframe_direct_pass_prefers_instructional_keyframe_order`
+    - `test_concrete_keyframe_direct_pass_prefers_keyframe_id_over_instructional_order`
+    - `test_concrete_segment_keyframe_alias_placeholder_is_replaced`
+    - `test_process_multistep_renders_ordered_steps_with_assets`
+    - `test_tutorial_step_dedupes_same_keyframe_path_and_keeps_alias`
+    - `test_tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed`
+    - `test_tutorial_step_replaces_instructional_clip_placeholder_with_alias`
+    - `test_tutorial_step_keyframe_reason_is_alias_only_not_body_text`
+
+
+## 2026-03-23 Runtime recovery atomic replace retry for Windows checkpoint projection
+- Date:
+  - 2026-03-23
+- Change:
+  - `services/python_grpc/src/common/utils/runtime_recovery_store.py`
+    - 为 runtime json shadow 增加 Windows 重试参数：
+      - `TASK_RUNTIME_ATOMIC_WRITE_RETRY_COUNT`
+      - `TASK_RUNTIME_ATOMIC_WRITE_RETRY_MS`
+    - `_write_json_atomic_sync(...)` 通过 `_replace_atomic_target(...)` 包装 `os.replace(...)`，对 `PermissionError` / `winerror in {5, 32}` 做定向退避重试。
+  - `services/python_grpc/src/common/utils/tests/test_async_disk_writer.py`
+    - 新增用例覆盖 runtime recovery 投影写入遇到 `Access is denied` 的恢复路径。
+- Why:
+  - `resume_index.json` 与 runtime sqlite 并存时，Windows 上偶发的 `os.replace(...)` 竞争会放大为 checkpoint write failed warning。
+  - 这类失败并不意味着主状态损坏，因为 sqlite 仍然是权威 runtime store。
+- Decision:
+  - 保持 sqlite 作为主状态来源不变。
+  - 仅对 runtime json shadow 的落盘链路补充 Windows 兼容重试。
+- Trade-off:
+  - 允许短时间延迟完成 checkpoint 投影，以换取更高的 Windows 稳定性。
+  - 若持续出现 `WinError 5/32`，仍会保留 warning，便于后续定位系统级占用问题。
+- Verification:
+  - 新增 `test_runtime_recovery_store_atomic_write_retries_replace_after_windows_access_denied`
+  - `python -X utf8 -m py_compile services/python_grpc/src/common/utils/runtime_recovery_store.py services/python_grpc/src/common/utils/tests/test_async_disk_writer.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`

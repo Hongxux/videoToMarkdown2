@@ -4390,6 +4390,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         summary = {
             "unit_id": "",
             "route_patch_updated": 0,
+            "material_requests_updated": 0,
             "concrete_main_content_updated": 0,
             "normalized_segments": [],
             "final_main_content": "",
@@ -4442,6 +4443,23 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
         if not bool(unit_output.get("success", False)):
             return summary
+
+        material_requests_payload = {
+            "screenshot_requests": copy.deepcopy(list(unit_output.get("screenshot_requests", []) or [])),
+            "clip_requests": copy.deepcopy(list(unit_output.get("clip_requests", []) or [])),
+        }
+        material_requests_changed = False
+        for target_node in target_nodes:
+            current_material_requests = target_node.get("material_requests", {})
+            if not isinstance(current_material_requests, dict):
+                current_material_requests = {}
+            if current_material_requests != material_requests_payload:
+                updated_material_requests = dict(current_material_requests)
+                updated_material_requests.update(copy.deepcopy(material_requests_payload))
+                target_node["material_requests"] = updated_material_requests
+                material_requests_changed = True
+        if material_requests_changed:
+            summary["material_requests_updated"] = 1
 
         analysis_mode = str(unit_output.get("analysis_mode", "") or "").strip().lower()
         if analysis_mode != "concrete":
@@ -7408,41 +7426,16 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 )
             effective_runtime_stage1_views = get_stage1_repository_views(effective_runtime_stage1_state)
             
-            # 补齐 sentence_timestamps.json（来自 Stage1 local_storage）
-            intermediates_dir = os.path.join(output_dir, "intermediates")
-            os.makedirs(intermediates_dir, exist_ok=True)
-            inter_sentence_ts = os.path.join(intermediates_dir, "sentence_timestamps.json")
             runtime_sentence_timestamps_payload = dict(
                 effective_runtime_stage1_views.get("sentence_timestamps", {}) or {}
             )
-            if runtime_sentence_timestamps_payload:
-                local_sentence_ts = ""
             sentence_timestamps_path = ""
             if runtime_sentence_timestamps_payload:
                 sentence_timestamps_path = ""
             elif local_sentence_ts and os.path.exists(local_sentence_ts):
-                try:
-                    # 复制到 intermediates，供 Phase2A/Phase2B 统一读取
-                    import shutil
-                    shutil.copy2(local_sentence_ts, inter_sentence_ts)
-                    sentence_timestamps_path = inter_sentence_ts
-
-                    _write_resource_meta(
-                        local_sentence_ts,
-                        group="stage1_text",
-                        input_fingerprint=stage1_fp,
-                        dependencies={
-                            "step2": _file_signature(step2_path),
-                            "step6": _file_signature(step6_path),
-                        },
-                        priority=False,
-                    )
-                except Exception as e:
-                    logger.warning(f"[{task_id}] Copy sentence_timestamps.json failed: {e}")
-                    sentence_timestamps_path = local_sentence_ts
+                sentence_timestamps_path = local_sentence_ts
             else:
-                logger.warning(f"[{task_id}] sentence_timestamps.json not found at {local_sentence_ts}")
-                sentence_timestamps_path = inter_sentence_ts if os.path.exists(inter_sentence_ts) else ""
+                sentence_timestamps_path = ""
 
             stage1_domain = str(effective_runtime_stage1_views.get("domain", "") or "").strip()
             stage1_main_topic = str(effective_runtime_stage1_views.get("main_topic", "") or "").strip()
@@ -10945,6 +10938,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 流式门闸：按批次读取 + 计算 + 回传，IO/Compute 重叠
             COARSE_FPS = 2.0
             coarse_interval = 1.0 / COARSE_FPS
+            route_screenshot_analysis_max_width = 640
+            try:
+                from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
+
+                vl_config = load_module2_config().get("vl_material_generation", {})
+                routing_cfg = vl_config.get("routing", {}) if isinstance(vl_config.get("routing", {}), dict) else {}
+                route_screenshot_analysis_max_width = max(
+                    0,
+                    int(_safe_float(routing_cfg.get("screenshot_analysis_max_width", 640), 640)),
+                )
+            except Exception as config_error:
+                logger.warning(
+                    f"[{task_id}] ValidateCVBatch routing config load failed, use default screenshot_analysis_max_width=640: {config_error}"
+                )
 
             def _estimate_task_frames(task_type: str, unit: dict) -> int:
                 if task_type == "cv":
@@ -12278,8 +12285,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         persist_units_map=streamed_semantic_units_map,
                     )
                     updated_route = int(update_summary.get("route_patch_updated", 0) or 0)
+                    updated_material_requests = int(update_summary.get("material_requests_updated", 0) or 0)
                     updated_concrete = int(update_summary.get("concrete_main_content_updated", 0) or 0)
-                    if updated_route <= 0 and updated_concrete <= 0:
+                    if updated_route <= 0 and updated_material_requests <= 0 and updated_concrete <= 0:
                         return
 
                     persisted_paths = _persist_phase2a_semantic_units_payload(
@@ -12292,6 +12300,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         f"[{task_id}] Streamed VL unit semantic update persisted: "
                         f"unit={update_summary.get('unit_id', '')}, "
                         f"route_patch_updated={updated_route}, "
+                        f"material_requests_updated={updated_material_requests}, "
                         f"concrete_main_content_updated={updated_concrete}, "
                         f"paths={persisted_paths or [_phase2a_semantic_units_virtual_path(output_dir)]}"
                     )

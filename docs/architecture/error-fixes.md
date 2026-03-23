@@ -1,5 +1,42 @@
 ﻿# 错误修正记录
 
+## 2026-03-23 重新提交任务后 task-local SQLite 缺表，导致 Phase2A 恢复入口直接报 `no such table`
+- Date:
+  - 2026-03-23
+- Symptom:
+  - 任务在“重新提交/重新排队”后重新进入 `Phase2A` 时，日志先出现：
+    - `Runtime recovery SQLite stage snapshot load failed: no such table: stage_snapshots`
+  - 随后 `AnalyzeSemanticUnits` 热路径继续报：
+    - `no such table: scope_nodes`
+  - 结果是 Phase2A 在语义分割前就被恢复链路打断，无法继续利用 task-local `runtime_state.db` 里的 stage/scope 恢复能力。
+- Root cause:
+  - Python 侧 `RuntimeRecoverySqliteIndex` 通过 `_initialized_paths` 按 db 路径缓存“该库已经做过 schema 初始化”。
+  - 但重新提交流程里，task-local `runtime_state.db` 可能被外部清空、替换或重建，而 Python 进程内共享的 sqlite index 实例没有重建。
+  - 于是同一路径虽然仍命中“已初始化”缓存，实际物理库里却已经没有：
+    - `stage_snapshots`
+    - `scope_nodes`
+  - 接下来 `RuntimeRecoveryStore.__init__()` 在 `sync_scope_hints_from_scope_graph()` 里直接读 `scope_nodes`，命中缺表异常后没有自愈，故障沿热路径冒泡。
+- Fix:
+  - `services/python_grpc/src/common/utils/runtime_recovery_sqlite.py`
+    - 新增缺表异常识别：当读写命中 `no such table` 时，不再直接失败。
+    - 统一在 sqlite index 内执行 schema 自愈：
+      - 关闭当前进程内读写连接
+      - 丢弃该 db 路径的“已初始化”缓存
+      - 重新执行 `_ensure_schema()`
+      - 对当前读/写请求重试一次
+    - 这样即使 task-local `runtime_state.db` 在共享实例存活期间被重建，后续恢复调用也能自动补回 `stage_snapshots / scope_nodes`。
+  - `tests/test_runtime_recovery_store.py`
+    - 新增回归测试，稳定复现“共享 sqlite 实例仍在，但外部删掉 `stage_snapshots / scope_nodes` 后再次 new `RuntimeRecoveryStore`”的场景。
+    - 用例锁定：store 必须自动重建缺失表，并继续完成 `update_stage_state / upsert_scope_node / load_scope_node`。
+- Verification:
+  - `pytest tests/test_runtime_recovery_store.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是 task-local SQLite 采用“按路径缓存已初始化状态”的实现，都必须考虑“物理 db 被外部重建，但进程内对象还活着”的场景，不能只按路径做一次性判断。
+  - 任何恢复真源读路径若命中 `no such table`，优先视为“schema 丢失/重建”问题处理，而不是把缺表直接当业务异常往外抛。
+  - 后续若再引入新的 task-local 恢复表，必须把它们纳入同一套 schema 自愈与回归测试，而不是只验证首次建库成功。
+
 ## 2026-03-21 Phase2B 视频分类 prompt 变量未渲染且证据过早收敛，导致分类误判
 - Date:
   - 2026-03-21
@@ -4230,38 +4267,36 @@
 - 相关文件/接口：services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
 - 复盘要点：跨阶段知识类型应单点来源，避免 CV 动作类型被误当作知识类型。
 
-## 2026-02-04 enhanced_output.md ??/??/????
-- ???2026-02-04
-- ????????enhanced_output.md ????????????????Obsidian ?????/????????????????
-- ?????MarkdownEnhancer ??????? Markdown?????????????????????????
-- ?????assemble_only ?? enhancer ??????? Markdown??????????????????????? Markdown ??? Obsidian ?????
-- ?????assemble_only ?????????? Markdown ????? Markdown ?? Obsidian ????????????????????????????
-- ??????? Phase2B assemble_only??? enhanced_output.md ????????????????????????????????????
-- ???????/??/??/?????? Markdown ?????????????? material_requests ?????????????????????
-- ????/???services/python_grpc/src/content_pipeline/rich_text_pipeline.py?services/python_grpc/src/content_pipeline/rich_text_document.py
-- ??????????????????Obsidian ?????????????
+## 2026-02-04 enhanced_output.md 输出重复与结构错位
+- 日期：2026-02-04
+- 现象与影响范围：增强链路生成的 `enhanced_output.md` 在导入 Obsidian 后出现正文重复、标题层级错位和素材嵌入位置不稳定。
+- 触发条件：`MarkdownEnhancer` 与 `assemble_only` 路径同时参与输出装配时，旧版 Markdown 组装结果与面向 Obsidian 的增强结构会被重复写入同一文档。
+- 根因定位：`assemble_only` 仍沿用旧的 Markdown 装配产物，而新版 `rich_text_document` 也会生成 `enhanced_output.md`，导致同一 section 被双写。
+- 修复措施：统一 Phase2B `assemble_only` 的输出职责，改由 `rich_text_pipeline` / `rich_text_document` 负责 `enhanced_output.md` 的单一路径生成。
+- 验证方式：重新生成 Markdown，检查 section 结构、`material_requests` 回填和 Obsidian 渲染结果，确认正文、标题、素材嵌入一致。
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/rich_text_pipeline.py`、`services/python_grpc/src/content_pipeline/rich_text_document.py`
+- 预防方案：增强输出文档必须保持单一装配入口，并对 Obsidian 结构渲染增加回归检查。
 
-## 2026-02-04 ??????
-- ???2026-02-04
-- ????????enhanced_output.md ????????????????????????????
-- ?????MarkdownEnhancer ??????????????
-- ?????_render_section ??? action_classifications/knowledge_type ?????
-- ????????????? knowledge_type ?????????????????
-- ???????? process/concrete/abstract ????????????????????/????/??????
-- ???????/??/??/?????????????????????
-- ????/???services/python_grpc/src/content_pipeline/markdown_enhancer.py
-- ?????????????????????????
+## 2026-02-04 knowledge_type 渲染分支错位
+- 日期：2026-02-04
+- 现象与影响范围：`enhanced_output.md` 中部分 section 的渲染风格与预期不符，知识类型驱动的正文模板错位。
+- 触发条件：`MarkdownEnhancer` 在 section 渲染阶段没有稳定地以 `action_classifications/knowledge_type` 驱动模板分支。
+- 根因定位：`_render_section(...)` 对 `action_classifications` 与 `knowledge_type` 的读取不一致，知识类型缺失时会错误落入默认分支。
+- 修复措施：统一基于 `knowledge_type` 做 `process / concrete / abstract` 渲染决策，并补齐缺省值与回退逻辑。
+- 验证方式：重新生成同批 Markdown，确认 `process / concrete / abstract` 分别命中正确模板。
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+- 预防方案：为不同 `knowledge_type` 输出增加回归测试，避免渲染分支再次漂移。
 
-## 2026-02-05 Vision AI ?? Event loop is closed
-- ???2026-02-05
-- ????????Vision AI ??????? "Event loop is closed"????????????????Phase2B ???
-- ????????????? asyncio.run ???? VisionAIClient?????????? AsyncClient?
-- ?????AsyncClient ??????? event loop?????????????
-- ?????VisionAIClient ?????? event loop?? loop ?????????? AsyncClient???????????
-- ????????? Vision AI ? Phase2B ????????? Event loop is closed?Vision API timing ?????
-- ???????/??/??/?????? loop ???????????????????? loop/??????????????
-- ????/???services/python_grpc/src/content_pipeline/vision_ai_client.py?services/python_grpc/src/content_pipeline/concrete_knowledge_validator.py
-- ???????????????????????? loop ???????
+## 2026-02-05 Vision AI 校验触发 Event loop is closed
+- 日期：2026-02-05
+- 现象与影响范围：Vision AI 在 Phase2B 校验阶段偶发 `"Event loop is closed"`，导致 concrete 校验链路中断。
+- 触发条件：在 `asyncio.run(...)` 生命周期结束后继续复用 `VisionAIClient` 持有的 `AsyncClient`。
+- 根因定位：`AsyncClient` 绑定到了已关闭的 event loop，后续校验再次复用同一 client 时触发 loop 失效异常。
+- 修复措施：让 `VisionAIClient` 按当前运行中的 loop 懒初始化或重建 `AsyncClient`，避免跨 loop 复用。
+- 验证方式：重复执行 Vision AI + Phase2B 校验链路，确认不再出现 `"Event loop is closed"`，并检查 Vision API timing 日志恢复正常。
+- 预防方案：所有异步客户端都必须与 loop 生命周期对齐，禁止跨 loop/跨线程复用。
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/vision_ai_client.py`、`services/python_grpc/src/content_pipeline/concrete_knowledge_validator.py`
+- 复盘要点：异步资源必须跟随 loop 生命周期管理，不能把一次性的 loop 资源缓存为进程级单例。
 
 ## 2026-02-04 讲解型仍生成 clip / 截图缺失
 - 日期：2026-02-04
@@ -12473,3 +12508,64 @@
 - Prevention:
   - 占位符协议即使已经收敛，也必须对“模型轻微偏格式输出”保留兼容层；否则真实素材存在时，用户仍会看到中间协议泄漏。
   - 后续若再扩展占位符语法，必须同步补“规范格式 + 轻微变体 + 模板字面量”三类回归，避免兼容性再次倒退。
+
+
+## 2026-03-23 Windows `resume_index.json` atomic replace occasional `WinError 5`
+- Date:
+  - 2026-03-23
+- Symptom:
+  - Stage1 / Phase2A / Phase2B 运行过程中偶发日志：
+    - `Runtime stage checkpoint write failed ... resume_index.json.t... -> resume_index.json`
+    - Windows 下出现 `WinError 5` / `Access is denied`
+  - 同一任务通常仍可继续推进，因为 `resume_index.json` 只是 runtime checkpoint 投影，sqlite 主状态仍然存在。
+- Root cause:
+  - `RuntimeRecoveryStore._write_resume_index(...)` 通过 `_write_json_atomic_sync(...)` 执行 `tmp -> os.replace(target)` 原子替换。
+  - 在 Windows 上，目标文件若被瞬时占用、杀毒扫描或索引器读取，`os.replace(...)` 会短暂抛出 `PermissionError`。
+  - `RuntimeRecoveryStore` 面向 `output_dir` 生成 checkpoint 投影，servicer 主状态仍以 sqlite store 为准，因此这是投影写入竞争，不是主状态损坏。
+- Fix:
+  - 为 `runtime_recovery_store._write_json_atomic_sync(...)` 中的 Windows `os.replace(...)` 增加有限次重试。
+  - 只对明确的 `PermissionError` / `winerror in {5, 32}` 做退避重试。
+  - 超过阈值后仍保留 warning，避免静默吞掉真正的磁盘问题。
+- Verification:
+  - 新增 `test_runtime_recovery_store_atomic_write_retries_replace_after_windows_access_denied`
+  - `python -X utf8 -m py_compile services/python_grpc/src/common/utils/runtime_recovery_store.py services/python_grpc/src/common/utils/tests/test_async_disk_writer.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention:
+  - Windows 下 `tmp -> target` 原子替换属于系统级竞争热点，runtime checkpoint 投影必须允许短暂重试后再失败。
+  - 对 runtime 状态保持双轨存储：
+    - sqlite 主状态
+    - JSON 投影文件
+  - 持续监控 checkpoint write failed warning 的频率，超过阈值时再做系统层排查。
+
+## 2026-03-23 Web 终态对账已收敛状态，但完成/失败通知没有补偿
+- Date:
+  - 2026-03-23
+- Symptom:
+  - Web/PWA 任务链路里，任务即使已经通过 `/api/mobile/tasks/reconcile-terminal` 被收敛成 `COMPLETED` 或 `FAILED`，用户仍可能收不到对应系统通知。
+  - 典型场景是浏览器在离线窗口里错过了 `taskTerminalEvent`，后续页面恢复时列表状态已正确，但“任务已完成 / 任务处理失败”的系统通知没有补发。
+- Root cause:
+  - 现有终态通知副作用只挂在 `taskTerminalEvent` 实时消息分支：
+    - `mergeLiveTaskUpdateIntoState(...)`
+    - `maybeShowTaskTerminalNotification(...)`
+  - `reconcileTerminalTaskSnapshots(...)` 对账分支只负责：
+    - 拉取 `/api/mobile/tasks/reconcile-terminal`
+    - `mergeTaskRecordsIntoState(...)`
+    - 渲染列表
+  - 结果是“终态状态收敛”和“终态通知发出”分属两条不同步的链；一旦实时终态事件丢失，对账只能补状态，不能补通知。
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 在 `reconcileTerminalTaskSnapshots(...)` 中先保存对账前任务快照，并建立 `taskId -> previousTask` 映射。
+    - 合并 `/tasks/reconcile-terminal` 返回的终态任务后，逐个取出当前合并后的任务快照。
+    - 对每个本次对账返回的终态任务，复用现有 `maybeShowTaskTerminalNotification(...)`，并把旧状态作为 `previousStatus` 传入。
+    - 保持通知权限、前后台抑制、点击跳转和 `taskNotificationLedger` 幂等逻辑不变，不新增第二套通知实现。
+  - `tests/frontend/test_task_terminal_notification_reconcile.js`
+    - 新增前端回归，锁定“对账把 `PROCESSING` 收敛到 `COMPLETED/FAILED` 时必须补发通知”。
+- Verification:
+  - `node tests/frontend/test_task_terminal_notification_reconcile.js`
+  - `node tests/frontend/test_task_list_refresh_policy.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 后续凡是存在“实时回放 + REST 对账”双链路的用户可见终态能力，都必须让副作用绑定“终态迁移事实”本身，而不是只绑定实时消息分支。
+  - 通知、Banner、角标等终态副作用如果依赖已有幂等账本，必须复用同一账本，避免实时链和对账链各自维护一套去重语义。

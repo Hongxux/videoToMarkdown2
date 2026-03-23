@@ -68,8 +68,11 @@ tmp*/
 temp_*/
 temp_frames/
 manual_assemble_fix_*/
+manual_md_enh__*/
 tmp_*.py
 tmp_*.txt
+.pytest_tmp_markdown/
+/~/
 
 # =========================
 # 运行时输出目录（默认不入库）
@@ -129,6 +132,7 @@ services/java-orchestrator/tmp_m2repo/
 services/java-orchestrator/build.log
 services/java-orchestrator/compile_error.txt
 services/java-orchestrator/compile_failure.log
+services/java-orchestrator/target_stale_*/
 services/java-orchestrator/output/**/intermediates/task_metrics_latest.json
 services/java-orchestrator/var/telemetry/**
 

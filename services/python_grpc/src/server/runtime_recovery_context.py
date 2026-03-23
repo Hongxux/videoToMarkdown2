@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -15,6 +14,20 @@ from services.python_grpc.src.common.utils.stage_artifact_paths import (
 from services.python_grpc.src.server.stage1_runtime_repository import get_stage1_repository_views
 
 logger = logging.getLogger(__name__)
+
+
+def _has_runtime_stage1_payload(runtime_views: Dict[str, Any]) -> bool:
+    """判断 Stage1 运行时视图是否已具备可直接向下游传递的核心载荷。"""
+    if not isinstance(runtime_views, dict):
+        return False
+    step2_payload = runtime_views.get("step2_subtitles", [])
+    step6_payload = runtime_views.get("step6_paragraphs", [])
+    sentence_timestamps = runtime_views.get("sentence_timestamps", {})
+    return bool(
+        (isinstance(step2_payload, list) and step2_payload)
+        or (isinstance(step6_payload, list) and step6_payload)
+        or (isinstance(sentence_timestamps, dict) and sentence_timestamps)
+    )
 
 
 def load_phase2b_runtime_outputs_from_store(output_dir: str, *, task_id: str = "") -> Optional[Dict[str, Any]]:
@@ -245,85 +258,8 @@ class RuntimeRecoveryResolver:
         runtime_views = get_stage1_repository_views(runtime_state)
         if not isinstance(runtime_views, dict) or not runtime_views:
             return artifact_paths
-
-        intermediates_dir = os.path.join(normalized_output_dir, "intermediates")
-        os.makedirs(intermediates_dir, exist_ok=True)
-        stage1_fp = self._callbacks.build_stage1_runtime_outputs_fingerprint(runtime_state)
-
-        step2_payload = runtime_views.get("step2_subtitles", [])
-        step2_path = os.path.join(intermediates_dir, "step2_correction_output.json")
-        existing_step2_payload, _ = self._callbacks.load_stage1_output_list(step2_path, "corrected_subtitles")
-        if isinstance(existing_step2_payload, list) and existing_step2_payload:
-            artifact_paths["step2_json_path"] = step2_path
-        elif isinstance(step2_payload, list) and step2_payload:
-            with open(step2_path, "w", encoding="utf-8") as output_stream:
-                json.dump(
-                    {"output": {"corrected_subtitles": step2_payload}},
-                    output_stream,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            artifact_paths["step2_json_path"] = step2_path
-        if artifact_paths["step2_json_path"]:
-            self._callbacks.write_resource_meta(
-                artifact_paths["step2_json_path"],
-                group="stage1_text",
-                input_fingerprint=stage1_fp,
-                dependencies={},
-            )
-
-        step6_payload = runtime_views.get("step6_paragraphs", [])
-        step6_path = os.path.join(intermediates_dir, "step6_merge_cross_output.json")
-        existing_step6_payload, _ = self._callbacks.load_stage1_output_list(step6_path, "pure_text_script")
-        if isinstance(existing_step6_payload, list) and existing_step6_payload:
-            artifact_paths["step6_json_path"] = step6_path
-        elif isinstance(step6_payload, list) and step6_payload:
-            with open(step6_path, "w", encoding="utf-8") as output_stream:
-                json.dump(
-                    {"output": {"pure_text_script": step6_payload}},
-                    output_stream,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            artifact_paths["step6_json_path"] = step6_path
-        if artifact_paths["step6_json_path"]:
-            step6_dependencies: Dict[str, Any] = {}
-            if artifact_paths["step2_json_path"]:
-                step6_dependencies["step2"] = self._callbacks.file_signature(artifact_paths["step2_json_path"])
-            self._callbacks.write_resource_meta(
-                artifact_paths["step6_json_path"],
-                group="stage1_text",
-                input_fingerprint=stage1_fp,
-                dependencies=step6_dependencies,
-            )
-
-        sentence_timestamps_path = next(
-            (
-                os.path.abspath(str(candidate_path or "").strip())
-                for candidate_path in helper_stage1_sentence_timestamps_candidates(normalized_output_dir)
-                if candidate_path and os.path.exists(candidate_path)
-            ),
-            "",
-        )
-        runtime_sentence_timestamps = runtime_views.get("sentence_timestamps", {})
-        if not sentence_timestamps_path and isinstance(runtime_sentence_timestamps, dict) and runtime_sentence_timestamps:
-            sentence_timestamps_path = os.path.join(intermediates_dir, "sentence_timestamps.json")
-            with open(sentence_timestamps_path, "w", encoding="utf-8") as output_stream:
-                json.dump(runtime_sentence_timestamps, output_stream, ensure_ascii=False, indent=2)
-        if sentence_timestamps_path:
-            sentence_dependencies: Dict[str, Any] = {}
-            if artifact_paths["step2_json_path"]:
-                sentence_dependencies["step2"] = self._callbacks.file_signature(artifact_paths["step2_json_path"])
-            if artifact_paths["step6_json_path"]:
-                sentence_dependencies["step6"] = self._callbacks.file_signature(artifact_paths["step6_json_path"])
-            self._callbacks.write_resource_meta(
-                sentence_timestamps_path,
-                group="stage1_text",
-                input_fingerprint=stage1_fp,
-                dependencies=sentence_dependencies,
-            )
-            artifact_paths["sentence_timestamps_path"] = sentence_timestamps_path
-
+        if _has_runtime_stage1_payload(runtime_views):
+            return artifact_paths
         return artifact_paths
 
     def count_reusable_runtime_nodes(
@@ -395,6 +331,8 @@ class RuntimeRecoveryResolver:
         resolved_subtitle_path = str(stage_paths.get("subtitle_path", "") or "").strip()
 
         runtime_stage1_outputs = self._callbacks.get_stage1_runtime_outputs(normalized_output_dir)
+        runtime_stage1_views = get_stage1_repository_views(runtime_stage1_outputs)
+        has_runtime_stage1_payload = _has_runtime_stage1_payload(runtime_stage1_views)
         stage1_payload = dict(runtime_stage1_outputs or {}) if isinstance(runtime_stage1_outputs, dict) else {}
         if not resolved_video_path:
             stage1_video_path = str(stage1_payload.get("video_path", "") or "").strip()
@@ -451,7 +389,7 @@ class RuntimeRecoveryResolver:
             transcribe_ready = True
 
         sentence_timestamps_path = str(stage1_artifact_paths.get("sentence_timestamps_path", "") or "").strip()
-        if not sentence_timestamps_path:
+        if not sentence_timestamps_path and not has_runtime_stage1_payload:
             for candidate_path in helper_stage1_sentence_timestamps_candidates(normalized_output_dir):
                 normalized_candidate_path = os.path.abspath(str(candidate_path or "").strip())
                 if normalized_candidate_path and os.path.exists(normalized_candidate_path):

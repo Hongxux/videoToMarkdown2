@@ -98,9 +98,9 @@ class VideoProcessingOrchestratorPhase2RecoveryTest {
         recoveryResult.stage1Ready = true;
         recoveryResult.downloadReady = true;
         recoveryResult.videoPath = taskRoot.resolve("video.mp4").toString();
-        recoveryResult.step2JsonPath = taskRoot.resolve("intermediates").resolve("step2_correction_output.json").toString();
-        recoveryResult.step6JsonPath = taskRoot.resolve("intermediates").resolve("step6_merge_cross_output.json").toString();
-        recoveryResult.sentenceTimestampsPath = taskRoot.resolve("intermediates").resolve("sentence_timestamps.json").toString();
+        recoveryResult.step2JsonPath = "";
+        recoveryResult.step6JsonPath = "";
+        recoveryResult.sentenceTimestampsPath = "";
         recoveryResult.phase2aReady = false;
 
         when(grpcClient.recoverRuntimeContext(
@@ -126,9 +126,9 @@ class VideoProcessingOrchestratorPhase2RecoveryTest {
         assertEquals("phase2a", resolvedStartStage);
         assertNotNull(ioResult.stage1Result);
         assertTrue(ioResult.stage1Result.success);
-        assertEquals(recoveryResult.step2JsonPath, ioResult.stage1Result.step2JsonPath);
-        assertEquals(recoveryResult.step6JsonPath, ioResult.stage1Result.step6JsonPath);
-        assertEquals(recoveryResult.sentenceTimestampsPath, ioResult.stage1Result.sentenceTimestampsPath);
+        assertEquals("", ioResult.stage1Result.step2JsonPath);
+        assertEquals("", ioResult.stage1Result.step6JsonPath);
+        assertEquals("", ioResult.stage1Result.sentenceTimestampsPath);
     }
 
     @Test

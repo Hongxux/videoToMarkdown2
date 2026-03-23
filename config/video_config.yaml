@@ -207,6 +207,10 @@ content_pipeline:
     # Supplemental images fallback output switch
     # Default off; env MODULE2_ENABLE_SUPPLEMENTAL_IMAGES overrides
     enable_supplemental_images: false
+    skill_pipeline:
+      # 是否启用单元级 Phase1 -> Phase2 -> Phase3 skills 流水线
+      # 默认开启；可被环境变量 MODULE2_MARKDOWN_ENHANCER_SKILL_PIPELINE 覆盖
+      enabled: true
   phase2b:
     concrete_ai_vision:
       # concrete 截图在 Phase2B 是否启用 AI Vision 校验（含人物占比预过滤、PP-Structure 预处理）

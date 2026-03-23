@@ -54,7 +54,8 @@ flowchart LR
 - 主要职责：
   - `controller/VideoProcessingController`：通用任务提交、上传、查询、取消、健康检查。
   - `controller/MobileMarkdownController`：移动端任务列表、增量变更、Markdown 读写、资源读取、锚点挂载/同步、导出、上传分片、任务遥测。
-  - `controller/MobileCardController`：概念卡片、候选标题、AI 建议、Phase2B 结构化阅读辅助。
+- `controller/MobileCardController`：概念卡片、候选标题、AI 建议、Phase2B 结构化阅读辅助。
+  - `service/Phase2bPipelineService`：为 `/api/mobile/cards/phase2b` 提供三阶段结构化链路，负责 Phase1 骨架抽取、按 section/tag 选 skill 并发精修、Phase3 全文纠错与旧单次 prompt 回退。
   - `controller/MobileAppUpdateController`：Android 版本检查、APK 下载、发布与回滚。
   - `controller/TelemetryIngestController`：移动端阅读遥测分流到冷数据与逻辑池。
   - `queue/TaskQueueManager`：优先级队列、任务状态机、受理持久化、重启恢复。
@@ -78,6 +79,7 @@ flowchart LR
   - `transcript_pipeline/`：Stage1 文本预处理与中间结果产出。
   - `content_pipeline/phase2a/`：语义分割、素材请求规划、VL 材料生成、截图路由、知识分类前置能力。
   - `content_pipeline/phase2b/`：富文本组装与视频分类收尾。
+  - `content_pipeline/phase2b/pipeline_service.py`：单元级 skills 流水线；在启用 skill pipeline 时，对单个语义单元按 Phase1 骨架提取、Phase2 按需 skill 精修、Phase3 单元级纠错与图片嵌入顺序执行，并允许所有单元无本地并发上限地同时推进。
   - `content_pipeline/infra/`：提示词注册与加载、LLM 网关、运行时资源管理、缓存指标。
   - `vision_validation/` 与 `worker/`：CV 批处理 worker、共享内存与多进程运行时。
 
@@ -224,6 +226,7 @@ stateDiagram-v2
    - 回退传统路径：`ValidateCVBatch` + `ClassifyKnowledgeBatch` + `GenerateMaterialRequests`
 5. Java 侧 `JavaCVFFmpegService` 负责截图、切片等工程化素材抽取。
 6. Python `AssembleRichText` 组装最终 Markdown/JSON，并在 Phase2B 尾部完成视频分类写回。
+   - 若启用 `MarkdownEnhancer` skill pipeline，则每个语义单元独立完成 Phase1/Phase2/Phase3 后立即回写自身的 `main_content/body_text`，不再等待整批单元统一过阶段。
 7. Java 侧补充任务指标、缓存、清理、实时推送与终态持久化。
 
 ### 6.2 书籍与文章链路
@@ -254,7 +257,7 @@ stateDiagram-v2
   - 卡片读写
   - AI 建议
   - 思考块写回
-  - Phase2B 结构化阅读辅助
+  - `POST /api/mobile/cards/phase2b`：Phase2B 结构化阅读辅助；控制器优先走三阶段 pipeline，内部按 `logic_tags/scene_tags` 按需加载 `logic_* / scene_* / obsidian_enhancements` skills，并保留 `/phase2b/structured-markdown` 兼容路径。
 - 卡片存储与 UI 解耦：
   - 数据层保存 Markdown/YAML frontmatter。
   - 反向链接与高亮候选在运行时计算，不污染底层文件。

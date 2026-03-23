@@ -74,7 +74,7 @@ def _build_callbacks(*, store, runtime_state, phase2a_units=None, phase2b_output
     )
 
 
-def test_materialize_stage1_recovery_artifacts_writes_missing_files(tmp_path):
+def test_materialize_stage1_recovery_artifacts_prefers_runtime_payload_without_writing_files(tmp_path):
     runtime_state = {
         "views": {
             "step2_subtitles": [{"subtitle_id": "SUB001", "corrected_text": "hello"}],
@@ -94,9 +94,11 @@ def test_materialize_stage1_recovery_artifacts_writes_missing_files(tmp_path):
         runtime_state=runtime_state,
     )
 
-    assert Path(artifact_paths["step2_json_path"]).exists()
-    assert Path(artifact_paths["step6_json_path"]).exists()
-    assert Path(artifact_paths["sentence_timestamps_path"]).exists()
+    assert artifact_paths == {
+        "step2_json_path": "",
+        "step6_json_path": "",
+        "sentence_timestamps_path": "",
+    }
 
 
 def test_resolve_download_recovery_metadata_prefers_download_snapshot(tmp_path):
@@ -139,6 +141,9 @@ def test_resolve_runtime_recovery_context_returns_completed_when_phase2b_outputs
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "video.mp4").write_bytes(b"video")
     (task_dir / "subtitles.txt").write_text("subtitle", encoding="utf-8")
+    legacy_sentence_ts = task_dir / "intermediates" / "sentence_timestamps.json"
+    legacy_sentence_ts.parent.mkdir(parents=True, exist_ok=True)
+    legacy_sentence_ts.write_text(json.dumps({"LEGACY": {"start_sec": 9.0, "end_sec": 10.0}}), encoding="utf-8")
     markdown_path = task_dir / "result.md"
     json_path = task_dir / "result.json"
     markdown_path.write_text("# recovered", encoding="utf-8")
@@ -201,5 +206,8 @@ def test_resolve_runtime_recovery_context_returns_completed_when_phase2b_outputs
     assert context.phase2b_ready is True
     assert context.markdown_path == str(markdown_path.resolve())
     assert context.json_path == str(json_path.resolve())
+    assert context.step2_json_path == ""
+    assert context.step6_json_path == ""
+    assert context.sentence_timestamps_path == ""
     assert context.reused_llm_call_count == 1
     assert context.reused_chunk_count == 1

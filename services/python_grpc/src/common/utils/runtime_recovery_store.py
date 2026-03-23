@@ -29,6 +29,9 @@ from services.python_grpc.src.common.utils.runtime_recovery_sqlite import Runtim
 
 logger = logging.getLogger(__name__)
 
+_ATOMIC_WRITE_RETRY_COUNT = max(1, int(os.getenv("TASK_RUNTIME_ATOMIC_WRITE_RETRY_COUNT", "4") or 4))
+_ATOMIC_WRITE_RETRY_MS = max(1, int(os.getenv("TASK_RUNTIME_ATOMIC_WRITE_RETRY_MS", "25") or 25))
+
 STATUS_PLANNED = "PLANNED"
 STATUS_RUNNING = "RUNNING"
 STATUS_SUCCESS = "SUCCESS"
@@ -307,6 +310,38 @@ def _fsync_parent_dir(path: Path) -> None:
             pass
 
 
+def _remove_file_quietly(path: Path) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _is_retryable_replace_error(error: Exception) -> bool:
+    if os.name != "nt":
+        return False
+    if isinstance(error, PermissionError):
+        return True
+    winerror = getattr(error, "winerror", None)
+    return winerror in {5, 32}
+
+
+def _replace_atomic_target(tmp_path: Path, target_path: Path) -> None:
+    last_error: Optional[Exception] = None
+    for attempt in range(_ATOMIC_WRITE_RETRY_COUNT):
+        try:
+            os.replace(tmp_path, target_path)
+            return
+        except Exception as error:
+            last_error = error
+            if attempt + 1 >= _ATOMIC_WRITE_RETRY_COUNT or not _is_retryable_replace_error(error):
+                break
+            time.sleep((_ATOMIC_WRITE_RETRY_MS * (attempt + 1)) / 1000.0)
+    _remove_file_quietly(tmp_path)
+    if last_error is not None:
+        raise last_error
+
+
 def _write_json_atomic_sync(path: Path, payload: Any) -> None:
     target_path = Path(path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -315,7 +350,7 @@ def _write_json_atomic_sync(path: Path, payload: Any) -> None:
         json.dump(payload, output_stream, ensure_ascii=False, indent=2, default=str)
         output_stream.flush()
         os.fsync(output_stream.fileno())
-    os.replace(tmp_path, target_path)
+    _replace_atomic_target(tmp_path, target_path)
     _fsync_parent_dir(target_path)
 
 

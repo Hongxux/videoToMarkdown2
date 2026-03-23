@@ -241,9 +241,13 @@ STRUCTURED_TEXT_SYSTEM_PROMPT = """你是教学内容结构化助手。
  - 如果图片描述与句子描述不匹配，则不使用。
  - 如果多张图片匹配一句话可以在句子的句末插入多张图片的占位符。
  - 如果图片候选为空（例如 `(none)`），严禁输出任何 `imgneeded` 占位符。
-4) 禁止使用其他占位符格式（例如 [IMG:img_id]、{IMG=img_id} 等）。
-5) 叙事衔接：多个列表项如果来自同一段连续话语，必须保留叙事连贯感，使用简短衔接句承接上一项，禁止百科词条式罗列。
-6) 论证嵌套：对同一论点的原因、后果、程度、举例、隐喻，禁止与论点并列展开，必须缩进嵌套在父观点之下。如果列表项只有一句核心描述，应将描述直接写在标签冒号之后。
+4) 必须原样保留原文中已有的媒体锚点，尤其是 Markdown 图片、Obsidian embed、[KEYFRAME_{N}]、[CLIP_{N}]。
+ - 结构化后仍要保持对应关系和相对逻辑位置，不得删除、改写路径、改成普通链接或遗漏编号。
+ - 如果给出视频片段锚点（clip_context），其中列出的每个视频 embed 都必须在最终 Markdown 中至少保留一次。
+ - 同一路径的媒体全局只保留一次；如果长句拆解后多个子句共用同一媒体，只允许挂在最匹配、最靠前的那个子句末尾。
+5) 禁止使用其他占位符格式（例如 [IMG:img_id]、{IMG=img_id} 等）。
+6) 叙事衔接：多个列表项如果来自同一段连续话语，必须保留叙事连贯感，使用简短衔接句承接上一项，禁止百科词条式罗列。
+7) 论证嵌套：对同一论点的原因、后果、程度、举例、隐喻，禁止与论点并列展开，必须缩进嵌套在父观点之下。如果列表项只有一句核心描述，应将描述直接写在标签冒号之后。
 """
 
 STRUCTURED_TEXT_USER_PROMPT = """## 语义单元
@@ -259,9 +263,13 @@ STRUCTURED_TEXT_USER_PROMPT = """## 语义单元
 ## 图片候选（可为空）
 {image_context}
 
+## 视频片段锚点（可为空）
+{clip_context}
+
 请输出结构化 Markdown；若有图片候选，请根据图片描述把对应图片插入到匹配句子的末尾，
 占位符必须使用【imgneeded_{{img_id}}】。
-若图片候选为空（例如 `(none)`），不要输出任何 `imgneeded` 占位符。"""
+若图片候选为空（例如 `(none)`），不要输出任何 `imgneeded` 占位符。
+若给出视频片段锚点，请务必原样保留其中的 `![[...]]` 视频嵌入，不得删除、改写路径或改成其他链接格式。"""
 
 
 IMG_DESC_AUGMENT_SYSTEM_PROMPT = """你是教学文本补全助手。
@@ -447,6 +455,7 @@ class MarkdownEnhancer:
         # 优先读取 config.yaml；若环境变量显式设置则覆盖配置。
         self._enable_img_desc_text_augment = self._load_img_desc_augment_switch(default_value=True)
         self._enable_supplemental_images = self._load_supplemental_images_switch(default_value=True)
+        self._enable_skill_pipeline = self._load_skill_pipeline_switch(default_value=True)
 
         # 可观测性：LLM 调用明细追踪（可配置 full/summary）
         trace_cfg = self._load_llm_trace_config(default_enabled=False)
@@ -457,6 +466,8 @@ class MarkdownEnhancer:
         self._llm_trace_output_path_cfg = str(trace_cfg.get("output_path", "") or "").strip()
         self._llm_trace_file_path = ""
         self._llm_trace_lock = asyncio.Lock()
+        self._result_payload_lock = asyncio.Lock()
+        self._structured_unit_pipeline = None
 
         # 兼容保留：旧测试/调试路径可能直接调用 _classify_hierarchy，
         # 但增强主链路已切换为 knowledge_groups 输入，不再依赖该调用。
@@ -664,6 +675,33 @@ class MarkdownEnhancer:
                 logger.warning(f"Failed to load supplemental-images switch from config: {exc}")
 
         env_raw = os.getenv("MODULE2_ENABLE_SUPPLEMENTAL_IMAGES")
+        if env_raw is not None and str(env_raw).strip() != "":
+            enabled = self._parse_bool(env_raw, enabled)
+
+        return enabled
+
+    def _load_skill_pipeline_switch(self, default_value: bool = True) -> bool:
+        """加载单元级 skills pipeline 开关：默认开启，按 config/env 显式覆盖。"""
+        enabled = bool(default_value)
+
+        config_path = self._resolve_config_path()
+        if config_path is not None:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                content_pipeline_cfg = config.get("content_pipeline", {}) if isinstance(config, dict) else {}
+                enhancer_cfg = (
+                    content_pipeline_cfg.get("markdown_enhancer", {})
+                    if isinstance(content_pipeline_cfg, dict)
+                    else {}
+                )
+                pipeline_cfg = enhancer_cfg.get("skill_pipeline", {}) if isinstance(enhancer_cfg, dict) else {}
+                cfg_value = pipeline_cfg.get("enabled", enabled) if isinstance(pipeline_cfg, dict) else enabled
+                enabled = self._parse_bool(cfg_value, enabled)
+            except Exception as exc:
+                logger.warning(f"Failed to load skill-pipeline switch from config: {exc}")
+
+        env_raw = os.getenv("MODULE2_MARKDOWN_ENHANCER_SKILL_PIPELINE")
         if env_raw is not None and str(env_raw).strip() != "":
             enabled = self._parse_bool(env_raw, enabled)
 
@@ -1760,6 +1798,45 @@ class MarkdownEnhancer:
                     payload=artifact_payload,
                 )
         return updated_files
+
+    async def _flush_section_markdown_progress(
+        self,
+        *,
+        result_json_path: str,
+        payload: Any,
+        section: EnhancedSection,
+    ) -> None:
+        final_markdown = str(
+            section.structured_content
+            or section.enhanced_body
+            or section.original_body
+            or ""
+        ).strip()
+        unit_id = str(getattr(section, "unit_id", "") or "").strip()
+        if not unit_id or not final_markdown:
+            return
+
+        update_payload = {unit_id: final_markdown}
+        async with self._result_payload_lock:
+            try:
+                if self._sync_final_media_markdown_into_result_payload(payload, update_payload):
+                    self._persist_runtime_artifact_payload(
+                        stage="phase2b",
+                        artifact_name="result_document",
+                        schema_version="phase2b.result_document.v1",
+                        payload=payload,
+                    )
+                    self._write_json_payload(Path(result_json_path), payload)
+            except Exception as exc:
+                logger.warning(f"Failed to flush section markdown into result.json: unit={unit_id} err={exc}")
+
+            try:
+                self._sync_final_media_markdown_into_semantic_units(
+                    self._result_dir,
+                    update_payload,
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to flush section markdown into semantic_units: unit={unit_id} err={exc}")
     
     @property
     def enabled(self) -> bool:
@@ -1774,6 +1851,14 @@ class MarkdownEnhancer:
         输出参数：
         - 布尔判断结果。"""
         return self._enabled
+
+    def _resolve_structured_unit_pipeline(self):
+        if self._structured_unit_pipeline is not None:
+            return self._structured_unit_pipeline
+        from services.python_grpc.src.content_pipeline.phase2b.pipeline_service import Phase2bStructuredUnitPipeline
+
+        self._structured_unit_pipeline = Phase2bStructuredUnitPipeline(self)
+        return self._structured_unit_pipeline
     
     async def enhance(
         self,
@@ -2008,9 +2093,13 @@ class MarkdownEnhancer:
 
         # Step 2: 正文增强 + 结构化（并行提交，按完成顺序流式处理）
         logger.info("Step 2: Parallel LLM enhance/structure by unit")
-        section_max_inflight = max(1, int(getattr(self, "_section_max_inflight", 48)))
-        section_sem = asyncio.Semaphore(section_max_inflight)
-        logger.info(f"Step 2 inflight cap: {section_max_inflight}")
+        section_sem = None
+        if not self._enable_skill_pipeline:
+            section_max_inflight = max(1, int(getattr(self, "_section_max_inflight", 48)))
+            section_sem = asyncio.Semaphore(section_max_inflight)
+            logger.info(f"Step 2 inflight cap: {section_max_inflight}")
+        else:
+            logger.info("Step 2 inflight cap: unlimited (skill pipeline enabled)")
 
         async def _process_one(idx: int, sec: EnhancedSection) -> int:
             """
@@ -2022,22 +2111,45 @@ class MarkdownEnhancer:
             prev_title = all_sections[idx - 1].title if idx > 0 else ""
             next_title = all_sections[idx + 1].title if idx < len(all_sections) - 1 else ""
 
-            async with section_sem:
+            async def _run_pipeline() -> int:
                 self._update_phase2b_section_wave_state(
                     section=sec,
                     status=STATUS_RUNNING,
+                    result_summary={
+                        "path": "skill_pipeline" if self._enable_skill_pipeline else "legacy_pipeline",
+                        "phase": "dispatch",
+                    },
                 )
                 try:
                     normalized_kt = self._normalize_knowledge_type(sec.knowledge_type)
 
-                    if self._is_tutorial_process_section(sec):
-                        # 教程型 process 直接走步骤渲染，不走通用逻辑抽取。
+                    if self._enable_skill_pipeline:
+                        self._update_phase2b_section_wave_state(
+                            section=sec,
+                            status=STATUS_RUNNING,
+                            result_summary={"path": "skill_pipeline", "phase": "phase1"},
+                        )
+                        pipeline_result = await self._resolve_structured_unit_pipeline().process_unit(
+                            sec,
+                            prev_title=prev_title,
+                            next_title=next_title,
+                        )
                         sec.enhanced_body = sec.original_body
-                        sec.structured_content = ""
+                        sec.structured_content = str(pipeline_result.markdown or "").strip()
                         self._update_phase2b_section_wave_state(
                             section=sec,
                             status=STATUS_SUCCESS,
-                            result_summary={"path": "tutorial_passthrough"},
+                            result_summary={
+                                "path": "skill_pipeline",
+                                "phase": "phase3",
+                                "fallback_used": bool(getattr(pipeline_result, "fallback_used", False)),
+                                "fallback_reason": str(getattr(pipeline_result, "fallback_reason", "") or ""),
+                            },
+                        )
+                        await self._flush_section_markdown_progress(
+                            result_json_path=result_json_path,
+                            payload=data,
+                            section=sec,
                         )
                         return idx
 
@@ -2051,6 +2163,11 @@ class MarkdownEnhancer:
                             section=sec,
                             status=STATUS_SUCCESS,
                             result_summary={"path": "abstract_structured"},
+                        )
+                        await self._flush_section_markdown_progress(
+                            result_json_path=result_json_path,
+                            payload=data,
+                            section=sec,
                         )
                         return idx
 
@@ -2067,6 +2184,11 @@ class MarkdownEnhancer:
                             status=STATUS_SUCCESS,
                             result_summary={"path": "media_preserved"},
                         )
+                        await self._flush_section_markdown_progress(
+                            result_json_path=result_json_path,
+                            payload=data,
+                            section=sec,
+                        )
                         return idx
 
                     if self._combine_llm_calls:
@@ -2076,6 +2198,11 @@ class MarkdownEnhancer:
                                 section=sec,
                                 status=STATUS_SUCCESS,
                                 result_summary={"path": "combined_llm"},
+                            )
+                            await self._flush_section_markdown_progress(
+                                result_json_path=result_json_path,
+                                payload=data,
+                                section=sec,
                             )
                             return idx
                         except Exception as e:
@@ -2090,6 +2217,11 @@ class MarkdownEnhancer:
                         status=STATUS_SUCCESS,
                         result_summary={"path": "two_step_llm"},
                     )
+                    await self._flush_section_markdown_progress(
+                        result_json_path=result_json_path,
+                        payload=data,
+                        section=sec,
+                    )
                     return idx
                 except Exception as error:
                     self._update_phase2b_section_wave_state(
@@ -2098,6 +2230,11 @@ class MarkdownEnhancer:
                         error=error,
                     )
                     raise
+
+            if section_sem is None:
+                return await _run_pipeline()
+            async with section_sem:
+                return await _run_pipeline()
 
         indexed_sections = list(enumerate(all_sections))
         prioritized_sections = sorted(
@@ -2126,11 +2263,6 @@ class MarkdownEnhancer:
 
         final_media_markdown_by_unit: Dict[str, str] = {}
         for sec in all_sections:
-            if self._is_tutorial_process_section(sec):
-                continue
-            normalized_kt = self._normalize_knowledge_type(sec.knowledge_type)
-            if normalized_kt not in {"concrete", "process"}:
-                continue
             final_markdown = str(
                 sec.structured_content
                 or sec.enhanced_body
@@ -2151,7 +2283,7 @@ class MarkdownEnhancer:
                         payload=data,
                     )
                     logger.info(
-                        "Synced final media-preserved markdown into result.json: units=%s",
+                        "Synced final unit markdown into result.json: units=%s",
                         len(final_media_markdown_by_unit),
                     )
             except Exception as exc:
@@ -2164,7 +2296,7 @@ class MarkdownEnhancer:
                 )
                 if updated_semantic_files > 0:
                     logger.info(
-                        "Synced final media-preserved markdown into semantic_units payloads: files=%s, units=%s",
+                        "Synced final unit markdown into semantic_units payloads: files=%s, units=%s",
                         updated_semantic_files,
                         len(final_media_markdown_by_unit),
                     )
@@ -2286,6 +2418,8 @@ class MarkdownEnhancer:
         kt = (knowledge_type or "").lower()
         if kt in ("abstract", "抽象", "讲解型", "explanation"):
             return 1
+        if kt in ("proving", "论证", "证明", "argument"):
+            return 2
         if kt in ("process", "过程", "过程性", "procedural"):
             return 2
         if kt in ("concrete", "具象", "具体"):
@@ -2327,6 +2461,8 @@ class MarkdownEnhancer:
                 level_stack[2] = section.unit_id
     def _normalize_knowledge_type(self, knowledge_type: str) -> str:
         lowered = (knowledge_type or "").strip().lower()
+        if any(key in lowered for key in ("proving", "论证", "证明", "推导", "argument")):
+            return "proving"
         if any(key in lowered for key in ("process", "过程", "操作", "procedural")):
             return "process"
         if any(key in lowered for key in ("concrete", "具象", "实例", "示例", "实操")):
@@ -2587,6 +2723,12 @@ class MarkdownEnhancer:
             if raw_main_operation is None:
                 raw_main_operation = raw_step.get("主要操作")
             main_operation = _normalize_main_operation(raw_main_operation)
+            raw_main_content = raw_step.get("main_content")
+            if raw_main_content is None:
+                raw_main_content = raw_step.get("main_contents")
+            if raw_main_content is None:
+                raw_main_content = raw_step.get("主要内容")
+            main_content = _normalize_main_operation(raw_main_content)
             raw_precautions = raw_step.get("precautions")
             if raw_precautions is None:
                 raw_precautions = raw_step.get("notes")
@@ -2766,6 +2908,7 @@ class MarkdownEnhancer:
                 "step_description": step_desc,
                 "step_type": step_type,
                 "main_action": main_action,
+                "main_content": main_content,
                 "main_operation": main_operation,
                 "precautions": precautions,
                 "step_summary": step_summary,
@@ -2831,6 +2974,8 @@ class MarkdownEnhancer:
                             existed["step_type"] = existing_step_type
                         if not existed.get("main_action"):
                             existed["main_action"] = normalized["main_action"]
+                        if normalized["main_content"] and not existed.get("main_content"):
+                            existed["main_content"] = normalized["main_content"]
                         if normalized["main_operation"] and not existed.get("main_operation"):
                             existed["main_operation"] = normalized["main_operation"]
                         if normalized["precautions"] and not existed.get("precautions"):
@@ -2856,6 +3001,8 @@ class MarkdownEnhancer:
                     else:
                         existed["step_type"] = existing_step_type
                     existed["main_action"] = normalized["main_action"] or existed.get("main_action", "")
+                    if normalized["main_content"]:
+                        existed["main_content"] = normalized["main_content"]
                     if normalized["main_operation"]:
                         existed["main_operation"] = normalized["main_operation"]
                     if normalized["precautions"]:
@@ -3561,6 +3708,71 @@ class MarkdownEnhancer:
                 paths.add(normalized)
         return paths
 
+    @classmethod
+    def _extract_obsidian_embeds(cls, content: str) -> List[str]:
+        """按正文出现顺序提取唯一的 Obsidian embed，供媒体保留提示词复用。"""
+        if not content:
+            return []
+        embeds: List[str] = []
+        seen_paths: set[str] = set()
+        pattern = re.compile(r"!\[\[\s*([^|\]]+)(?:\|[^\]]*)?\]\]")
+        for match in pattern.finditer(content):
+            normalized = cls._normalize_embed_path(match.group(1))
+            if not normalized or normalized in seen_paths:
+                continue
+            embeds.append(match.group(0).strip())
+            seen_paths.add(normalized)
+        return embeds
+
+    @staticmethod
+    def _is_video_embed_path(path_text: str) -> bool:
+        normalized_path = str(path_text or "").strip()
+        if not normalized_path:
+            return False
+        suffix = Path(normalized_path.split("?", 1)[0]).suffix.lower()
+        return suffix in {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"}
+
+    def _build_clip_context(self, content: str, clip_items: List[Dict[str, Any]]) -> str:
+        """
+        做什么：为结构化提示词构造 clip_context，显式列出必须保留的视频 embed。
+        为什么：process/tutorial 的真实 clip 可能只存在于 deterministic base_text 中，不能只依赖 video_clips。
+        权衡：优先复用正文里已经排好序的 embed；正文缺失时再回退到 clip_items，避免丢失必保留媒体。
+        """
+        context_lines: List[str] = []
+        seen_paths: set[str] = set()
+
+        for embed in self._extract_obsidian_embeds(content):
+            matched = re.search(r"!\[\[\s*([^|\]]+)", embed)
+            normalized_path = self._normalize_embed_path(matched.group(1) if matched else "")
+            if not normalized_path or not self._is_video_embed_path(normalized_path):
+                continue
+            if normalized_path in seen_paths:
+                continue
+            context_lines.append(f"- clip_embed={embed}")
+            seen_paths.add(normalized_path)
+
+        for item in clip_items:
+            if not isinstance(item, dict):
+                continue
+            clip_path = str(item.get("clip_path", "") or "").strip()
+            normalized_path = self._normalize_embed_path(clip_path)
+            if not normalized_path or normalized_path in seen_paths:
+                continue
+            if not self._is_video_embed_path(normalized_path):
+                continue
+            embed = self._format_obsidian_embed(
+                clip_path,
+                alias=str(item.get("clip_reason", "") or "").strip(),
+            )
+            if not embed:
+                continue
+            context_lines.append(f"- clip_embed={embed}")
+            seen_paths.add(normalized_path)
+
+        if not context_lines:
+            return "(none)"
+        return "\n".join(context_lines)
+
     @staticmethod
     def _normalize_keyframe_id(value: Any) -> str:
         text = str(value or "").strip()
@@ -3595,6 +3807,10 @@ class MarkdownEnhancer:
     ) -> str:
         if not content:
             return content
+        keyframe_pattern = re.compile(
+            r"\[\s*([^\[\]\r\n]*KEYFRAME[^\[\]\r\n]*)\s*\]",
+            flags=re.IGNORECASE,
+        )
         normalized_map: Dict[str, str] = {}
         for raw_key, embed in (keyframe_embed_map or {}).items():
             normalized_key = cls._normalize_keyframe_id(raw_key)
@@ -3606,21 +3822,23 @@ class MarkdownEnhancer:
             if normalized_key not in normalized_map:
                 normalized_map[normalized_key] = embed_text
         if not keyframe_embeds and not normalized_map:
-            return re.sub(r"\[\s*KEYFRAME_\d+\s*\]", "", content, flags=re.IGNORECASE)
+            return keyframe_pattern.sub("", content)
 
         def _replace(match: re.Match) -> str:
-            try:
-                idx = int(match.group(1))
-            except Exception:
-                idx = 0
-            keyframe_id = f"KEYFRAME_{idx}" if idx > 0 else ""
+            keyframe_id = cls._normalize_keyframe_id(match.group(1))
             if keyframe_id and keyframe_id in normalized_map:
                 return normalized_map[keyframe_id]
+            idx = 0
+            if keyframe_id:
+                try:
+                    idx = int(keyframe_id.rsplit("_", 1)[1])
+                except Exception:
+                    idx = 0
             if idx <= 0 or idx > len(keyframe_embeds):
                 return ""
             return keyframe_embeds[idx - 1]
 
-        return re.sub(r"\[\s*KEYFRAME_(\d+)\s*\]", _replace, content, flags=re.IGNORECASE)
+        return keyframe_pattern.sub(_replace, content)
 
     @classmethod
     def _replace_clip_placeholders(
@@ -3779,6 +3997,20 @@ class MarkdownEnhancer:
         if not main_content_blocks:
             return fallback_text
         return "\n\n".join(main_content_blocks).strip()
+
+    def _resolve_process_base_text(self, section: EnhancedSection) -> str:
+        """
+        做什么：为 process 单元统一生成进入结构化链路的 canonical 正文。
+        为什么：教程型 process 也必须像 concrete 一样先收敛稳定输入，再进入 Phase2B。
+        权衡：保留现有教程步骤骨架与媒体嵌入，只调整步骤正文优先级为 main_content -> main_operation。
+        """
+        fallback_text = str(section.original_body or "").strip()
+        if self._normalize_knowledge_type(section.knowledge_type) != "process":
+            return fallback_text
+        if not self._is_tutorial_process_section(section):
+            return fallback_text
+        tutorial_text = "\n".join(self._render_tutorial_steps(section)).strip()
+        return tutorial_text or fallback_text
 
     @classmethod
     def _extract_keyframe_id_from_source_id(cls, source_id: Any) -> str:
@@ -4019,11 +4251,13 @@ class MarkdownEnhancer:
                 explicit_path = ""
                 timestamp_sec = None
                 keyframe_id = ""
+                explicit_keyframe_id = ""
                 if isinstance(keyframe, dict):
                     frame_reason = str(keyframe.get("frame_reason", "") or "").strip()
-                    keyframe_id = self._normalize_keyframe_id(
+                    explicit_keyframe_id = self._normalize_keyframe_id(
                         keyframe.get("keyframe_id", keyframe.get("keyframeId"))
                     )
+                    keyframe_id = explicit_keyframe_id
                     if not keyframe_id:
                         keyframe_id = f"KEYFRAME_{len(ordered_embeds) + 1}"
                     explicit_path = str(
@@ -4037,8 +4271,8 @@ class MarkdownEnhancer:
                     except Exception:
                         timestamp_sec = None
 
-                if keyframe_id:
-                    candidate = _take_by_keyframe_id(keyframe_id)
+                if explicit_keyframe_id:
+                    candidate = _take_by_keyframe_id(explicit_keyframe_id)
 
                 if explicit_path:
                     candidate = candidate or _take_by_path(explicit_path)
@@ -4055,6 +4289,9 @@ class MarkdownEnhancer:
 
                 if candidate is None and timestamp_sec is not None:
                     candidate = _take_by_timestamp(timestamp_sec)
+
+                if candidate is None and not explicit_keyframe_id and keyframe_id:
+                    candidate = _take_by_keyframe_id(keyframe_id)
 
                 if candidate is None and available:
                     candidate = _pop_entry(0)
@@ -4254,6 +4491,8 @@ class MarkdownEnhancer:
         """
         base_text = self._resolve_concrete_base_text(section)
         normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
+        if normalized_kt == "process":
+            base_text = self._resolve_process_base_text(section)
         image_items = self._build_concept_image_items(section)
         clip_items = self._build_concept_clip_items(section)
         has_keyframe_placeholder = bool(
@@ -4323,6 +4562,7 @@ class MarkdownEnhancer:
             image_context = "\n".join(
                 [f"- img_id={item['img_id']} | img_description={item['img_description']}" for item in image_items]
             )
+        clip_context = self._build_clip_context(base_text, clip_items)
         structured_system_prompt = (
             self._structured_system_preserve_img_prompt
             or self._structured_system_prompt
@@ -4336,6 +4576,7 @@ class MarkdownEnhancer:
             knowledge_type=normalized_kt,
             body_text=base_text,
             image_context=image_context,
+            clip_context=clip_context,
             adjacent_context=adjacent_context,
         )
 
@@ -4448,6 +4689,7 @@ class MarkdownEnhancer:
             image_context = "\n".join(
                 [f"- img_id={item['img_id']} | img_description={item['img_description']}" for item in image_items]
             )
+        clip_context = self._build_clip_context(base_text, clip_items)
 
         adjacent_parts = []
         if prev_title:
@@ -4477,6 +4719,7 @@ class MarkdownEnhancer:
             knowledge_type=normalized_kt,
             body_text=base_text,
             image_context=image_context,
+            clip_context=clip_context,
             adjacent_context=adjacent_context,
         )
 
@@ -4580,11 +4823,7 @@ class MarkdownEnhancer:
                     continue
                 embed = self._format_obsidian_embed(image_path, alias=frame_reason)
                 if embed:
-                    caption = re.sub(r"[\r\n]+", " ", frame_reason).strip()
-                    if caption:
-                        keyframe_embeds.append(f"- {caption}: {embed}")
-                    else:
-                        keyframe_embeds.append(embed)
+                    keyframe_embeds.append(embed)
                     if normalized_image_path:
                         seen_keyframe_paths.add(normalized_image_path)
 
@@ -4618,6 +4857,16 @@ class MarkdownEnhancer:
                 if normalized_clip_path:
                     seen_clip_paths.add(normalized_clip_path)
 
+            raw_main_content = step.get("main_content")
+            if raw_main_content is None:
+                raw_main_content = step.get("main_contents")
+            if isinstance(raw_main_content, list):
+                main_content = "\n".join(
+                    [str(item or "").strip() for item in raw_main_content if str(item or "").strip()]
+                ).strip()
+            else:
+                main_content = str(raw_main_content or "").strip()
+
             raw_main_operation = step.get("main_operation")
             if raw_main_operation is None:
                 raw_main_operation = step.get("main_operations")
@@ -4628,17 +4877,18 @@ class MarkdownEnhancer:
             else:
                 main_operation = str(raw_main_operation or "").strip()
 
-            if not main_operation:
-                main_operation = str(step.get("main_action") or "").strip()
+            step_body = main_content or main_operation
+            if not step_body:
+                step_body = str(step.get("main_action") or "").strip()
 
             has_keyframe_placeholder = bool(
-                re.search(r"\[\s*KEYFRAME_\d+\s*\]", main_operation, flags=re.IGNORECASE)
+                re.search(r"\[\s*KEYFRAME_\d+\s*\]", step_body, flags=re.IGNORECASE)
             )
             has_clip_placeholder = bool(
-                re.search(r"\[\s*CLIP_\d+\s*\]", main_operation, flags=re.IGNORECASE)
+                re.search(r"\[\s*CLIP_\d+\s*\]", step_body, flags=re.IGNORECASE)
             )
             rendered_operation = self._replace_tutorial_keyframe_placeholders(
-                main_operation,
+                step_body,
                 keyframe_embeds,
             )
             rendered_operation = self._replace_clip_placeholders(
@@ -5030,7 +5280,12 @@ class MarkdownEnhancer:
 
         normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
         if self._is_tutorial_process_section(section):
-            lines.extend(self._render_tutorial_steps(section))
+            tutorial_body = (section.structured_content or section.enhanced_body or "").strip()
+            if tutorial_body:
+                lines.extend(tutorial_body.split("\n"))
+                lines.append("")
+            else:
+                lines.extend(self._render_tutorial_steps(section))
             return lines
 
         body = (section.structured_content or section.enhanced_body or section.original_body or "").strip()

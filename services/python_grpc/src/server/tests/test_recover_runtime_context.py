@@ -198,7 +198,7 @@ def test_recover_runtime_context_returns_phase2b_when_asset_extract_outputs_are_
     assert response.phase2a_ready is True
     assert response.decision_reason == "asset_extract_outputs_reusable"
 
-def test_recover_runtime_context_materializes_stage1_outputs_and_download_metadata(tmp_path):
+def test_recover_runtime_context_uses_runtime_stage1_payload_without_materializing_json(tmp_path):
     task_dir = tmp_path / "task"
     video_path = task_dir / "video.mp4"
     subtitle_path = task_dir / "subtitles.txt"
@@ -272,15 +272,9 @@ def test_recover_runtime_context_materializes_stage1_outputs_and_download_metada
     assert response.source_platform == "bilibili"
     assert response.canonical_id == "BV1xx"
     assert response.content_type == "video"
-    assert Path(response.step2_json_path).exists()
-    assert Path(response.step6_json_path).exists()
-    assert Path(response.sentence_timestamps_path).exists()
-    step2_payload = json.loads(Path(response.step2_json_path).read_text(encoding="utf-8"))
-    step6_payload = json.loads(Path(response.step6_json_path).read_text(encoding="utf-8"))
-    sentence_payload = json.loads(Path(response.sentence_timestamps_path).read_text(encoding="utf-8"))
-    assert step2_payload["output"]["corrected_subtitles"][0]["subtitle_id"] == "SUB001"
-    assert step6_payload["output"]["pure_text_script"][0]["paragraph_id"] == "P001"
-    assert sentence_payload["S001"]["start_sec"] == 0.0
+    assert response.step2_json_path == ""
+    assert response.step6_json_path == ""
+    assert response.sentence_timestamps_path == ""
 
 def test_recover_runtime_context_returns_completed_when_phase2b_outputs_are_ready(tmp_path):
     task_dir = tmp_path / "task"

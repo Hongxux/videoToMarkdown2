@@ -238,6 +238,47 @@ public class DeepSeekAdvisorService {
             "若输入流A包含图片 Markdown 标记（如 ![...](...) 或 ![[...]]），必须保持其顺序和相对位置，不得改写路径。",
             "输出必须是结构化 Markdown，不输出 JSON 或代码块。"
     );
+    private static final String DEFAULT_PHASE2B_STRUCTURED_CORE_SYSTEM_PROMPT = String.join("\n",
+            "你是知识结构化工程师。",
+            "请先识别 section 边界，再为每个 section 标注 logic_tags 与 scene_tags，最后输出带层级的 Markdown 初稿。",
+            "logic_tags 允许：parallel / hierarchical / causal / progressive / contrast / conditional。",
+            "scene_tags 允许：technical / procedure / reading / narrative。",
+            "仅基于原文重构，不补充外部事实。"
+    );
+    private static final String DEFAULT_PHASE2B_STRUCTURED_CORE_USER_PROMPT = String.join("\n",
+            "## 原始文本",
+            "{body_text}",
+            "",
+            "请严格按以下格式输出：",
+            "1. 先输出 ```json 代码块，包含 sections 数组。",
+            "2. 每个 section 必须包含 id、logic_tags、scene_tags、title。",
+            "3. 再输出 `---` 分隔线。",
+            "4. 最后按 `## sN: 标题` 输出每个 section 的 Markdown 初稿。"
+    );
+    private static final String DEFAULT_PHASE2B_REFINE_SYSTEM_PROMPT = String.join("\n",
+            "你是知识结构精修师。",
+            "请根据下方 section 初稿与 skill 规则进行精修。",
+            "保持原始层级，不得捏造事实，不得输出解释。",
+            "",
+            "## 待精修的初稿片段",
+            "{section_markdown}",
+            "",
+            "## 附带的 Skill 规则",
+            "{skill_rules}",
+            "",
+            "直接输出精修后的 Markdown 正文。"
+    );
+    private static final String DEFAULT_PHASE2B_REFINE_USER_PROMPT = "请直接输出精修后的 Markdown 正文，不要重复 section 标题。";
+    private static final String DEFAULT_PHASE2B_FACTCHECK_SYSTEM_PROMPT = String.join("\n",
+            "你是知识质量审核员。",
+            "请检查 Markdown 全文中的错别字、逻辑冲突、数字错误与概念命名不一致问题。",
+            "在第一行输出 `> **核心论点**：...`。",
+            "如果没有需要修改的地方，原样输出。"
+    );
+    private static final String DEFAULT_PHASE2B_FACTCHECK_USER_PROMPT = String.join("\n",
+            "## 待检查 Markdown 全文",
+            "{markdown_text}"
+    );
 
     private static final String PHASE2B_IMAGE_MARKER_CONSTRAINTS = String.join("\n",
             "## Image Marker Hard Constraints",
@@ -321,6 +362,21 @@ public class DeepSeekAdvisorService {
 
     @Value("${deepseek.advisor.prompt.phase2b-blend-system-resource:classpath:prompts/ai-structrued/blend_system.md}")
     private Resource phase2bBlendSystemPromptResource;
+
+    @Value("${deepseek.advisor.prompt.phase2b-structured-core-system-resource:classpath:prompts/ai-structrued/structured_system_core.md}")
+    private Resource phase2bStructuredCoreSystemPromptResource;
+
+    @Value("${deepseek.advisor.prompt.phase2b-structured-core-user-resource:classpath:prompts/ai-structrued/structured_system_core_user.md}")
+    private Resource phase2bStructuredCoreUserPromptResource;
+
+    @Value("${deepseek.advisor.prompt.phase2b-refine-system-resource:classpath:prompts/ai-structrued/phase2_refine_system.md}")
+    private Resource phase2bRefineSystemPromptResource;
+
+    @Value("${deepseek.advisor.prompt.phase2b-factcheck-system-resource:classpath:prompts/ai-structrued/phase3_factcheck_system.md}")
+    private Resource phase2bFactcheckSystemPromptResource;
+
+    @Value("classpath*:prompts/ai-structrued/skills/*.md")
+    private Resource[] phase2bSkillPromptResources;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Object httpClientLock = new Object();
@@ -494,33 +550,78 @@ public class DeepSeekAdvisorService {
             Consumer<String> onDelta,
             boolean streamRequested
     ) {
-        String systemPrompt = blendMode
-                ? buildPhase2bBlendSystemPrompt()
-                : buildPhase2bStructuredSystemPrompt();
-        String userPrompt = buildPhase2bStructuredUserPrompt(safeBody);
-        LlmGatewayResult gatewayResult;
-        try {
-            gatewayResult = resolveLlmGateway().execute(
-                    new LlmPromptRequest(systemPrompt, userPrompt, 0.2, Math.max(streamRequested ? 4096 : 512, phase2bMaxTokens), false),
-                    new LlmFallbackStrategy(buildPrimaryLlmProvider(), resolvePhase2bQwenFallbackProvider()),
-                    buildPhase2bRetryPolicy(),
-                    streamRequested,
-                    onDelta
-            );
-        } catch (Exception ex) {
-            throw new IllegalStateException("Phase2b provider chain failed: " + resolveAdvisorFailureMessage(ex), ex);
-        }
-        String rawMarkdown = String.valueOf(gatewayResult.content == null ? "" : gatewayResult.content).trim();
-        String finalMarkdown = streamRequested ? rawMarkdown : normalizePhase2bListIndentation(rawMarkdown);
-        logPhase2bRawMarkdownIfEnabled(
-                (streamRequested ? "stream" : "sync") + "-" + gatewayResult.provider.resolveProviderKey(),
-                finalMarkdown
+        return executePhase2bMarkdownPrompt(
+                blendMode ? buildPhase2bBlendSystemPrompt() : buildPhase2bStructuredSystemPrompt(),
+                buildPhase2bStructuredUserPrompt(safeBody),
+                blendMode ? "phase2b.blend" : "phase2b",
+                streamRequested,
+                onDelta,
+                Math.max(streamRequested ? 4096 : 512, phase2bMaxTokens)
         );
-        return new Phase2bMarkdownResult(
-                finalMarkdown,
-                buildPhase2bSource(gatewayResult.provider.resolveProviderKey(), blendMode),
-                gatewayResult.provider.resolveProviderKey(),
-                gatewayResult.degraded
+    }
+
+    public Phase2bMarkdownResult requestPhase2bSkeletonMarkdownResult(String bodyText, boolean blendMode) {
+        String safeBody = String.valueOf(bodyText == null ? "" : bodyText).trim();
+        if (safeBody.isEmpty()) {
+            throw new IllegalArgumentException("bodyText cannot be empty");
+        }
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        return executePhase2bMarkdownPrompt(
+                buildPhase2bStructuredCoreSystemPrompt(blendMode),
+                buildPhase2bStructuredCoreUserPrompt(safeBody),
+                blendMode ? "phase2b.pipeline.phase1.blend" : "phase2b.pipeline.phase1",
+                false,
+                null,
+                Math.max(1024, phase2bMaxTokens)
+        );
+    }
+
+    public Phase2bMarkdownResult requestPhase2bRefinedSectionResult(String sectionMarkdown, List<String> skillIds) {
+        String safeSectionMarkdown = String.valueOf(sectionMarkdown == null ? "" : sectionMarkdown).trim();
+        if (safeSectionMarkdown.isEmpty()) {
+            throw new IllegalArgumentException("sectionMarkdown cannot be empty");
+        }
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        return executePhase2bMarkdownPrompt(
+                buildPhase2bRefineSystemPrompt(safeSectionMarkdown, skillIds),
+                DEFAULT_PHASE2B_REFINE_USER_PROMPT,
+                "phase2b.pipeline.phase2",
+                false,
+                null,
+                Math.max(1024, Math.min(phase2bMaxTokens, 4096))
+        );
+    }
+
+    public Phase2bMarkdownResult requestPhase2bFactCheckResult(String markdown) {
+        String safeMarkdown = String.valueOf(markdown == null ? "" : markdown).trim();
+        if (safeMarkdown.isEmpty()) {
+            throw new IllegalArgumentException("markdown cannot be empty");
+        }
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        return executePhase2bMarkdownPrompt(
+                buildPhase2bFactcheckSystemPrompt(),
+                buildPhase2bFactcheckUserPrompt(safeMarkdown),
+                "phase2b.pipeline.phase3",
+                false,
+                null,
+                Math.max(1024, phase2bMaxTokens)
+        );
+    }
+
+    public String loadSkillContent(String skillId) {
+        String normalizedSkillId = normalizePhase2bSkillId(skillId);
+        if (!StringUtils.hasText(normalizedSkillId)) {
+            return "";
+        }
+        return promptTemplateCache.computeIfAbsent(
+                "phase2b_skill_" + normalizedSkillId,
+                cacheKey -> readPromptTemplate(resolvePhase2bSkillPromptResource(normalizedSkillId), "", cacheKey)
         );
     }
 
@@ -895,7 +996,7 @@ public class DeepSeekAdvisorService {
      * 兜底修复 Phase2B 列表缩进：若模型只输出 1 空格子级缩进，统一补齐为 4 空格。
      * 仅处理代码围栏外且“看起来是列表项”的行，避免影响正文与代码块。
      */
-    private String normalizePhase2bListIndentation(String markdown) {
+    String normalizePhase2bListIndentation(String markdown) {
         String source = String.valueOf(markdown == null ? "" : markdown);
         if (!StringUtils.hasText(source)) {
             return source;
@@ -1144,6 +1245,59 @@ public class DeepSeekAdvisorService {
         ));
     }
 
+    private String buildPhase2bStructuredCoreSystemPrompt(boolean blendMode) {
+        String corePrompt = appendPhase2bImageMarkerConstraints(loadPromptTemplate(
+                "phase2b_structured_core_system",
+                phase2bStructuredCoreSystemPromptResource,
+                DEFAULT_PHASE2B_STRUCTURED_CORE_SYSTEM_PROMPT
+        ));
+        if (!blendMode) {
+            return corePrompt;
+        }
+        return buildPhase2bBlendSystemPrompt() + "\n\n---\n\n" + corePrompt;
+    }
+
+    private String buildPhase2bStructuredCoreUserPrompt(String bodyText) {
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("body_text", trimContext(bodyText));
+        return applyTemplate(
+                loadPromptTemplate(
+                        "phase2b_structured_core_user",
+                        phase2bStructuredCoreUserPromptResource,
+                        DEFAULT_PHASE2B_STRUCTURED_CORE_USER_PROMPT
+                ),
+                values
+        );
+    }
+
+    private String buildPhase2bRefineSystemPrompt(String sectionMarkdown, List<String> skillIds) {
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("section_markdown", trimContext(sectionMarkdown));
+        values.put("skill_rules", renderPhase2bSkillRules(skillIds));
+        return applyTemplate(
+                loadPromptTemplate(
+                        "phase2b_refine_system",
+                        phase2bRefineSystemPromptResource,
+                        DEFAULT_PHASE2B_REFINE_SYSTEM_PROMPT
+                ),
+                values
+        );
+    }
+
+    private String buildPhase2bFactcheckSystemPrompt() {
+        return loadPromptTemplate(
+                "phase2b_factcheck_system",
+                phase2bFactcheckSystemPromptResource,
+                DEFAULT_PHASE2B_FACTCHECK_SYSTEM_PROMPT
+        );
+    }
+
+    private String buildPhase2bFactcheckUserPrompt(String markdown) {
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("markdown_text", trimContext(markdown));
+        return applyTemplate(DEFAULT_PHASE2B_FACTCHECK_USER_PROMPT, values);
+    }
+
     private String buildPhase2bStructuredUserPrompt(String bodyText) {
         Map<String, String> values = new LinkedHashMap<>();
         values.put("body_text", trimContext(bodyText));
@@ -1166,6 +1320,93 @@ public class DeepSeekAdvisorService {
             return basePrompt;
         }
         return basePrompt + "\n\n" + PHASE2B_IMAGE_MARKER_CONSTRAINTS;
+    }
+
+    private String renderPhase2bSkillRules(List<String> skillIds) {
+        if (skillIds == null || skillIds.isEmpty()) {
+            return "（本 section 未命中额外 skill，保持忠实原意并细化结构即可）";
+        }
+        List<String> skillRules = new ArrayList<>();
+        for (String skillId : skillIds) {
+            String content = loadSkillContent(skillId);
+            if (!StringUtils.hasText(content)) {
+                continue;
+            }
+            skillRules.add(content.trim());
+        }
+        if (skillRules.isEmpty()) {
+            return "（未加载到可用 skill 规则，保持忠实原意并细化结构即可）";
+        }
+        return String.join("\n\n---\n\n", skillRules);
+    }
+
+    private Resource resolvePhase2bSkillPromptResource(String skillId) {
+        if (!StringUtils.hasText(skillId) || phase2bSkillPromptResources == null || phase2bSkillPromptResources.length == 0) {
+            return null;
+        }
+        String expectedFilename = skillId + ".md";
+        for (Resource resource : phase2bSkillPromptResources) {
+            if (resource == null) {
+                continue;
+            }
+            String filename = String.valueOf(resource.getFilename() == null ? "" : resource.getFilename()).trim();
+            if (expectedFilename.equalsIgnoreCase(filename)) {
+                return resource;
+            }
+        }
+        return null;
+    }
+
+    private String normalizePhase2bSkillId(String skillId) {
+        String normalized = String.valueOf(skillId == null ? "" : skillId).trim().toLowerCase(Locale.ROOT);
+        if (!StringUtils.hasText(normalized)) {
+            return "";
+        }
+        return normalized.replace('-', '_').replace(' ', '_');
+    }
+
+    private Phase2bMarkdownResult executePhase2bMarkdownPrompt(
+            String systemPrompt,
+            String userPrompt,
+            String sourceSuffix,
+            boolean streamRequested,
+            Consumer<String> onDelta,
+            int maxTokens
+    ) {
+        LlmGatewayResult gatewayResult;
+        try {
+            gatewayResult = resolveLlmGateway().execute(
+                    new LlmPromptRequest(
+                            String.valueOf(systemPrompt == null ? "" : systemPrompt).trim(),
+                            String.valueOf(userPrompt == null ? "" : userPrompt).trim(),
+                            0.2,
+                            Math.max(streamRequested ? 4096 : 512, maxTokens),
+                            false
+                    ),
+                    new LlmFallbackStrategy(buildPrimaryLlmProvider(), resolvePhase2bQwenFallbackProvider()),
+                    buildPhase2bRetryPolicy(),
+                    streamRequested,
+                    onDelta
+            );
+        } catch (Exception ex) {
+            throw new IllegalStateException("Phase2b provider chain failed: " + resolveAdvisorFailureMessage(ex), ex);
+        }
+        String rawMarkdown = String.valueOf(gatewayResult.content == null ? "" : gatewayResult.content).trim();
+        String finalMarkdown = streamRequested ? rawMarkdown : normalizePhase2bListIndentation(rawMarkdown);
+        String providerKey = resolveProviderKey(gatewayResult);
+        logPhase2bRawMarkdownIfEnabled(
+                (streamRequested ? "stream" : "sync") + "-" + providerKey + "-" + String.valueOf(sourceSuffix == null ? "" : sourceSuffix),
+                finalMarkdown
+        );
+        String source = StringUtils.hasText(sourceSuffix)
+                ? providerKey + "." + sourceSuffix.trim()
+                : providerKey;
+        return new Phase2bMarkdownResult(
+                finalMarkdown,
+                source,
+                providerKey,
+                gatewayResult.degraded
+        );
     }
 
     private String renderTermsBlock(List<String> terms) {

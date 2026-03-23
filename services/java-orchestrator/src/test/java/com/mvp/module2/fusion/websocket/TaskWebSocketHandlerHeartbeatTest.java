@@ -54,6 +54,35 @@ class TaskWebSocketHandlerHeartbeatTest {
     }
 
     @Test
+    void applicationPingWithExtraFieldsShouldReplyWithPong() throws Exception {
+        TaskWebSocketHandler handler = newHandler();
+        WebSocketSession session = mockSession(
+                "ws-mobile-ping",
+                "ws://localhost/ws/tasks?userId=user-mobile&streamKey=mobile-task-stream"
+        );
+
+        try {
+            handler.afterConnectionEstablished(session);
+
+            handler.handleTextMessage(session, new TextMessage("""
+                    {
+                      "lastReceivedMessageId": "evt-42",
+                      "action": "ping",
+                      "clientTime": 987654321
+                    }
+                    """));
+
+            verify(session).sendMessage(argThat(message ->
+                    message instanceof TextMessage
+                            && ((TextMessage) message).getPayload().contains("\"type\":\"pong\"")
+                            && ((TextMessage) message).getPayload().contains("\"clientTime\":987654321")
+            ));
+        } finally {
+            handler.stopHeartbeatTimer();
+        }
+    }
+
+    @Test
     void suspendedBrowserSessionShouldSkipProcessingUpdateButKeepTerminalUpdate() throws Exception {
         TaskWebSocketHandler handler = newHandler();
         WebSocketSession session = mockSession(

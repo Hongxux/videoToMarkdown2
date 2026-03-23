@@ -1203,6 +1203,59 @@ def test_runtime_recovery_sqlite_task_meta_keeps_only_scalar_recovery_fields():
     ]
 
 
+def test_runtime_recovery_store_reinitializes_missing_task_tables_for_shared_sqlite_instance():
+    output_dir = _make_repo_tmp_dir("sqlite_shared_instance_missing_tables") / "task"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    store = RuntimeRecoveryStore(output_dir=str(output_dir), task_id="task-missing-tables")
+
+    db_path = output_dir / "intermediates" / "rt" / "runtime_state.db"
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute("DROP TABLE IF EXISTS stage_snapshots")
+        connection.execute("DROP TABLE IF EXISTS scope_nodes")
+        connection.commit()
+
+    reopened_store = RuntimeRecoveryStore(output_dir=str(output_dir), task_id="task-missing-tables")
+    reopened_store.update_stage_state(
+        stage="phase2a",
+        status="RUNNING",
+        payload={"checkpoint": "phase2a_segmentation_running"},
+    )
+    scope_ref = reopened_store.build_scope_ref(
+        stage="phase2a",
+        scope_type="substage",
+        scope_id="semantic_units_build.wave_0001",
+    )
+    reopened_store.upsert_scope_node(
+        scope_ref=scope_ref,
+        stage="phase2a",
+        scope_type="substage",
+        scope_id="semantic_units_build.wave_0001",
+        status="RUNNING",
+        input_fingerprint="fp-phase2a-wave-1",
+    )
+
+    restored_scope = reopened_store.load_scope_node(scope_ref)
+
+    connection = sqlite3.connect(str(db_path))
+    try:
+        restored_tables = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table' AND name IN ('stage_snapshots', 'scope_nodes')
+                """
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+    assert restored_scope is not None
+    assert restored_scope["status"] == "RUNNING"
+    assert restored_tables == {"stage_snapshots", "scope_nodes"}
+
+
 def test_runtime_recovery_store_exposes_sqlite_batch_search_and_batch_load(monkeypatch):
     tmp_root = _make_repo_tmp_dir("sqlite_batch_search_and_load")
     db_path = tmp_root / "runtime_recovery.sqlite3"

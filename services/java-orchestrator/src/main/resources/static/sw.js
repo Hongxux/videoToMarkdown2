@@ -1,10 +1,15 @@
-// 升级缓存版本：强制淘汰旧的离线壳资源，避免继续命中历史 index.html。
-const SHELL_CACHE_NAME = 'mobile-markdown-shell-v8';
+// 升级缓存版本：播放器壳升级到本地 Plyr 资源后，需要让旧离线壳整体失效。
+const SHELL_CACHE_NAME = 'mobile-markdown-shell-v10';
 const SHELL_ASSETS = [
     '/',
     '/index.html',
     '/mobile-markdown.html',
     '/manifest.json',
+    '/lib/plyr.css',
+    '/lib/plyr.min.js',
+    '/lib/plyr.svg',
+    '/lib/plyr-blank.mp4',
+    '/lib/task-audit-ledger.js',
 ];
 
 self.addEventListener('install', (event) => {

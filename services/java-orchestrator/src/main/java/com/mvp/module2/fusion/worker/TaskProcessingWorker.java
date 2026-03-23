@@ -828,7 +828,12 @@ public class TaskProcessingWorker {
         String step2JsonPath = resumeDecision != null ? resumeDecision.findText("step2_json_path") : "";
         String step6JsonPath = resumeDecision != null ? resumeDecision.findText("step6_json_path") : "";
         String sentenceTimestampsPath = resumeDecision != null ? resumeDecision.findText("sentence_timestamps_path") : "";
-        if (!step2JsonPath.isBlank() || !step6JsonPath.isBlank() || !sentenceTimestampsPath.isBlank()) {
+        String recoveryStartStage = firstNonBlank(ioResult.recoveryStartStage, "download");
+        boolean runtimeStage1Ready = "phase2a".equalsIgnoreCase(recoveryStartStage)
+                || "asset_extract_java".equalsIgnoreCase(recoveryStartStage)
+                || "phase2b".equalsIgnoreCase(recoveryStartStage)
+                || "completed".equalsIgnoreCase(recoveryStartStage);
+        if (runtimeStage1Ready || !step2JsonPath.isBlank() || !step6JsonPath.isBlank() || !sentenceTimestampsPath.isBlank()) {
             PythonGrpcClient.Stage1Result stage1Result = new PythonGrpcClient.Stage1Result();
             stage1Result.success = true;
             stage1Result.step2JsonPath = step2JsonPath;

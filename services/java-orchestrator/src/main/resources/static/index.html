@@ -18,6 +18,8 @@
     <link rel="stylesheet" href="/css/mobile-markdown-app.css">
     <link rel="preload" as="style" href="/css/mobile-concept-cards.css">
     <link rel="stylesheet" href="/css/mobile-concept-cards.css">
+    <link rel="preload" as="style" href="/lib/plyr.css">
+    <link rel="stylesheet" href="/lib/plyr.css">
     <!-- migrated-enhanced-viewer-style -->
 <style>
         @media (min-width: 1081px) {
@@ -2534,20 +2536,170 @@
             max-height: calc(min(92vh, 980px) - 280px);
             overflow: auto;
             margin: 0;
+            padding: 2px;
+        }
+        .audit-ledger-viewer.is-empty {
             padding: 14px;
             border-radius: 14px;
             border: 1px solid rgba(15, 23, 42, 0.12);
-            background: #0f172a;
-            color: #e2e8f0;
+            background: #ffffff;
+            color: #64748b;
             font-size: 12px;
             line-height: 1.6;
             white-space: pre-wrap;
             word-break: break-word;
+        }
+        .audit-ledger-record-list {
+            display: grid;
+            gap: 12px;
+        }
+        .audit-ledger-record-empty {
+            display: grid;
+            place-items: center;
+            min-height: 220px;
+            padding: 18px;
+            border-radius: 14px;
+            border: 1px dashed rgba(148, 163, 184, 0.45);
+            background: rgba(255, 255, 255, 0.86);
+            color: #64748b;
+            font-size: 12px;
+            text-align: center;
+            line-height: 1.6;
+        }
+        .audit-ledger-record-card {
+            display: grid;
+            gap: 10px;
+            padding: 12px;
+            border-radius: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            background: #ffffff;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+        }
+        .audit-ledger-record-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .audit-ledger-record-head-main {
+            min-width: 0;
+            display: grid;
+            gap: 8px;
+        }
+        .audit-ledger-record-badge {
+            display: inline-flex;
+            align-items: center;
+            width: fit-content;
+            padding: 4px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            line-height: 1.2;
+            color: #92400e;
+            background: rgba(254, 243, 199, 0.96);
+        }
+        .audit-ledger-record-badge[data-tone="danger"] {
+            color: #991b1b;
+            background: rgba(254, 226, 226, 0.96);
+        }
+        .audit-ledger-record-badge[data-tone="warning"] {
+            color: #92400e;
+            background: rgba(254, 243, 199, 0.96);
+        }
+        .audit-ledger-record-title {
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 1.45;
+            color: #0f172a;
+            word-break: break-word;
+        }
+        .audit-ledger-record-time {
+            flex-shrink: 0;
+            font-size: 11px;
+            color: #64748b;
+            line-height: 1.4;
+            white-space: nowrap;
+        }
+        .audit-ledger-record-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .audit-ledger-record-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: rgba(241, 245, 249, 0.92);
+            color: #334155;
+            font-size: 11px;
+            line-height: 1.3;
+            max-width: 100%;
+            word-break: break-word;
+        }
+        .audit-ledger-record-action {
+            display: grid;
+            gap: 4px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(59, 130, 246, 0.16);
+            background: rgba(239, 246, 255, 0.92);
+        }
+        .audit-ledger-record-action-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: #1d4ed8;
+            line-height: 1.3;
+        }
+        .audit-ledger-record-action-text {
+            font-size: 12px;
+            color: #1e3a8a;
+            line-height: 1.6;
+            word-break: break-word;
+        }
+        .audit-ledger-record-section {
+            display: grid;
+            gap: 6px;
+        }
+        .audit-ledger-record-section-error {
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(239, 68, 68, 0.18);
+            background: rgba(254, 242, 242, 0.94);
+        }
+        .audit-ledger-record-section-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: #991b1b;
+            line-height: 1.3;
+        }
+        .audit-ledger-record-error,
+        .audit-ledger-record-json {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 12px;
+            line-height: 1.6;
             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
         }
-        .audit-ledger-viewer.is-empty {
-            background: #f8fafc;
-            color: #64748b;
+        .audit-ledger-record-error {
+            color: #7f1d1d;
+        }
+        .audit-ledger-record-disclosure {
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            background: rgba(248, 250, 252, 0.92);
+            padding: 10px 12px;
+        }
+        .audit-ledger-record-disclosure summary {
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 700;
+            color: #334155;
+            line-height: 1.4;
+        }
+        .audit-ledger-record-disclosure[open] summary {
+            margin-bottom: 8px;
         }
         .audit-ledger-foot {
             display: flex;
@@ -3237,10 +3389,10 @@
         <div class="audit-ledger-body">
             <div class="audit-ledger-meta" id="taskAuditMeta"></div>
             <div class="audit-ledger-status" id="taskAuditStatus" data-state="empty">&#x5f53;&#x524d;&#x672a;&#x52a0;&#x8f7d;&#x5ba1;&#x8ba1;&#x8d26;&#x672c;</div>
-            <pre class="audit-ledger-viewer is-empty" id="taskAuditViewer">&#x8bf7;&#x4ece;&#x4efb;&#x52a1;&#x4e0a;&#x4e0b;&#x6587;&#x83dc;&#x5355;&#x6253;&#x5f00;&#x300c;&#x5ba1;&#x6838;&#x300d;&#x3002;</pre>
+            <div class="audit-ledger-viewer is-empty" id="taskAuditViewer">&#x8bf7;&#x4ece;&#x4efb;&#x52a1;&#x4e0a;&#x4e0b;&#x6587;&#x83dc;&#x5355;&#x6253;&#x5f00;&#x300c;&#x5ba1;&#x6838;&#x300d;&#x3002;</div>
         </div>
         <div class="audit-ledger-foot">
-            <span class="audit-ledger-foot-note" id="taskAuditFootNote">&#x8d26;&#x672c;&#x91c7;&#x7528;&#x8ffd;&#x52a0;&#x5199;&#x5165;&#xff0c;&#x6700;&#x65b0;&#x8bb0;&#x5f55;&#x5728;&#x5e95;&#x90e8;&#x3002;</span>
+            <span class="audit-ledger-foot-note" id="taskAuditFootNote">&#x8bb0;&#x5f55;&#x6309;&#x6700;&#x65b0;&#x4f18;&#x5148;&#x5c55;&#x793a;&#xff1b;&#x539f;&#x59cb;&#x9519;&#x8bef;&#x4fe1;&#x606f;&#x9ed8;&#x8ba4;&#x53ef;&#x89c1;&#xff0c;&#x5806;&#x6808;&#x4e0e;&#x539f;&#x59cb; JSON &#x53ef;&#x6309;&#x9700;&#x5c55;&#x5f00;&#x3002;</span>
         </div>
     </section>
 </div>
@@ -3255,6 +3407,7 @@
 </div>
 
 <script src="/lib/mobile-submit-feedback.js"></script>
+<script src="/lib/task-audit-ledger.js"></script>
 <script>
     // 提交区文案默认值单一来源：兜底脚本与主脚本共享，避免维护时分叉。
     // 取舍：先定义默认值，再与外部注入文案合并，兼顾稳定兜底与按需覆盖。
@@ -3769,6 +3922,7 @@
 <script src="/lib/mobile-highlight-engine.js"></script>
 <script src="/lib/mobile-concept-cards.js"></script>
 <script src="/lib/mobile-editor-shortcuts.js"></script>
+<script src="/lib/plyr.min.js"></script>
 <script>
     function normalizeApiBaseUrl(rawBase) {
         const normalized = String(rawBase || '').trim().replace(/\/+$/, '');
@@ -4286,6 +4440,52 @@
     const DEFAULT_VIDEO_POSTER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="#0f172a"/><stop offset="100%" stop-color="#334155"/></linearGradient></defs><rect width="640" height="360" fill="url(#g)"/><circle cx="320" cy="180" r="48" fill="rgba(255,255,255,0.16)"/><polygon points="305,155 305,205 348,180" fill="#ffffff"/><text x="320" y="248" text-anchor="middle" fill="#cbd5e1" font-size="22" font-family="Arial, sans-serif">视频预览</text></svg>'
     )}`;
+    const PLYR_ICON_URL = '/lib/plyr.svg';
+    const PLYR_BLANK_VIDEO_URL = '/lib/plyr-blank.mp4';
+    const PLYR_VIDEO_I18N = {
+        restart: '重新播放',
+        rewind: '后退 {seektime} 秒',
+        play: '播放',
+        pause: '暂停',
+        fastForward: '前进 {seektime} 秒',
+        seek: '跳转',
+        seekLabel: '{currentTime} / {duration}',
+        played: '已播放',
+        buffered: '已缓冲',
+        currentTime: '当前时间',
+        duration: '总时长',
+        volume: '音量',
+        mute: '静音',
+        unmute: '取消静音',
+        enableCaptions: '开启字幕',
+        disableCaptions: '关闭字幕',
+        download: '下载视频',
+        enterFullscreen: '进入全屏',
+        exitFullscreen: '退出全屏',
+        frameTitle: '{title} 播放器',
+        captions: '字幕',
+        settings: '设置',
+        menuBack: '返回上一级',
+        speed: '播放速度',
+        normal: '正常',
+        quality: '清晰度',
+        loop: '循环播放',
+        start: '开始',
+        end: '结束',
+        all: '全部',
+        reset: '重置',
+        disabled: '关闭',
+        enabled: '开启',
+        advertisement: '广告',
+        qualityBadge: {
+            2160: '4K',
+            1440: '2K',
+            1080: '1080p',
+            720: '720p',
+            576: '576p',
+            480: '480p',
+        },
+    };
     const RUNTIME_LIBRARY_DEFS = [
         {
             key: 'markdownit',
@@ -6679,6 +6879,14 @@
             return false;
         }
         const previousTasks = Array.isArray(state.tasks) ? state.tasks.map((task) => ({ ...task })) : [];
+        const previousTaskById = new Map();
+        previousTasks.forEach((task) => {
+            const taskId = normalizeTaskId(task && task.taskId);
+            if (!taskId || previousTaskById.has(taskId)) {
+                return;
+            }
+            previousTaskById.set(taskId, task);
+        });
         const candidateTaskIds = collectTerminalReconcileCandidateTaskIds();
         let merged = false;
         if (candidateTaskIds.length) {
@@ -6686,6 +6894,23 @@
             const terminalTasks = payload && Array.isArray(payload.tasks) ? payload.tasks : [];
             if (terminalTasks.length) {
                 mergeTaskRecordsIntoState(terminalTasks, { replace: false });
+                for (const terminalTask of terminalTasks) {
+                    const taskId = normalizeTaskId(terminalTask && terminalTask.taskId);
+                    if (!taskId) {
+                        continue;
+                    }
+                    const previousTask = previousTaskById.get(taskId);
+                    const nextTask = findTaskById(taskId) || terminalTask;
+                    try {
+                        await maybeShowTaskTerminalNotification(
+                            nextTask,
+                            terminalTask,
+                            previousTask ? previousTask.status : ''
+                        );
+                    } catch (error) {
+                        console.warn('show reconciled terminal task notification failed', error);
+                    }
+                }
                 merged = true;
             }
         }
@@ -8011,7 +8236,7 @@
             statusText = entry.message;
             statusState = 'error';
         } else {
-            statusText = '\u8d26\u672c\u91c7\u7528 JSONL \u8ffd\u52a0\u5199\u5165\uff0c\u6700\u65b0\u8bb0\u5f55\u5728\u5e95\u90e8';
+            statusText = '\u5df2\u6309\u6700\u65b0\u4f18\u5148\u5c55\u793a\u5ba1\u8ba1\u8bb0\u5f55\uff1b\u539f\u59cb\u9519\u8bef\u4fe1\u606f\u9ed8\u8ba4\u53ef\u89c1\uff0c\u539f\u59cb JSON \u53ef\u6298\u53e0\u67e5\u770b';
             statusState = 'ready';
         }
         status.textContent = statusText;
@@ -8019,14 +8244,21 @@
 
         const fallbackText = state.taskAuditLoading
             ? '\u6b63\u5728\u52a0\u8f7d...'
-            : (entry.exists ? '\u8d26\u672c\u6682\u65e0\u8bb0\u5f55' : '\u5f53\u524d\u8d26\u672c\u5c1a\u672a\u751f\u6210');
-        viewer.textContent = entry.rawText || fallbackText;
-        viewer.classList.toggle('is-empty', !entry.rawText);
-        if (entry.rawText && !state.taskAuditLoading) {
-            viewer.scrollTop = viewer.scrollHeight;
+            : (entry.exists ? '\u5f53\u524d\u8d26\u672c\u6682\u65e0\u53ef\u5ba1\u9605\u8bb0\u5f55' : '\u5f53\u524d\u8d26\u672c\u5c1a\u672a\u751f\u6210');
+        const taskAuditRenderer = window.TaskAuditLedger && typeof window.TaskAuditLedger.renderTaskAuditLedgerCardsHtml === 'function'
+            ? window.TaskAuditLedger
+            : null;
+        if (entry.rawText && !state.taskAuditLoading && taskAuditRenderer) {
+            viewer.innerHTML = taskAuditRenderer.renderTaskAuditLedgerCardsHtml({
+                ledgerKey: activeKey,
+                rawText: entry.rawText,
+                emptyText: fallbackText,
+            });
         } else {
-            viewer.scrollTop = 0;
+            viewer.textContent = entry.rawText || fallbackText;
         }
+        viewer.classList.toggle('is-empty', !entry.rawText);
+        viewer.scrollTop = 0;
         refreshBtn.disabled = !!state.taskAuditLoading;
         copyBtn.disabled = !entry.rawText;
     }
@@ -9132,6 +9364,16 @@
                 });
             },
             onViewChange(nextView, previousView) {
+                const returningFromReading = nextView === 'tasks'
+                    && (previousView === 'content' || previousView === 'outline');
+                if (returningFromReading) {
+                    // 阅读页返回列表时主动补一次对账，避免列表停留在阅读期间的旧快照。
+                    refresh('return-from-reading', {
+                        force: true,
+                        showLoading: false,
+                    });
+                    return;
+                }
                 if (nextView !== previousView && shouldAutoRefreshTaskState(nextView)) {
                     refresh('view-enter', {
                         showLoading: false,
@@ -14479,21 +14721,147 @@
         return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
-    // 将原生 <video> 统一升级为沉浸式播放壳：默认隐藏控件，仅在触摸时浮现，减少“播放器控件感”。
-    function enhanceImmersiveVideoPlayer(video) {
-        if (!video || video.dataset.immersiveBound === '1') return;
-        video.dataset.immersiveBound = '1';
+    function buildPlyrVideoOptions() {
+        return {
+            iconUrl: PLYR_ICON_URL,
+            blankVideo: PLYR_BLANK_VIDEO_URL,
+            keyboard: {
+                focused: true,
+                global: false,
+            },
+            tooltips: {
+                controls: true,
+                seek: true,
+            },
+            settings: ['speed'],
+            speed: {
+                selected: 1,
+                options: [0.5, 0.75, 1, 1.25, 1.5, 2],
+            },
+            seekTime: 5,
+            clickToPlay: true,
+            fullscreen: {
+                enabled: true,
+                iosNative: true,
+            },
+            controls: [
+                'play-large',
+                'play',
+                'progress',
+                'current-time',
+                'mute',
+                'volume',
+                'settings',
+                'pip',
+                'fullscreen',
+            ],
+            i18n: PLYR_VIDEO_I18N,
+        };
+    }
+
+    function canUsePlyrPlayer() {
+        return typeof window.Plyr === 'function';
+    }
+
+    function ensureImmersiveVideoShell(video, extraClass = '') {
+        const shell = document.createElement('div');
+        if (!video) {
+            return null;
+        }
+        const parent = video.parentNode;
+        if (!parent) {
+            return null;
+        }
+        if (parent.classList && parent.classList.contains('immersive-video-shell')) {
+            if (extraClass) {
+                parent.classList.add(extraClass);
+            }
+            return parent;
+        }
+        shell.className = ['immersive-video-shell', extraClass].filter(Boolean).join(' ');
+        parent.insertBefore(shell, video);
+        shell.appendChild(video);
+        return shell;
+    }
+
+    function prepareImmersiveVideoNode(video) {
+        if (!video) {
+            return;
+        }
         video.classList.add('immersive-video-el');
-        video.controls = false;
-        video.removeAttribute('controls');
         video.setAttribute('playsinline', 'playsinline');
         video.setAttribute('preload', 'auto');
         if (!video.getAttribute('poster')) {
             video.setAttribute('poster', DEFAULT_VIDEO_POSTER);
         }
+    }
 
-        const shell = document.createElement('div');
-        shell.className = 'immersive-video-shell';
+    function destroyEnhancedVideos(container) {
+        if (!container) {
+            return;
+        }
+        container.querySelectorAll('video').forEach((video) => {
+            if (!video || !video.plyr || typeof video.plyr.destroy !== 'function') {
+                return;
+            }
+            try {
+                video.plyr.destroy();
+            } catch (error) {
+                console.warn('销毁 Plyr 播放器失败', error);
+            }
+            delete video.dataset.plyrBound;
+            delete video.dataset.immersiveBound;
+        });
+    }
+
+    // 在现代浏览器优先接入 Plyr，本地资源不可用时再退回原有轻量播放壳。
+    function enhanceImmersiveVideoWithPlyr(video) {
+        if (!video || video.dataset.plyrBound === '1' || !canUsePlyrPlayer()) {
+            return false;
+        }
+        const shell = ensureImmersiveVideoShell(video, 'immersive-video-shell--plyr');
+        if (!shell) {
+            return false;
+        }
+        try {
+            const player = new window.Plyr(video, buildPlyrVideoOptions());
+            video.dataset.plyrBound = '1';
+            shell.dataset.playerKind = 'plyr';
+            shell.classList.add('is-plyr-ready');
+            player.on('ready', () => {
+                shell.classList.add('is-plyr-ready');
+            });
+            player.on('error', (event) => {
+                console.warn('Plyr 播放器事件异常', event);
+            });
+            return true;
+        } catch (error) {
+            console.warn('Plyr 初始化失败，回退到内置播放壳', error);
+            if (video.plyr && typeof video.plyr.destroy === 'function') {
+                try {
+                    video.plyr.destroy();
+                } catch (destroyError) {
+                    console.warn('回退前清理异常 Plyr 实例失败', destroyError);
+                }
+            }
+            shell.classList.remove('immersive-video-shell--plyr', 'is-plyr-ready');
+            shell.removeAttribute('data-player-kind');
+            delete video.dataset.plyrBound;
+            return false;
+        }
+    }
+
+    // 本地播放器资源失效时，继续保留项目内已有的沉浸式交互，保证基本可用性。
+    function enhanceImmersiveVideoFallback(video) {
+        const shell = ensureImmersiveVideoShell(video);
+        if (!shell) {
+            return;
+        }
+        video.controls = false;
+        video.removeAttribute('controls');
+        if (shell.querySelector('.immersive-video-controls')) {
+            return;
+        }
         const controls = document.createElement('div');
         controls.className = 'immersive-video-controls';
         controls.innerHTML = `
@@ -14513,13 +14881,7 @@
         if (!toggleBtn || !seek || !time || !muteBtn || !fullscreenBtn) {
             return;
         }
-
-        const parent = video.parentNode;
-        if (!parent) return;
-        parent.insertBefore(shell, video);
-        shell.appendChild(video);
         shell.appendChild(controls);
-
         let hideTimer = 0;
         let draggingSeek = false;
         const showControls = () => {
@@ -14644,6 +15006,17 @@
         });
         updateProgress();
         showControls();
+    }
+
+    // 将原生 <video> 统一升级为可复用的播放器组件，并保持旧实现作为兜底。
+    function enhanceImmersiveVideoPlayer(video) {
+        if (!video || video.dataset.immersiveBound === '1') return;
+        video.dataset.immersiveBound = '1';
+        prepareImmersiveVideoNode(video);
+        if (enhanceImmersiveVideoWithPlyr(video)) {
+            return;
+        }
+        enhanceImmersiveVideoFallback(video);
     }
 
     function enhanceVideoLinks(container) {
@@ -15870,6 +16243,7 @@
     function renderMarkdown(markdownText, taskId) {
         const container = document.getElementById('markdownBody');
         if (!container) return;
+        destroyEnhancedVideos(container);
         container.classList.remove('edit-scroll-host');
         hideParagraphWikilinkPanel();
         hideTokenSelectionPopover(true);
@@ -19134,6 +19508,7 @@
     function renderParagraphEditor(taskId) {
         ensureParagraphEditorState();
         const container = document.getElementById('markdownBody');
+        destroyEnhancedVideos(container);
         container.classList.add('edit-scroll-host');
         if (!state.paragraphBlocks.length) {
             resetParagraphVirtualState();

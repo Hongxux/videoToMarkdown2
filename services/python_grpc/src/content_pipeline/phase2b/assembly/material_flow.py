@@ -667,6 +667,28 @@ def apply_external_materials(
     screenshot_items: List[Dict[str, Any]] = []
     sentence_timestamps = self._build_sentence_timestamps()
 
+    def _append_material_issue(
+        *,
+        issue_kind: str,
+        issue_reason: str,
+        extra_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        metadata = materials.metadata if isinstance(getattr(materials, "metadata", {}), dict) else {}
+        materials.metadata = metadata
+        issues = metadata.get("material_resolution_issues")
+        if not isinstance(issues, list):
+            issues = []
+            metadata["material_resolution_issues"] = issues
+        event_payload: Dict[str, Any] = {
+            "kind": str(issue_kind or "").strip() or "material_issue",
+            "reason": str(issue_reason or "").strip(),
+            "unit_id": str(unit.unit_id or ""),
+            "knowledge_type": str(normalized_kt or ""),
+        }
+        if isinstance(extra_context, dict):
+            event_payload["context"] = dict(extra_context)
+        issues.append(event_payload)
+
     def _normalize_knowledge_type(raw_type: str) -> str:
         lowered = (raw_type or "").strip().lower()
         if any(key in lowered for key in ["process", "??", "??", "procedural"]):
@@ -728,28 +750,6 @@ def apply_external_materials(
             seen.add(key)
             ordered.append(path_item)
         return ordered
-
-    def _append_material_issue(
-        *,
-        issue_kind: str,
-        issue_reason: str,
-        extra_context: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        metadata = materials.metadata if isinstance(getattr(materials, "metadata", {}), dict) else {}
-        materials.metadata = metadata
-        issues = metadata.get("material_resolution_issues")
-        if not isinstance(issues, list):
-            issues = []
-            metadata["material_resolution_issues"] = issues
-        event_payload: Dict[str, Any] = {
-            "kind": str(issue_kind or "").strip() or "material_issue",
-            "reason": str(issue_reason or "").strip(),
-            "unit_id": str(unit.unit_id or ""),
-            "knowledge_type": str(normalized_kt or ""),
-        }
-        if isinstance(extra_context, dict):
-            event_payload["context"] = dict(extra_context)
-        issues.append(event_payload)
 
     def _dedupe_material_candidates_by_path(candidates: List[Tuple[Any, ...]]) -> List[Tuple[Any, ...]]:
         deduped: List[Tuple[Any, ...]] = []

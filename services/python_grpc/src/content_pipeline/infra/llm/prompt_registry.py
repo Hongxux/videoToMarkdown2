@@ -47,6 +47,12 @@ class PromptKeys:
     DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG = "deepseek.markdown.structured.user.preserve_img"
     DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM = "deepseek.markdown.img_desc_augment.system"
     DEEPSEEK_MD_IMG_DESC_AUG_USER = "deepseek.markdown.img_desc_augment.user"
+    DEEPSEEK_MD_SKILL_PIPELINE_PHASE1_SYSTEM = "deepseek.markdown.skill_pipeline.phase1.system"
+    DEEPSEEK_MD_SKILL_PIPELINE_PHASE1_USER = "deepseek.markdown.skill_pipeline.phase1.user"
+    DEEPSEEK_MD_SKILL_PIPELINE_PHASE3_SYSTEM = "deepseek.markdown.skill_pipeline.phase3.system"
+    DEEPSEEK_MD_SKILL_PIPELINE_IMAGE_EMBED = "deepseek.markdown.skill_pipeline.skill.image_embed"
+    DEEPSEEK_MD_SKILL_PIPELINE_CROSS_UNIT_BRIDGE = "deepseek.markdown.skill_pipeline.skill.cross_unit_bridge"
+    DEEPSEEK_MD_SKILL_PIPELINE_PROVING_UNIT = "deepseek.markdown.skill_pipeline.skill.proving_unit"
     DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM = "deepseek.vl_arg.structured.system"
     DEEPSEEK_VL_ARG_STRUCTURED_USER = "deepseek.vl_arg.structured.user"
 
@@ -169,6 +175,36 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         key=PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_USER,
         relative_path="deepseek/markdown_enhancer/img_desc_augment_user.md",
         description="图像描述增补 User Prompt",
+    ),
+    PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PHASE1_SYSTEM: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PHASE1_SYSTEM,
+        relative_path="deepseek/markdown_enhancer/structured_system_core_py.md",
+        description="Phase2B skill pipeline phase1 system prompt",
+    ),
+    PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PHASE1_USER: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PHASE1_USER,
+        relative_path="deepseek/markdown_enhancer/structured_system_core_user_py.md",
+        description="Phase2B skill pipeline phase1 user prompt",
+    ),
+    PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PHASE3_SYSTEM: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PHASE3_SYSTEM,
+        relative_path="deepseek/markdown_enhancer/phase3_factcheck_py.md",
+        description="Phase2B skill pipeline phase3 system prompt",
+    ),
+    PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_IMAGE_EMBED: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_IMAGE_EMBED,
+        relative_path="deepseek/markdown_enhancer/skills/image_embed.md",
+        description="Phase2B skill pipeline image embed skill",
+    ),
+    PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_CROSS_UNIT_BRIDGE: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_CROSS_UNIT_BRIDGE,
+        relative_path="deepseek/markdown_enhancer/skills/cross_unit_bridge.md",
+        description="Phase2B skill pipeline cross-unit bridge skill",
+    ),
+    PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PROVING_UNIT: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_SKILL_PIPELINE_PROVING_UNIT,
+        relative_path="deepseek/markdown_enhancer/skills/proving_unit.md",
+        description="Phase2B skill pipeline proving-unit skill",
     ),
 
     # 兼容旧 key：历史命名为 user，但语义已迁移为 system。

@@ -2,6 +2,7 @@ package com.mvp.module2.fusion.service;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -178,6 +179,20 @@ class DeepSeekAdvisorServiceTest {
     }
 
     @Test
+    void shouldBuildPhase2bStructuredCoreUserPromptFromTemplate() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        setField(service, "phase2bStructuredCoreUserPromptResource", new ByteArrayResource(
+                "Core:\n{body_text}\nTail".getBytes(StandardCharsets.UTF_8)
+        ));
+        Method method = DeepSeekAdvisorService.class.getDeclaredMethod("buildPhase2bStructuredCoreUserPrompt", String.class);
+        method.setAccessible(true);
+
+        String prompt = (String) method.invoke(service, "alpha\nbeta");
+
+        assertEquals("Core:\nalpha\nbeta\nTail", prompt);
+    }
+
+    @Test
     void shouldAppendImageConstraintsToPhase2bStructuredSystemPrompt() throws Exception {
         DeepSeekAdvisorService service = new DeepSeekAdvisorService();
         setField(service, "phase2bStructuredSystemPromptResource", new ByteArrayResource(
@@ -191,6 +206,19 @@ class DeepSeekAdvisorServiceTest {
         assertEquals(true, prompt.contains("Base phase2b prompt"));
         assertEquals(true, prompt.contains("Image Marker Hard Constraints"));
         assertEquals(true, prompt.contains("![alt](url)"));
+    }
+
+    @Test
+    void shouldLoadSkillContentByMatchingFilename() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        setField(service, "phase2bSkillPromptResources", new Resource[]{
+                namedResource("logic_parallel.md", "parallel-rule"),
+                namedResource("scene_technical.md", "technical-rule")
+        });
+
+        String content = service.loadSkillContent("logic_parallel");
+
+        assertEquals("parallel-rule", content);
     }
 
     @Test
@@ -209,5 +237,14 @@ class DeepSeekAdvisorServiceTest {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);
         field.set(target, value);
+    }
+
+    private Resource namedResource(String filename, String content) {
+        return new ByteArrayResource(content.getBytes(StandardCharsets.UTF_8)) {
+            @Override
+            public String getFilename() {
+                return filename;
+            }
+        };
     }
 }
