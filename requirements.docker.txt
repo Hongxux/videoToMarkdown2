@@ -1,0 +1,4 @@
+# Docker 构建入口。
+# 这里故意不直接声明 mediapipe：镜像构建阶段需要先装其显式依赖，再以 --no-deps 安装，
+# 以规避历史上在 Linux 容器中出现的解析/初始化不稳定问题。
+-r requirements/grpc-server-base.txt

@@ -1,0 +1,599 @@
+# Module 2 Complete Configuration
+#
+# 配置文件使用说明（重要）：
+# 1) 本文件是 Module2 主配置，推荐路径：config/module2_config.yaml。
+# 2) 历史副本路径已下线并删除；修改请只改本文件。
+# 3) 与视频主配置（config/video_config.yaml）中同名配置（如 resume_control）采用“主配置优先”覆盖。
+# 4) 密钥字段建议通过环境变量覆盖，不要将真实密钥提交到仓库。
+
+# 断点重续（文件复用）配置（与 config/video_config.yaml 同构）
+resume_control:
+  enabled: true  # 建议由 config/video_config.yaml 统一控制；此处通常作为默认兜底
+  mode: "file_reuse"
+  validation: "moderate"
+  on_invalid_reuse: "recompute"
+  non_priority_retention_days: 7
+  priority_keep_only_phase2a: true
+  groups:
+    transcribe: true
+    stage1_text: true
+    stage1_semantic: true
+    stage1_visual: true
+    stage1_document: true
+    phase2a: true
+    assets: true
+    phase2b: true
+
+# 注意：以下配置块中，并非所有参数都已在当前代码路径使用。
+# 建议仅调整“已消费参数”，否则修改可能不会生效。
+
+# 模块2完整配置文件
+#
+# 包含所有可调参数,避免硬编码
+# 维护: 可以随时调整参数,无需修改代码
+
+# =============================================================================
+# 第1类断层: 抽象逻辑缺失 + 指代缺失 (从fault_detection_config.yaml继承)
+# =============================================================================
+# 见 fault_detection_config.yaml
+
+# =============================================================================
+# 语义特征提取配置
+# =============================================================================
+semantic_feature_config:
+  # Sentence-BERT模型
+  model_name: "paraphrase-multilingual-MiniLM-L12-v2"  # 模型变更会影响语义相似度行为
+  
+  # 模式检测关键词
+  pattern_detection:
+    sequence_indicators:
+      - "→"
+      - "->"
+      - "首先"
+      - "然后"
+      - "接着"
+      - "最后"
+      - "第一"
+      - "第二"
+      - "第三"
+      - "步骤1"
+      - "步骤2"
+      - "先"
+      - "后"
+      - "再"
+      - "之后"
+      - "接下来"
+    
+    hierarchy_indicators:
+      - "包含"
+      - "分为"
+      - "组成"
+      - "构成"
+      - "由...组成"
+      - "上层"
+      - "下层"
+      - "子"
+      - "父"
+      - "嵌套"
+
+# =============================================================================
+# 多模态融合决策配置
+# =============================================================================
+multimodal_fusion_config:
+  # 三层权重 (必须加起来等于1.0)
+  weights:
+    semantic: 0.4  # 语义特征权重
+    visual: 0.5    # 视觉特征权重
+    domain: 0.1    # 领域先验权重
+  
+  # 领域先验规则
+  domain_rules:
+    算法:
+      spatial: 0.2
+      process: 0.8
+    AI框架:
+      spatial: 0.7
+      process: 0.3
+    数学:
+      spatial: 0.5
+      process: 0.5
+    # 可以添加更多领域
+    深度学习:
+      spatial: 0.6
+      process: 0.4
+    数据库:
+      spatial: 0.6
+      process: 0.4
+  
+  # 决策阈值
+  decision_thresholds:
+    high_confidence: 0.7  # 高置信度阈值
+    low_confidence: 0.5   # 低置信度阈值
+
+# =============================================================================
+# 置信度计算配置
+# =============================================================================
+confidence_config:
+  # C_text权重 (内部语义置信度)
+  c_text_weight: 0.4
+  
+  # C_multi权重 (外部多模态验证置信度)
+  c_multi_weight: 0.6
+  
+  # C_text内部权重
+  c_text_components:
+    s_ctx_weight: 0.5    # 上下文相似度
+    p_norm_weight: 0.3   # 困惑度 (MVP阶段简化为固定值)
+    k_domain_weight: 0.2 # 领域一致性
+  
+  # C_multi分类别权重
+  c_multi_components:
+    # 第2类 (具象性): OCR文本 + 视觉元素
+    class2_text_weight: 0.6
+    class2_visual_weight: 0.4
+    
+    # 第3类 (过程性): 步骤匹配 + 时序匹配
+    class3_step_weight: 0.5
+    class3_sequence_weight: 0.5
+  
+  # 综合置信度等级划分阈值
+  confidence_levels:
+    high_threshold: 0.8   # >= 0.8 为高置信度
+    medium_threshold: 0.6 # >= 0.6 为中置信度
+    # < 0.6 为低置信度
+  
+  # 无多模态证据时的兜底系数
+  fallback_multiplier: 0.8  # C_multi = C_text × 0.8
+
+# =============================================================================
+# 视觉特征提取配置
+# =============================================================================
+visual_feature_config:
+  # 帧差异阈值
+  thresholds:
+    static_mse: 100       # MSE < 100 为稳定帧
+    dynamic_mse: 300      # MSE > 300 为动态帧
+    static_rate: 5.0      # 差异率 < 5% 为静态
+    dynamic_rate: 15.0    # 差异率 > 15% 为动态
+    min_stable_duration: 3.0  # 最小稳定持续时间(秒)
+  
+  # 视觉元素检测
+  element_detection:
+    min_rectangles_for_architecture: 3  # 检测到>=3个矩形认为是架构图
+    canny_low_threshold: 50
+    canny_high_threshold: 150
+  
+  # 采样参数
+  sampling:
+    default_sample_rate: 1  # 默认采样率 (每N帧取1帧)
+
+# =============================================================================
+# 文字补充生成配置
+# =============================================================================
+text_generation_config:
+  # LLM参数
+  llm:
+    model: "deepseek-chat"
+    temperature: 0.3
+    max_tokens: 500
+  
+  # 文字补充长度限制
+  length_constraints:
+    min_length: 50   # 最少字符数
+    max_length: 300  # 最多字符数
+    target_length: 150  # 目标字符数
+
+# =============================================================================
+# 截图选择配置
+# =============================================================================
+screenshot_config:
+  # 评分权重
+  scoring_weights:
+    s1_stability: 0.5    # 稳定性评分权重
+    s4_no_occlusion: 0.5 # 无遮挡评分权重
+  
+  # 稳定性评分参数
+  stability:
+    stable_frame_count: 15      # 连续15帧算稳定 (0.5秒@30fps)
+    very_stable_count: 30       # 连续30帧更稳定
+    stable_bonus: 2.0           # 稳定加分
+    very_stable_bonus: 4.0      # 非常稳定加分
+  
+  # 无遮挡评分参数
+  no_occlusion:
+    # 待实现
+
+# =============================================================================
+# 视频片段截取配置
+# =============================================================================
+video_clip_config:
+  # 动作检测阈值
+  action_detection:
+    min_mse_change: 50          # 最小MSE变化认为是动作
+    action_start_threshold: 100 # 动作开始阈值
+    action_end_threshold: 80    # 动作结束阈值
+  
+  # 区间扩展参数
+  interval_extension:
+    extend_before_sec: 2.0  # 动作前扩展时间
+    extend_after_sec: 2.0   # 动作后扩展时间
+    max_clip_duration: 30.0 # 最大片段长度(秒)，增大可保留更多上下文但成本更高
+    min_clip_duration: 3.0  # 最小片段长度(秒)，过小可能造成片段碎片化
+
+# =============================================================================
+# FFmpeg extraction timeout tuning
+# =============================================================================
+ffmpeg_extraction:
+  timeout_multiplier: 1.5  # 与媒体时长线性相关，越大越不易超时但失败反馈更慢
+  min_timeout_sec: 300     # 最小超时保护
+  max_timeout_sec: 0       # 0=不设上限
+
+# =============================================================================
+# 全局参数
+# =============================================================================
+
+# =============================================================================
+# Prompt 管理配置（Module2）
+# =============================================================================
+prompt_management:
+  # 总开关：false 时直接使用模块内置 fallback，不从文件加载
+  enabled: true
+
+  # Prompt 根目录（为空表示使用 services/python_grpc/src/content_pipeline/prompts）
+  root_dir: ""
+
+  # 按 key 覆盖单个 prompt 文件路径（支持相对/绝对路径）
+  overrides: {}
+
+  # 严格模式：true 时缺失 prompt 抛错；false 时自动回退
+  strict: false
+
+global_params:
+  # 说明：当前主链路未消费本节参数，保留仅用于兼容历史脚本。
+  # 如需启用，请先在代码中显式接线并补充测试。
+  # 日志级别
+  log_level: "INFO"
+  
+  # 并发控制
+  max_concurrent_tasks: 10
+  
+  # 缓存设置
+  enable_cache: true
+  cache_ttl_seconds: 3600
+
+# =============================================================================
+# VL 视觉语言素材生成配置 (Phase 2A-2B 替代方案)
+# =============================================================================
+vl_material_generation:
+  # 总开关: true = 使用 VL 分析, false = 使用原有 GenerateMaterialRequests 流程
+  enabled: true
+
+  # AnalyzeWithVL 路由分流配置
+  routing:
+    # 是否在路由分流前对所有 process 单元执行预处理
+    # true: 统一先做 stable 剔除 + 边界修正, 再按有效时长分流（推荐）
+    # false: 仅在预处理器自身命中条件时才执行（保留旧行为）
+    process_force_preprocess_before_routing: true
+
+    # 已废弃：不再用于 long/short process 路由分流；保留该键仅为兼容旧配置与历史缓存说明。
+    process_duration_threshold_sec: 40.0
+
+    # 路由截图流水线模式（当前统一保留 process_streaming 作为兼容默认值）
+    # 注意：process 现已统一进入 VL 主链路，短/长 process 不再在此处分流。
+    screenshot_pipeline_mode: process_streaming
+
+    # 路由截图 worker 数
+    # auto: 跟随 gRPC CV 进程池能力自动确定
+    # int:  手动指定，最终会被限制在 [1, cv_worker_count]
+    screenshot_worker_count: 4
+
+    # 路由截图生产者-消费者队列大小（背压阈值）
+    screenshot_queue_maxsize: 8
+
+    # 路由截图 coarse/fine 采样率（与旧逻辑一致，作为显式可调参数）
+    screenshot_coarse_fps: 2.0
+    screenshot_fine_fps: 10.0
+
+    # 路由截图分析分辨率上限（仅用于评分阶段，最终截图时间戳不变）
+    # 0 表示关闭缩放；推荐 640，可显著降低长窗口内存峰值
+    screenshot_analysis_max_width: 640
+
+    # 长稳定岛细采样分块秒数（先粗后细复用）
+    # 当 island 时长超过该值时，按该秒数切块执行 fine 选择，再汇总每岛最优
+    # 0 表示关闭分块
+    screenshot_long_window_fine_chunk_sec: 20.0
+
+    # 路由截图解码打开策略（在线热路径）
+    # 说明：默认禁用“同步整段转码”，避免 AV1 在热路径触发分钟级阻塞。
+    screenshot_decode_open_timeout_sec: 30.0
+    screenshot_decode_allow_inline_transcode: false
+    screenshot_decode_enable_async_transcode: true
+  
+  # 视频分析 VL API 配置（参考 Vision AI：DashScope OpenAI 兼容接口）
+  api:
+    provider: "dashscope"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "qwen-vl-max-latest"
+    # 鉴权：优先读取 api_key，其次兼容 bearer_token；两者都支持环境变量注入
+    bearer_token: ""
+    bearer_token_env: ""
+    api_key: ""
+    api_key_env: "DASHSCOPE_API_KEY"
+    # DashScope 无需 appid；该字段仅为兼容保留
+    appid: ""
+    appid_env: ""
+    max_retries: 6
+    retry_initial_backoff_sec: 2.0
+    retry_multiplier: 2.0
+    retry_max_backoff_sec: 16.0
+    max_tokens: 8192
+    temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
+    # 默认改为同步调用，避免 offline batch 的排队与轮询等待
+    offline_task_enabled: false
+    offline_poll_interval_sec: 5.0
+    offline_max_wait_sec: 86400.0  # 24h
+    # 同步链路兜底超时（仅当 offline_task_enabled=false 时生效）
+    # 同步模式不再经过 batch 排队，因此这里预留更宽的等待窗口，避免长 clip 被过早超时
+    request_timeout_sec: 300.0
+    request_timeout_ratio_by_video_duration: 1.0
+    request_timeout_min_sec: 30.0
+    # 上传前压缩（启用）
+    # 压缩策略：H.264 + CRF + 15fps + 默认保留音频 + 超过1080p才降分辨率
+    long_video_upload_compress_enabled: true
+    long_video_upload_target_height: 1080
+    long_video_upload_crf: 28
+    long_video_upload_preset: "fast"
+    long_video_upload_target_fps: 15.0
+    long_video_upload_drop_audio: false
+    long_video_upload_timeout_sec: 1800
+    # DashScope Files.upload 分片与超时策略
+    # 2MB 分片上传（SDK 透传参数）
+    upload_chunk_size_bytes: 2097152
+    # 上传超时按视频时长设置（秒）
+    upload_timeout_by_video_duration: true
+    # 超时下限，避免极短视频出现 0 秒
+    upload_timeout_min_sec: 1.0
+    # 上传失败自动重试（指数退避）
+    upload_retry_max_attempts: 5
+    upload_retry_initial_backoff_sec: 2.0
+    upload_retry_multiplier: 2.0
+    upload_retry_max_backoff_sec: 16.0
+    upload_retry_jitter_sec: 0.0
+    
+    # 视频输入策略
+    # auto: 仅在 DashScope 场景自动尝试 data-uri / upload
+    # data_uri: 强制使用 data-uri (仅适用小文件)
+    # dashscope_upload: 强制使用 DashScope File.upload
+    # keyframes: 强制使用关键帧抽取（跨平台兜底）
+    video_input_mode: "dashscope_upload"
+    
+    # 关键帧降级参数 (当视频过大无法直接传输时)
+    max_input_frames: 6  # 最多抽取6帧
+    max_image_dim: 1280  # 图片最大边长 (像素)
+  
+  # VL 结果缓存配置
+  use_cache: true   # 是否使用缓存 (跳过已分析的视频)
+  save_cache: true  # 是否保存分析结果到缓存
+  # 缓存文件: vl_analysis_cache.json (保存在视频同目录或output_dir下)
+
+  # Compatibility flag: whether to merge multiple VL clips in one semantic unit
+  # false: keep step-level clips as-is (recommended for tutorial mode)
+  # true: merge into one clip with segments (legacy behavior)
+  merge_multistep_clip_requests: false
+
+  # 语义单元预切片参数（仅供 VL 预分析使用，不影响最终 assets 回源截取）
+  semantic_split_pre_cut:
+    enabled: true
+    # true: 所有 VL 语义片段在首次从原视频裁切时就直接压缩，避免上传前二次压缩
+    apply_to_all_units: true
+    # 仅对超长片段启用降分辨率/码率；<=0 表示关闭该策略
+    large_segment_threshold_sec: 120.0
+    # 与 FFmpeg 参数 `-vf scale=-1:480` 对齐
+    downscale_height: 480
+    # 与 FFmpeg 参数 `-b:v 500k` 对齐
+    video_bitrate: "500k"
+
+
+  # VL 前静态段剔除预处理（仅 process 单元）
+  # 目的：先用 CV 识别 stable 区间，再剔除 stable 核心段，减少 VL 输入冗余与 token 成本。
+  # 机制：对 stable 区间保留两侧边缘（keep_edge_sec），仅剔除中间核心段。
+  pre_vl_static_pruning:
+    enabled: false
+    # 按知识类型开关（默认都关闭，需要时显式开启）
+    process_enabled: false
+    concrete_enabled: false
+    only_process: true
+    # 是否启用“process stable detect”多进程稳定段检测分支（默认关闭）
+    process_stable_detect_enabled: false
+    # 并行模式：
+    # - auto: 有全局 CV 进程池时走多进程；否则走 async 并发
+    # - process: 强制走多进程
+    # - async/off: 仅事件循环并发
+    parallel_mode: off
+    # 预处理并发度（VL 分析前）
+    # auto: 优先复用 gRPC CV 进程池 worker 数；否则使用 (CPU核数-1)
+    # int: 手动指定，最终会受 parallel_hard_cap 与任务数限制,经过测试得到的数据
+    parallel_workers: 6
+    # 预处理并发硬上限（仅在未复用外部 CV 池时生效）
+    parallel_hard_cap: 8
+    min_unit_duration_sec: 10.0
+    keep_edge_sec: 1.0
+    min_stable_interval_sec: 6.0
+    min_cut_span_sec: 0.8
+    min_keep_segment_sec: 0.5
+    # legacy_action 分支里，动作“动态净时长”阈值（动作总时长-内部稳定岛重叠时长）
+    # 小于该阈值的动作会被剔除，并仅保留 tail 截图作为兜底参考。
+    legacy_action_min_dynamic_sec: 0.5
+    min_removed_ratio: 0.10
+    context_text_max_chars: 800
+
+  # Stable 剔除后、合并前的片段边界纠偏
+  # 目标：避免拼接片段截断口语句，提升 VL 输入语义完整性
+  pre_vl_boundary_refine:
+    enabled: true
+    pause_threshold_sec: 0.3
+    start_buffer_sec: 0.2
+    end_buffer_sec: 0.3
+    semantic_search_window_sec: 8.0
+    mse_scan_after_end_sec: 3.0
+    mse_sample_fps: 2.0
+    mse_min_threshold: 64.0
+
+  # VL 主分析并行配置（语义单元级）
+  # 语义单元级策略：每个 unit 仅发起一次 analyze_clip（一次主 VL API 调用）
+  vl_analysis:
+    # auto: 使用保守 CPU 感知默认值，避免统一 process 主链后把 unit 数直接打满
+    # int:  手动指定并发度
+    parallel_workers: 16
+    # 并发硬上限，防止 unit 数很大时瞬时请求过载
+    parallel_hard_cap: 16
+    # 单元级流式流水线：切片->压缩上传->离线VL->结果消费，按 unit 无等待推进
+    stream_unit_pipeline_enabled: true
+    # 单元切片独立进程池并发度（建议保守；统一 process 主链后优先保证稳定性）
+    stream_split_process_workers: 2
+    # 单元切片进程池硬上限
+    stream_split_process_hard_cap: 8
+    # 切片完成后允许堆积的分析任务倍数（analysis_workers * multiplier）
+    stream_split_backpressure_multiplier: 1
+    # 仅对这些知识类型启用流式单元管线
+    stream_pipeline_knowledge_types: ["process", "concrete"]
+  
+  
+  # Tutorial mode for long, multi-step process units
+  # Goal: produce step clips + instructional keyframes for teaching and replication.
+  tutorial_mode:
+    # Enable tutorial step schema output
+    enabled: true
+
+    # Minimum duration per step (seconds); shorter steps are merged
+    min_step_duration_sec: 5.0
+
+    # Export tutorial assets to output_dir/{assets_root_dir}/{unit_id}/
+    export_assets: true
+
+    # 当命中 pre-vl 剪枝并使用 pruned clip 做分析时：
+    # true  = 导出素材时回到原始语义单元 clip（更高清），用映射后的时间戳截取
+    # false = 继续从 pruned clip 导出（避免时间映射误差，但清晰度可能下降）
+    export_from_original_clip_when_prepruned: true
+
+    # Root directory name under output_dir
+    assets_root_dir: "vl_tutorial_units"
+
+    # Save per-unit step JSON (including raw model step output)
+    save_step_json: true
+
+    # Whether to render frame_reason as a top banner on tutorial keyframes
+    top_reason_banner_enabled: true
+
+    # 教程资产导出并发度（step clip/keyframe）
+    # auto: 自动并发（默认最多 4），受 asset_export_parallel_hard_cap 限制
+    # int:  手动指定并发度
+    asset_export_parallel_workers: 2
+
+    # 教程资产导出并发硬上限，防止 ffmpeg 子进程瞬时过多
+    asset_export_parallel_hard_cap: 8
+
+    # Keyframe image extension: png / jpg / jpeg
+    keyframe_image_ext: "png"
+
+    # 关键帧 bbox 二次外扩比例（按框宽/高），用于避免裁剪过紧看不清上下文
+    keyframe_bbox_expand_ratio: 0.15
+
+    # 关键帧 bbox 每侧最小外扩（0-1000 坐标系），20=2%
+    keyframe_bbox_min_border_span_1000: 20
+
+    # 在目标时间戳前后搜索 I 帧的时间窗（秒）
+    keyframe_iframe_search_window_sec: 0.2
+    keyframe_iframe_search_before_sec: 0.0  # tutorial 关键帧找 I 帧时不再向前回溯
+    keyframe_iframe_search_after_sec: 0.2   # tutorial 关键帧找 I 帧时仅向后搜索 0.2 秒
+
+    # 是否在搜索窗内按清晰度选择最优 I 帧
+    keyframe_select_sharpest_iframe: true
+
+    # 是否对关键帧执行“半屏裁剪”（裁剪窗面积约为原图 50%，且必须包含 bbox）
+    keyframe_halfscreen_crop: true
+
+    # 裁剪后放大倍数（仅二次裁剪时设为 1.0，表示不放大）
+    keyframe_upscale_factor: 1.0
+
+    # 放大插值方式：lanczos4 / cubic / linear
+    keyframe_upscale_interpolation: "lanczos4"
+
+    # USM 锐化参数（仅二次裁剪时关闭）
+    keyframe_usm_sigma: 0.0
+    keyframe_usm_amount: 0.0
+    keyframe_usm_threshold: 0
+
+    # 是否在结果图上绘制红色 bbox 框
+    keyframe_draw_bbox_red: true
+
+    # 红框是否使用“扩展后 bbox”坐标；false=使用模型原始 bbox（推荐，更贴近操作点）
+    keyframe_draw_bbox_use_expanded: false
+
+    # true=直接在原始整帧上画红框（不裁剪、不缩放）；用于严格核对 bbox 位置
+    keyframe_draw_on_original_frame: true
+
+    # 原图画框后，按红框宽/高向外二次扩展的裁剪比例（0=不再二次扩展）
+    keyframe_original_draw_crop_expand_ratio: 0.3
+
+    # 二次裁剪每侧最小扩展（0-1000 坐标，20=2%）
+    keyframe_original_draw_crop_min_border_span_1000: 20
+
+    # 红框线宽比例（相对 min(width,height)）；恢复历史默认 1%
+    keyframe_red_box_thickness_ratio: 0.01
+
+    # true=原图画框后直接输出；false=继续执行二次裁剪链路
+    keyframe_skip_post_draw_processing: false
+
+  # Screenshot optimization settings
+  screenshot_optimization:
+    enabled: true
+    time_window_before_seconds: 1.0  # 在建议时间戳前扩展 1 秒
+    time_window_after_seconds: 2.0   # 在建议时间戳后扩展 2 秒
+    time_window_seconds: 1.0         # 兼容旧配置（仅当 before/after 未设置时生效）
+    static_island_min_ms: 100.0      # 静态岛最小时长阈值（毫秒）
+    reuse_visual_extractor: true         # 复用 VisualFeatureExtractor（按 video_path 缓存）
+
+    # concrete 保留“向后搜索 2 秒”，但使用更轻的预取 profile，降低主进程预读/缩放压力
+    concrete_forward_search_after_seconds: 2.0
+    concrete_prefetch_chunk_max_span_seconds: 3.0
+    concrete_prefetch_chunk_max_requests: 64
+    concrete_prefetch_sample_rate: 3
+    concrete_prefetch_target_height: 240
+    # true = 只做 I 帧时间戳映射，不再进入 OpenCV/SHM 截图优化链，优先规避内存峰值
+    iframe_only_mode: true
+    # streaming 若命中内存压力，也降级到 I 帧模式而不是回退到更重的 OpenCV 旧链路
+    iframe_fallback_on_memory_pressure: true
+    iframe_probe_max_concurrency: 4
+    
+    # 🚀 流式处理流水线配置 (参考 upgrade-log.md)
+    streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠
+    streaming_overlap_buffers: 1          # 主进程预取链默认单缓冲，优先稳定性
+    streaming_overlap_buffers_hard_cap: 1 # 主进程预取链硬上限，防止多 chunk 并存放大内存峰值
+    task_max_concurrency: 3               # task 粒度总闸门：最多允许 3 个任务同时进入截图优化
+    max_workers: 1                        # 当前样本压测最优: 1
+    max_inflight_multiplier: 2            # max_inflight = workers * multiplier (背压阈值)
+    max_inflight_hard_cap: 1              # 主进程向进程池投递的硬上限，避免 pending 无限堆积
+    
+    # 预读配置 (与批量模式共享)
+    prefetch_sample_rate: 2               # 采样率
+    prefetch_target_height: 360           # 目标高度
+    prefetch_max_frames_per_chunk: 32     # 单 chunk 预读帧数软上限；优先稳定 SHM 峰值
+    prefetch_union_min_requests: 20       # Union预读最小请求数
+    prefetch_union_max_span_seconds: 8.0  # Union预读最大时间跨度
+    prefetch_chunk_max_requests: 256      # 单 chunk 最大请求数(防御性上限)，主要由 max_span 控制切分
+
+    # 主进程预取链硬 governor：即使配置被调大，也会在代码层再次钳制
+    prefetch_hard_max_frames_per_chunk: 32
+    prefetch_hard_max_span_seconds: 8.0
+    prefetch_hard_max_requests_per_chunk: 256
+
+    # 主进程预取监控：用于定位 CPU / RSS 峰值与 chunk 级热点
+    prefetch_monitor_enabled: true
+    prefetch_monitor_warn_rss_mb: 2048
+    
+  # 回退行为配置
+  fallback:
+    enabled: true  # 失败时自动回退到 GenerateMaterialRequests
+    on_parse_error: true  # JSON 解析失败时回退
+    on_api_error: true  # API 调用失败时回退

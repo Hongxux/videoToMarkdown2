@@ -1,0 +1,3 @@
+# Python gRPC 服务兼容入口。
+# 保留根目录文件名，避免现有 README / 脚本 / 人工习惯失效。
+-r requirements.grpc_server.txt

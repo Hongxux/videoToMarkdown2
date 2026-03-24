@@ -1,0 +1,99 @@
+name: videotomarkdown-release
+
+x-service-defaults: &service-defaults
+  init: true
+  restart: unless-stopped
+  volumes:
+    - ./config:/app/config:ro
+    - ./var:/app/var
+
+services:
+  redis:
+    init: true
+    restart: unless-stopped
+    profiles:
+      - redis
+    image: redis:7.2-alpine
+    container_name: v2m-redis
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./var/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  python-grpc:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: deploy/docker/python-grpc.Dockerfile
+    container_name: v2m-python-grpc
+    shm_size: 1gb
+    environment:
+      PYTHONNOUSERSITE: "1"
+      PYTHONPATH: /app:/app/contracts/gen/python
+      VIDEO_CONFIG_PATH: /app/config/video_config.yaml
+      MODULE2_CONFIG_PATH: /app/config/module2_config.yaml
+      TASK_RUNTIME_REDIS_ENABLED: ${TASK_RUNTIME_REDIS_ENABLED:-0}
+      TASK_RUNTIME_REDIS_URL: ${TASK_RUNTIME_REDIS_URL:-redis://redis:6379/0}
+      TASK_RUNTIME_REDIS_PREFIX: ${TASK_RUNTIME_REDIS_PREFIX:-rt}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      MODULE2_DEEPSEEK_CONCURRENCY_INITIAL: ${MODULE2_DEEPSEEK_CONCURRENCY_INITIAL:-56}
+      MODULE2_DEEPSEEK_CONCURRENCY_MIN: ${MODULE2_DEEPSEEK_CONCURRENCY_MIN:-8}
+      MODULE2_DEEPSEEK_CONCURRENCY_MAX: ${MODULE2_DEEPSEEK_CONCURRENCY_MAX:-64}
+      MODULE2_DEEPSEEK_CONCURRENCY_INCREASE_STEP: ${MODULE2_DEEPSEEK_CONCURRENCY_INCREASE_STEP:-1}
+      MODULE2_DEEPSEEK_CONCURRENCY_WINDOW_SIZE: ${MODULE2_DEEPSEEK_CONCURRENCY_WINDOW_SIZE:-30}
+      MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY: ${MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY:-48}
+      MODULE2_MARKDOWN_SECTION_MAX_INFLIGHT: ${MODULE2_MARKDOWN_SECTION_MAX_INFLIGHT:-56}
+      MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT: ${MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT:-48}
+      MODULE2_SHARED_FRAME_REGISTRY_MAX_MB: ${MODULE2_SHARED_FRAME_REGISTRY_MAX_MB:-384}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      VISION_AI_BEARER_TOKEN: ${VISION_AI_BEARER_TOKEN:-}
+    ports:
+      - "50051:50051"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 50051)); s.close()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  java-orchestrator:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: deploy/docker/java-orchestrator.Dockerfile
+    container_name: v2m-java-orchestrator
+    depends_on:
+      python-grpc:
+        condition: service_healthy
+    environment:
+      GRPC_PYTHON_HOST: python-grpc
+      GRPC_PYTHON_PORT: 50051
+      GRPC_PYTHON_TIMEOUT_SECONDS: 300
+      MODULE2_CONFIG_PATH: /app/config/module2_config.yaml
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      VISION_AI_BEARER_TOKEN: ${VISION_AI_BEARER_TOKEN:-}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 40s

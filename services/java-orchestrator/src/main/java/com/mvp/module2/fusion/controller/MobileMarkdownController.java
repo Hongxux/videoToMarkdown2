@@ -1,0 +1,6309 @@
+package com.mvp.module2.fusion.controller;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.mvp.module2.fusion.common.TaskDisplayNameResolver;
+import com.mvp.module2.fusion.common.UserFacingErrorMapper;
+import com.mvp.module2.fusion.grpc.PythonGrpcClient;
+import com.mvp.module2.fusion.queue.TaskQueueManager;
+import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
+import com.mvp.module2.fusion.queue.TaskQueueManager.TaskStatus;
+import com.mvp.module2.fusion.service.CategoryClassificationResultsRepository;
+import com.mvp.module2.fusion.service.CollectionRepository;
+import com.mvp.module2.fusion.service.FileTransferService;
+import com.mvp.module2.fusion.service.FileReuseService;
+import com.mvp.module2.fusion.service.TaskRuntimeRecoveryService;
+import com.mvp.module2.fusion.service.TaskStateRepository;
+import com.mvp.module2.fusion.service.TaskStatusPresentationService;
+import com.mvp.module2.fusion.service.TaskManualCollectionRepository;
+import com.mvp.module2.fusion.service.TaskBundleExportService;
+import com.mvp.module2.fusion.service.TaskCostSummaryService;
+import com.mvp.module2.fusion.service.VideoMetaService;
+import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpRange;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.io.BufferedReader;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URI;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.stream.Stream;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+/**
+ * Mobile Markdown API.
+ * Design goal: reuse TaskQueueManager, aggregate runtime/storage task views, and enforce strict path normalization and boundary checks. */
+@RestController
+@RequestMapping("/api/mobile")
+public class MobileMarkdownController {
+
+    private static final Logger logger = LoggerFactory.getLogger(MobileMarkdownController.class);
+    private static final String STORAGE_TASK_PREFIX = "storage:";
+    private static final String DEFAULT_MARKDOWN_NAME = "enhanced_output.md";
+    private static final int MARKDOWN_SCAN_DEPTH = 4;
+    private static final String META_FILE_NAME = "mobile_task_meta.json";
+    private static final String TELEMETRY_FILE_NAME = "mobile_task_telemetry.ndjson";
+    private static final String TASK_RUNTIME_AUDIT_DIR = "intermediates/rt";
+    private static final String FALLBACK_RECORDS_FILE_NAME = "fallback_records.jsonl";
+    private static final String ERROR_RECORDS_FILE_NAME = "error_records.jsonl";
+    private static final String MANUAL_RETRY_REQUIRED_RECORDS_FILE_NAME = "manual_retry_required_records.jsonl";
+    private static final String META_DEFAULT_NOTE_KEY = "__default__";
+    private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[^A-Za-z0-9._-]");
+    private static final Pattern MARKDOWN_LINK_PATTERN = Pattern.compile("(!?\\[[^\\]]*])\\(([^)\\s]+)([^)]*)\\)");
+    private static final Pattern BOOK_SELECTOR_PATTERN = Pattern.compile("c(\\d+)s(\\d+)(?:t(\\d+))?", Pattern.CASE_INSENSITIVE);
+    private static final Pattern STORAGE_ID_BV_PATTERN = Pattern.compile("BV[0-9A-Za-z]{10}", Pattern.CASE_INSENSITIVE);
+    private static final Set<String> ALLOWED_UPLOAD_EXTENSIONS = Set.of(
+            ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
+            ".txt", ".md", ".pdf", ".epub"
+    );
+    private static final long MAX_UPLOAD_FILE_BYTES = 2L * 1024L * 1024L * 1024L;
+    private static final Pattern SAFE_UPLOAD_ID_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{8,96}$");
+
+    @Autowired
+    private TaskQueueManager taskQueueManager;
+
+    @Autowired(required = false)
+    private PythonGrpcClient pythonGrpcClient;
+
+    @Autowired
+    private com.mvp.module2.fusion.service.StorageTaskCacheService storageTaskCacheService;
+
+    @Autowired(required = false)
+    private com.mvp.module2.fusion.service.PersonaAwareReadingService personaAwareReadingService;
+
+    @Autowired(required = false)
+    private com.mvp.module2.fusion.service.PersonaInsightCardService personaInsightCardService;
+
+    @Autowired(required = false)
+    private CollectionRepository collectionRepository;
+
+    @Autowired(required = false)
+    private TaskWebSocketHandler taskWebSocketHandler;
+
+    @Autowired(required = false)
+    private CategoryClassificationResultsRepository categoryClassificationResultsRepository;
+
+    @Autowired(required = false)
+    private com.mvp.module2.fusion.service.StorageTaskCategoryService storageTaskCategoryService;
+
+    @Autowired(required = false)
+    private FileReuseService fileReuseService;
+
+    @Autowired(required = false)
+    private TaskStatusPresentationService taskStatusPresentationService = new TaskStatusPresentationService();
+
+    @Autowired(required = false)
+    private TaskRuntimeRecoveryService taskRuntimeRecoveryService;
+
+    @Autowired(required = false)
+    private TaskCostSummaryService taskCostSummaryService = new TaskCostSummaryService();
+
+    @Autowired(required = false)
+    private com.mvp.module2.fusion.service.TaskCleanupIndexService taskCleanupIndexService;
+
+    @Autowired(required = false)
+    private TaskStateRepository taskStateRepository;
+
+    @Autowired
+    private FileTransferService fileTransferService;
+
+    @Autowired
+    private TaskBundleExportService taskBundleExportService;
+
+    private VideoMetaService videoMetaService = new VideoMetaService();
+
+    @Value("${task.upload.dir:var/uploads}")
+    private String uploadDir;
+
+    @Value("${task.storage.root:}")
+    private String configuredStorageRoot;
+
+    @Value("${mobile.video-info.timeout-seconds:30}")
+    private int mobileVideoInfoTimeoutSeconds;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Autowired(required = false)
+    public void setVideoMetaService(VideoMetaService videoMetaService) {
+        if (videoMetaService != null) {
+            this.videoMetaService = videoMetaService;
+        }
+    }
+
+    @GetMapping("/tasks")
+    public ResponseEntity<Map<String, Object>> listTasks(
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "pageSize", defaultValue = "0") int pageSize,
+            @RequestParam(value = "onlyMultiSegment", defaultValue = "true") boolean onlyMultiSegment,
+            @RequestParam(value = "view", defaultValue = "full") String rawView,
+            @RequestParam(value = "statuses", required = false) String rawStatuses
+    ) {
+        int normalizedPage = Math.max(0, page);
+        boolean compactView = isCompactTaskListView(rawView);
+        Set<String> statusFilter = parseTaskStatusFilter(rawStatuses);
+        TaskViewCollectionSnapshot snapshot = collectTaskViews(normalizedPage, pageSize);
+        List<TaskView> finalViewList = snapshot.tasks();
+        List<TaskView> filteredTasks = filterTaskViews(finalViewList, onlyMultiSegment, statusFilter);
+        List<Map<String, Object>> taskList = new ArrayList<>(filteredTasks.size());
+        for (TaskView task : filteredTasks) {
+            taskList.add(toListItem(task, compactView));
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("tasks", taskList);
+        response.put("totalCount", filteredTasks.size());
+        response.put("page", normalizedPage);
+        response.put("pageSize", pageSize);
+        response.put("hasMore", false);
+        response.put("view", compactView ? "compact" : "full");
+        long collectionBindingsUpdatedAt = categoryClassificationResultsRepository != null
+                ? categoryClassificationResultsRepository.getLastUpdatedEpochMillis()
+                : 0L;
+        response.put("snapshotVersion", Math.max(calculateTaskListSyncVersion(filteredTasks), collectionBindingsUpdatedAt));
+
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/tasks/changes")
+    public ResponseEntity<Map<String, Object>> listTaskChanges(
+            @RequestParam(value = "since", defaultValue = "0") long since,
+            @RequestParam(value = "onlyMultiSegment", defaultValue = "true") boolean onlyMultiSegment,
+            @RequestParam(value = "view", defaultValue = "compact") String rawView,
+            @RequestParam(value = "statuses", required = false) String rawStatuses,
+            @RequestParam(value = "limit", defaultValue = "200") int limit
+    ) {
+        long normalizedSince = Math.max(0L, since);
+        int normalizedLimit = Math.max(1, Math.min(1000, limit));
+        boolean compactView = isCompactTaskListView(rawView);
+        Set<String> statusFilter = parseTaskStatusFilter(rawStatuses);
+
+        TaskViewCollectionSnapshot snapshot = collectTaskViews(0, 0);
+        List<TaskView> filteredTasks = filterTaskViews(snapshot.tasks(), onlyMultiSegment, statusFilter);
+        long collectionBindingsUpdatedAt = categoryClassificationResultsRepository != null
+                ? categoryClassificationResultsRepository.getLastUpdatedEpochMillis()
+                : 0L;
+        long nextSince = Math.max(calculateTaskListSyncVersion(filteredTasks), collectionBindingsUpdatedAt);
+        boolean resyncRequired = (normalizedSince > 0L && collectionBindingsUpdatedAt > normalizedSince)
+                || snapshot.resyncRequired();
+
+        List<TaskView> changedTasks = filteredTasks.stream()
+                .filter(task -> computeTaskSyncVersion(task) > normalizedSince)
+                .sorted(Comparator.comparingLong(this::computeTaskSyncVersion).reversed())
+                .toList();
+
+        boolean hasMoreChanges = changedTasks.size() > normalizedLimit;
+        List<Map<String, Object>> upserts = new ArrayList<>(Math.min(normalizedLimit, changedTasks.size()));
+        changedTasks.stream()
+                .limit(normalizedLimit)
+                .forEach(task -> upserts.add(toListItem(task, compactView)));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("upserts", upserts);
+        response.put("nextSince", nextSince);
+        response.put("resyncRequired", resyncRequired);
+        response.put("hasMoreChanges", hasMoreChanges);
+        response.put("view", compactView ? "compact" : "full");
+        response.put("deletes", List.of());
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping(value = "/tasks/reconcile-terminal", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> reconcileTerminalTasks(
+            @RequestBody(required = false) TaskTerminalReconcileRequest request
+    ) {
+        List<String> taskIds = normalizeRequestedTaskIds(request != null ? request.taskIds : null, 200);
+        List<Map<String, Object>> tasks = new ArrayList<>();
+        for (String taskId : taskIds) {
+            TaskView task = resolveTaskView(taskId);
+            if (task == null || !isTerminalReconcileStatus(task.status)) {
+                continue;
+            }
+            tasks.add(toListItem(task, true));
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("tasks", tasks);
+        response.put("requestedCount", taskIds.size());
+        response.put("reconciledCount", tasks.size());
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/manual-task-collections")
+    public ResponseEntity<Map<String, Object>> getManualTaskCollections() {
+        if (categoryClassificationResultsRepository == null) {
+            return ResponseEntity.ok(Map.of("bindings", List.of()));
+        }
+        Map<String, String> allBindings = categoryClassificationResultsRepository.listAllBindings();
+        Map<String, String> archivedTaskPaths = categoryClassificationResultsRepository.listArchivedTaskPaths();
+        List<Map<String, Object>> items = new ArrayList<>(allBindings.size());
+        allBindings.forEach((taskPath, collectionPath) -> {
+            if (taskPath == null || taskPath.isBlank() || collectionPath == null || collectionPath.isBlank()) {
+                return;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("taskPath", taskPath);
+            item.put("collectionPath", collectionPath);
+            item.put("archived", true);
+            item.put("archivedAt", archivedTaskPaths.getOrDefault(taskPath, ""));
+            items.add(item);
+        });
+        return ResponseEntity.ok(Map.of("bindings", items));
+    }
+
+    @PutMapping("/manual-task-collections")
+    public ResponseEntity<Map<String, Object>> replaceManualTaskCollections(
+            @RequestBody(required = false) ManualTaskCollectionsUpsertRequest request
+    ) {
+        if (categoryClassificationResultsRepository == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", "category classification repository is not available"
+            ));
+        }
+        Map<String, String> normalized = new LinkedHashMap<>();
+        List<ManualTaskCollectionBindingItem> items = request != null ? request.bindings : null;
+        if (items != null) {
+            for (ManualTaskCollectionBindingItem item : items) {
+                if (item == null) {
+                    continue;
+                }
+                String taskPath = TaskManualCollectionRepository.normalizeTaskPath(item.taskPath);
+                String collectionPath = TaskManualCollectionRepository.normalizeCollectionPath(item.collectionPath);
+                if (taskPath.isEmpty() || collectionPath.isEmpty()) {
+                    continue;
+                }
+                normalized.put(taskPath, collectionPath);
+            }
+        }
+        int updatedCount = categoryClassificationResultsRepository.replaceAllBindings(normalized);
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "updatedCount", updatedCount
+        ));
+    }
+
+    @PostMapping("/tasks/submit")
+    public ResponseEntity<Map<String, Object>> submitTaskFromMobile(@RequestBody TaskSubmitRequest request) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "request body cannot be empty"
+            ));
+        }
+
+        String rawVideoInput = request.videoUrl != null ? request.videoUrl.trim() : "";
+        if (rawVideoInput.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "videoUrl cannot be empty"
+            ));
+        }
+        if (!isCollectionInputValid(request.collectionId, request.episodeNo)) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "collectionId and episodeNo must be provided together, and episodeNo must be positive"
+            ));
+        }
+
+        String normalizedUserId = normalizeUserId(request.userId);
+        TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request.priority);
+        TaskQueueManager.BookProcessingOptions bookOptions = buildBookProcessingOptions(
+                request.chapterSelector,
+                request.sectionSelector,
+                request.splitByChapter,
+                request.splitBySection,
+                request.pageOffset,
+                request.bookTitle,
+                request.leafTitle,
+                request.leafOutlineIndex
+        );
+        String lockedTitle = resolveSubmissionTaskTitle(request.videoUrl, rawVideoInput, request.leafTitle);
+        String resolvedOutputDir = resolveSubmissionOutputDir(request.outputDir, bookOptions);
+        logger.info("Mobile task submission accepted: raw={} user={}", request.videoUrl, normalizedUserId);
+        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+                normalizedUserId,
+                rawVideoInput,
+                resolvedOutputDir,
+                priority,
+                lockedTitle,
+                bookOptions
+        );
+        linkCollectionEpisodeIfNecessary(request.collectionId, request.episodeNo, task.taskId);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("title", task.title != null ? task.title : "");
+        payload.put("status", task.status.name());
+        payload.put("normalizedVideoUrl", rawVideoInput);
+        payload.put("storageKey", bookOptions != null && bookOptions.storageKey != null ? bookOptions.storageKey : "");
+        payload.put("collectionId", request.collectionId != null ? request.collectionId.trim() : "");
+        payload.put("episodeNo", request.episodeNo);
+        payload.put("deduped", false);
+        payload.put("message", "task accepted");
+        return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping("/collections")
+    public ResponseEntity<Map<String, Object>> listCollections() {
+        if (collectionRepository == null) {
+            return ResponseEntity.ok(Map.of("collections", List.of()));
+        }
+        List<CollectionRepository.CollectionView> collections = collectionRepository.listCollections();
+        Map<String, TaskEntry> runtimeTaskById = new LinkedHashMap<>();
+        for (TaskEntry runtimeTask : taskQueueManager.getAllTasks()) {
+            if (runtimeTask == null || runtimeTask.taskId == null || runtimeTask.taskId.isBlank()) {
+                continue;
+            }
+            runtimeTaskById.put(runtimeTask.taskId, runtimeTask);
+        }
+
+        List<Map<String, Object>> collectionItems = new ArrayList<>(collections.size());
+        for (CollectionRepository.CollectionView collection : collections) {
+            List<CollectionRepository.EpisodeView> episodes = collectionRepository.listEpisodes(collection.collectionId);
+            List<Map<String, Object>> episodeItems = new ArrayList<>(episodes.size());
+            int completedCount = 0;
+            for (CollectionRepository.EpisodeView episode : episodes) {
+                String taskId = episode.taskId != null ? episode.taskId.trim() : "";
+                String status = null;
+                if (!taskId.isEmpty()) {
+                    TaskEntry runtimeTask = runtimeTaskById.get(taskId);
+                    if (runtimeTask != null && runtimeTask.status != null) {
+                        status = runtimeTask.status.name();
+                        if (runtimeTask.status == TaskStatus.COMPLETED) {
+                            completedCount += 1;
+                        }
+                    }
+                }
+                Map<String, Object> episodeItem = new LinkedHashMap<>();
+                episodeItem.put("episodeNo", episode.episodeNo);
+                episodeItem.put("title", episode.episodeTitle != null ? episode.episodeTitle : "");
+                episodeItem.put("episodeUrl", episode.episodeUrl != null ? episode.episodeUrl : "");
+                episodeItem.put("durationSec", episode.durationSec);
+                episodeItem.put("taskId", taskId.isEmpty() ? null : taskId);
+                episodeItem.put("status", status);
+                episodeItems.add(episodeItem);
+            }
+
+            Map<String, Object> collectionItem = new LinkedHashMap<>();
+            collectionItem.put("collectionId", collection.collectionId);
+            collectionItem.put("platform", collection.platform != null ? collection.platform : "");
+            collectionItem.put("canonicalId", collection.canonicalId != null ? collection.canonicalId : "");
+            collectionItem.put("title", collection.title != null ? collection.title : "");
+            collectionItem.put("totalEpisodes", collection.totalEpisodes);
+            collectionItem.put("completedCount", completedCount);
+            collectionItem.put("episodes", episodeItems);
+            collectionItems.add(collectionItem);
+        }
+
+        return ResponseEntity.ok(Map.of("collections", collectionItems));
+    }
+
+    @PostMapping("/collections/{collectionId}/submit-batch")
+    public ResponseEntity<Map<String, Object>> submitCollectionBatch(
+            @PathVariable("collectionId") String collectionId,
+            @RequestBody(required = false) CollectionBatchSubmitRequest request
+    ) {
+        if (collectionRepository == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", "collection repository is not available"
+            ));
+        }
+        String normalizedCollectionId = collectionId != null ? collectionId.trim() : "";
+        if (normalizedCollectionId.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "collectionId cannot be empty"
+            ));
+        }
+        Optional<CollectionRepository.CollectionView> collectionOpt = collectionRepository.findCollection(normalizedCollectionId);
+        if (collectionOpt.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "success", false,
+                    "message", "collection not found"
+            ));
+        }
+
+        List<CollectionRepository.EpisodeView> allEpisodes = collectionRepository.listEpisodes(normalizedCollectionId);
+        if (allEpisodes.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "collection episodes are empty"
+            ));
+        }
+
+        List<Integer> requestedEpisodeNos = request != null ? request.episodeNos : null;
+        Set<Integer> selectedNos = new LinkedHashSet<>();
+        if (requestedEpisodeNos != null) {
+            for (Integer episodeNo : requestedEpisodeNos) {
+                if (episodeNo == null || episodeNo <= 0) {
+                    continue;
+                }
+                selectedNos.add(episodeNo);
+            }
+        }
+        boolean submitAllUnlinked = selectedNos.isEmpty();
+        String normalizedUserId = normalizeUserId(request != null ? request.userId : null);
+        TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request != null ? request.priority : null);
+        String normalizedOutputDir = normalizeOutputDir(request != null ? request.outputDir : null);
+
+        List<Map<String, Object>> submitted = new ArrayList<>();
+        List<Map<String, Object>> skipped = new ArrayList<>();
+        for (CollectionRepository.EpisodeView episode : allEpisodes) {
+            if (!submitAllUnlinked && !selectedNos.contains(episode.episodeNo)) {
+                continue;
+            }
+            String existingTaskId = episode.taskId != null ? episode.taskId.trim() : "";
+            if (!existingTaskId.isEmpty()) {
+                skipped.add(Map.of(
+                        "episodeNo", episode.episodeNo,
+                        "title", episode.episodeTitle != null ? episode.episodeTitle : "",
+                        "reason", "already linked",
+                        "taskId", existingTaskId
+                ));
+                continue;
+            }
+            String normalizedVideoInput = normalizeVideoInput(episode.episodeUrl);
+            if (normalizedVideoInput.isBlank()) {
+                skipped.add(Map.of(
+                        "episodeNo", episode.episodeNo,
+                        "title", episode.episodeTitle != null ? episode.episodeTitle : "",
+                        "reason", "episodeUrl is empty or invalid"
+                ));
+                continue;
+            }
+
+            TaskEntry task = taskQueueManager.submitTask(
+                    normalizedUserId,
+                    normalizedVideoInput,
+                    normalizedOutputDir,
+                    priority
+            );
+            linkCollectionEpisodeIfNecessary(normalizedCollectionId, episode.episodeNo, task.taskId);
+            submitted.add(Map.of(
+                    "episodeNo", episode.episodeNo,
+                    "title", episode.episodeTitle != null ? episode.episodeTitle : "",
+                    "taskId", task.taskId,
+                    "status", task.status != null ? task.status.name() : "",
+                    "normalizedVideoUrl", normalizedVideoInput
+            ));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("collectionId", normalizedCollectionId);
+        payload.put("submittedCount", submitted.size());
+        payload.put("skippedCount", skipped.size());
+        payload.put("submitted", submitted);
+        payload.put("skipped", skipped);
+        payload.put("message", "batch submission finished");
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public CompletableFuture<ResponseEntity<Map<String, Object>>> submitUploadTaskFromMobile(
+            @RequestParam("videoFile") MultipartFile videoFile,
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "outputDir", required = false) String outputDir,
+            @RequestParam(value = "priority", required = false) String priority,
+            @RequestParam(value = "chapterSelector", required = false) String chapterSelector,
+            @RequestParam(value = "sectionSelector", required = false) String sectionSelector,
+            @RequestParam(value = "splitByChapter", required = false) Boolean splitByChapter,
+            @RequestParam(value = "splitBySection", required = false) Boolean splitBySection,
+            @RequestParam(value = "pageOffset", required = false) Integer pageOffset,
+            @RequestParam(value = "probeOnly", required = false) Boolean probeOnly,
+            @RequestParam(value = "fileMd5", required = false) String fileMd5,
+            @RequestParam(value = "fileExt", required = false) String fileExt
+    ) {
+        if (videoFile == null || videoFile.isEmpty()) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "videoFile cannot be empty"
+            )));
+        }
+        if (videoFile.getSize() > MAX_UPLOAD_FILE_BYTES) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "uploaded file is too large; current limit is 2048MB"
+            )));
+        }
+
+        String safeFileName = sanitizeUploadFileName(videoFile.getOriginalFilename());
+        if (!hasSupportedUploadExtension(safeFileName)) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "supported formats: mp4/mov/mkv/avi/webm/m4v/txt/md/pdf/epub"
+            )));
+        }
+
+        String normalizedUserId = normalizeUserId(userId);
+        TaskQueueManager.Priority taskPriority = resolvePriority(normalizedUserId, priority);
+        Optional<FileReuseService.FileFingerprint> fingerprintOpt =
+                resolveFileFingerprint(fileMd5, fileExt, safeFileName);
+        Optional<Path> reusedPathOpt = findReusableUploadPath(fingerprintOpt);
+        if (reusedPathOpt.isPresent()) {
+            return CompletableFuture.completedFuture(buildUploadSubmissionResponse(
+                    reusedPathOpt.get(),
+                    safeFileName,
+                    normalizedUserId,
+                    outputDir,
+                    taskPriority,
+                    chapterSelector,
+                    sectionSelector,
+                    splitByChapter,
+                    splitBySection,
+                    pageOffset,
+                    probeOnly,
+                    fingerprintOpt,
+                    true
+            ));
+        }
+
+        return fileTransferService
+                .persistMultipartWithUniqueNameAsync(uploadDir, safeFileName, videoFile)
+                .thenApply(savedVideoPath -> {
+                    recordUploadedFileMetadata(savedVideoPath, safeFileName, videoFile.getSize(), fingerprintOpt);
+                    return buildUploadSubmissionResponse(
+                            savedVideoPath,
+                            safeFileName,
+                            normalizedUserId,
+                            outputDir,
+                            taskPriority,
+                            chapterSelector,
+                            sectionSelector,
+                            splitByChapter,
+                            splitBySection,
+                            pageOffset,
+                            probeOnly,
+                            fingerprintOpt,
+                            false
+                    );
+                })
+                .exceptionally(error -> {
+                    Throwable root = unwrapCompletionError(error);
+                    logger.error("mobile upload video persistence failed", root);
+                    return ResponseEntity.status(503).body(Map.of(
+                            "success", false,
+                            "message", UserFacingErrorMapper.busyMessage()
+                    ));
+                });
+    }
+
+    @PostMapping(value = "/tasks/upload/reuse-check", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> checkUploadFileReuse(
+            @RequestBody(required = false) UploadReuseCheckRequest request
+    ) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "request body cannot be empty"
+            ));
+        }
+        String safeFileName = sanitizeUploadFileName(request.fileName);
+        Optional<FileReuseService.FileFingerprint> fingerprintOpt =
+                resolveFileFingerprint(request.fileMd5, request.fileExt, safeFileName);
+        if (fingerprintOpt.isEmpty()) {
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "reused", false,
+                    "message", "fingerprint missing or invalid"
+            ));
+        }
+        Optional<Path> reusedPathOpt = findReusableUploadPath(fingerprintOpt);
+        if (reusedPathOpt.isEmpty()) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("reused", false);
+            payload.put("fileMd5", fingerprintOpt.get().md5());
+            payload.put("fileExt", fingerprintOpt.get().fileExt());
+            payload.put("message", "reuse candidate not found");
+            return ResponseEntity.ok(payload);
+        }
+
+        boolean autoSubmit = !Boolean.FALSE.equals(request.autoSubmit);
+        if (!autoSubmit) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("reused", true);
+            payload.put("normalizedVideoUrl", reusedPathOpt.get().toString());
+            payload.put("uploadedFileName", safeFileName);
+            payload.put("fileMd5", fingerprintOpt.get().md5());
+            payload.put("fileExt", fingerprintOpt.get().fileExt());
+            payload.put("message", "reusable file located");
+            return ResponseEntity.ok(payload);
+        }
+
+        String normalizedUserId = normalizeUserId(request.userId);
+        TaskQueueManager.Priority taskPriority = resolvePriority(normalizedUserId, request.priority);
+        return buildUploadSubmissionResponse(
+                reusedPathOpt.get(),
+                safeFileName,
+                normalizedUserId,
+                request.outputDir,
+                taskPriority,
+                request.chapterSelector,
+                request.sectionSelector,
+                request.splitByChapter,
+                request.splitBySection,
+                request.pageOffset,
+                request.probeOnly,
+                fingerprintOpt,
+                true
+        );
+    }
+
+    @PostMapping(value = "/tasks/upload/chunk", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public CompletableFuture<ResponseEntity<Map<String, Object>>> uploadTaskFileChunk(
+            @RequestParam("uploadId") String uploadId,
+            @RequestParam("chunkIndex") Integer chunkIndex,
+            @RequestParam("totalChunks") Integer totalChunks,
+            @RequestParam(value = "totalFileSize", required = false) Long totalFileSize,
+            @RequestParam("fileName") String fileName,
+            @RequestParam(value = "chunkSha256", required = false) String chunkSha256,
+            @RequestParam("chunkFile") MultipartFile chunkFile
+    ) {
+        if (chunkFile == null || chunkFile.isEmpty()) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "chunkFile cannot be empty"
+            )));
+        }
+        int normalizedChunkIndex = chunkIndex == null ? -1 : chunkIndex;
+        int normalizedTotalChunks = totalChunks == null ? -1 : totalChunks;
+        if (normalizedChunkIndex < 0 || normalizedTotalChunks <= 0 || normalizedChunkIndex >= normalizedTotalChunks) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "invalid chunk index or totalChunks"
+            )));
+        }
+        String normalizedUploadId = normalizeUploadId(uploadId);
+        String safeFileName = sanitizeUploadFileName(fileName);
+        if (!hasSupportedUploadExtension(safeFileName)) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "supported formats: mp4/mov/mkv/avi/webm/m4v/txt/md/pdf/epub"
+            )));
+        }
+        long normalizedTotalFileSize = totalFileSize == null ? -1L : totalFileSize;
+        if (normalizedTotalFileSize > MAX_UPLOAD_FILE_BYTES) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "uploaded file is too large; current limit is 2048MB"
+            )));
+        }
+
+        try {
+            Path uploadRootPath = resolveUploadRoot();
+            return fileTransferService
+                    .writeChunkAsync(
+                            uploadRootPath,
+                            normalizedUploadId,
+                            safeFileName,
+                            normalizedTotalChunks,
+                            normalizedTotalFileSize,
+                            normalizedChunkIndex,
+                            chunkFile,
+                            chunkSha256
+                    )
+                    .thenApply(result -> {
+                        Map<String, Object> payload = new LinkedHashMap<>();
+                        payload.put("success", true);
+                        payload.put("uploadId", normalizedUploadId);
+                        payload.put("chunkIndex", normalizedChunkIndex);
+                        payload.put("uploadedChunks", result.uploadedChunks.size());
+                        payload.put("totalChunks", normalizedTotalChunks);
+                        payload.put("chunkSha256", result.chunkSha256);
+                        payload.put("chunkSizeBytes", result.chunkSizeBytes);
+                        payload.put("message", "chunk uploaded");
+                        return ResponseEntity.ok(payload);
+                    })
+                    .exceptionally(error -> mapChunkTransferError(
+                            error,
+                            normalizedUploadId,
+                            normalizedChunkIndex,
+                            "chunk upload persistence failed"
+                    ));
+        } catch (IOException e) {
+            logger.error("chunk upload persistence failed: uploadId={} chunkIndex={}", normalizedUploadId, normalizedChunkIndex, e);
+            return CompletableFuture.completedFuture(ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", UserFacingErrorMapper.busyMessage()
+            )));
+        }
+    }
+
+    @GetMapping("/tasks/upload/chunk/status")
+    public ResponseEntity<Map<String, Object>> queryUploadChunkStatus(
+            @RequestParam("uploadId") String uploadId
+    ) {
+        String normalizedUploadId = normalizeUploadId(uploadId);
+        try {
+            Path uploadRootPath = resolveUploadRoot();
+            FileTransferService.ChunkSessionStatus status = fileTransferService.readChunkStatus(uploadRootPath, normalizedUploadId);
+            if (!status.exists) {
+                return ResponseEntity.ok(Map.of(
+                        "success", true,
+                        "exists", false,
+                        "uploadId", normalizedUploadId,
+                        "uploadedChunks", List.of()
+                ));
+            }
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("exists", true);
+            payload.put("uploadId", normalizedUploadId);
+            payload.put("uploadedChunks", status.uploadedChunks);
+            payload.put("uploadedCount", status.uploadedChunks.size());
+            if (status.meta != null) {
+                payload.put("totalChunks", status.meta.totalChunks);
+                payload.put("safeFileName", status.meta.safeFileName);
+                payload.put("totalFileSize", status.meta.totalFileSize);
+            }
+            return ResponseEntity.ok(payload);
+        } catch (IOException e) {
+            logger.warn("query chunk status failed: uploadId={} err={}", normalizedUploadId, e.getMessage());
+            return ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", UserFacingErrorMapper.busyMessage()
+            ));
+        }
+    }
+
+    @PostMapping(value = "/tasks/upload/chunk/complete", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public CompletableFuture<ResponseEntity<?>> completeChunkUpload(
+            @RequestBody ChunkUploadCompleteRequest request
+    ) {
+        if (request == null || !StringUtils.hasText(request.uploadId)) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "uploadId cannot be empty"
+            )));
+        }
+        String normalizedUploadId = normalizeUploadId(request.uploadId);
+        String normalizedUserId = normalizeUserId(request.userId);
+        TaskQueueManager.Priority taskPriority = resolvePriority(normalizedUserId, request.priority);
+
+        final Path uploadRootPath;
+        try {
+            uploadRootPath = resolveUploadRoot();
+        } catch (IOException e) {
+            logger.error("resolve upload root failed for chunk complete: uploadId={}", normalizedUploadId, e);
+            return CompletableFuture.completedFuture(ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", UserFacingErrorMapper.busyMessage()
+            )));
+        }
+
+        return fileTransferService
+                .readChunkStatusAsync(uploadRootPath, normalizedUploadId)
+                .thenCompose(status -> {
+                    if (!status.exists) {
+                        return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                                "success", false,
+                                "message", "chunk session not found"
+                        )));
+                    }
+                    if (status.meta == null || !StringUtils.hasText(status.meta.safeFileName) || status.meta.totalChunks <= 0) {
+                        return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                                "success", false,
+                                "message", "chunk session metadata missing"
+                        )));
+                    }
+
+                    Optional<FileReuseService.FileFingerprint> fingerprintOpt =
+                            resolveFileFingerprint(request.fileMd5, request.fileExt, status.meta.safeFileName);
+                    Optional<Path> reusedPathOpt = findReusableUploadPath(fingerprintOpt);
+                    if (reusedPathOpt.isPresent()) {
+                        fileTransferService.cleanupChunkSessionQuietly(uploadRootPath, normalizedUploadId);
+                        ResponseEntity<Map<String, Object>> response = buildUploadSubmissionResponse(
+                                reusedPathOpt.get(),
+                                status.meta.safeFileName,
+                                normalizedUserId,
+                                request.outputDir,
+                                taskPriority,
+                                request.chapterSelector,
+                                request.sectionSelector,
+                                request.splitByChapter,
+                                request.splitBySection,
+                                request.pageOffset,
+                                request.probeOnly,
+                                fingerprintOpt,
+                                true
+                        );
+                        return CompletableFuture.completedFuture(response);
+                    }
+
+                    if (status.meta.totalFileSize > MAX_UPLOAD_FILE_BYTES) {
+                        return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                                "success", false,
+                                "message", "uploaded file is too large; current limit is 2048MB"
+                        )));
+                    }
+
+                    return fileTransferService
+                            .mergeChunkSessionAsync(uploadRootPath, normalizedUploadId)
+                            .thenApply(mergeResult -> {
+                                recordUploadedFileMetadata(
+                                        mergeResult.mergedPath,
+                                        status.meta.safeFileName,
+                                        status.meta.totalFileSize,
+                                        fingerprintOpt
+                                );
+                                ResponseEntity<Map<String, Object>> response = buildUploadSubmissionResponse(
+                                        mergeResult.mergedPath,
+                                        status.meta.safeFileName,
+                                        normalizedUserId,
+                                        request.outputDir,
+                                        taskPriority,
+                                        request.chapterSelector,
+                                        request.sectionSelector,
+                                        request.splitByChapter,
+                                        request.splitBySection,
+                                        request.pageOffset,
+                                        request.probeOnly,
+                                        fingerprintOpt,
+                                        false
+                                );
+                                fileTransferService.cleanupChunkSessionQuietly(uploadRootPath, normalizedUploadId);
+                                return response;
+                            });
+                })
+                .exceptionally(error -> {
+                    Throwable root = unwrapCompletionError(error);
+                    if (root instanceof IllegalArgumentException) {
+                        Map<String, Object> payload = new LinkedHashMap<>();
+                        payload.put("success", false);
+                        payload.put("message", root.getMessage() != null ? root.getMessage() : "invalid chunk upload request");
+                        return ResponseEntity.badRequest().body(payload);
+                    }
+                    logger.error("complete chunk upload failed: uploadId={}", normalizedUploadId, root);
+                    Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("success", false);
+                    payload.put("message", UserFacingErrorMapper.busyMessage());
+                    return ResponseEntity.status(503).body(payload);
+                })
+                .thenApply(response -> (ResponseEntity<?>) response);
+    }
+
+    @GetMapping("/tasks/upload/probe-asset")
+    public ResponseEntity<?> getUploadProbeAsset(
+            @RequestParam("videoInput") String rawVideoInput,
+            @RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader
+    ) {
+        String normalizedVideoInput = normalizeVideoInput(rawVideoInput);
+        if (!StringUtils.hasText(normalizedVideoInput)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "videoInput cannot be empty"));
+        }
+
+        final Path uploadRootPath;
+        try {
+            uploadRootPath = resolveUploadRoot();
+        } catch (IOException ex) {
+            logger.warn("resolve upload root failed for probe asset: input={} err={}", normalizedVideoInput, ex.getMessage());
+            return ResponseEntity.status(503).body(Map.of("message", UserFacingErrorMapper.busyMessage()));
+        }
+
+        String candidatePath = normalizedVideoInput;
+        if (candidatePath.startsWith("file://")) {
+            candidatePath = candidatePath.substring("file://".length());
+            if (candidatePath.matches("^/[A-Za-z]:/.*")) {
+                candidatePath = candidatePath.substring(1);
+            }
+        }
+
+        final Path target;
+        try {
+            target = Paths.get(candidatePath).toAbsolutePath().normalize();
+        } catch (Exception ex) {
+            return ResponseEntity.badRequest().body(Map.of("message", "invalid probe file path"));
+        }
+        if (!target.startsWith(uploadRootPath)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("message", "probe file path is out of upload root"));
+        }
+        if (!Files.exists(target) || !Files.isRegularFile(target)) {
+            return ResponseEntity.status(404).body(Map.of("message", "probe file not found"));
+        }
+        String lowerName = target.getFileName() != null ? target.getFileName().toString().toLowerCase(Locale.ROOT) : "";
+        if (!lowerName.endsWith(".pdf")) {
+            return ResponseEntity.badRequest().body(Map.of("message", "only pdf probe preview is supported"));
+        }
+
+        try {
+            long length = Files.size(target);
+            MediaType mediaType = detectMediaType(target);
+
+            if (rangeHeader != null && !rangeHeader.isBlank()) {
+                try {
+                    List<HttpRange> ranges = HttpRange.parseRanges(rangeHeader);
+                    if (!ranges.isEmpty()) {
+                        HttpRange range = ranges.get(0);
+                        long start = range.getRangeStart(length);
+                        long end = range.getRangeEnd(length);
+                        long regionLength = end - start + 1;
+                        InputStream fileStream = Files.newInputStream(target);
+                        fileStream.skip(start);
+                        InputStream bounded = new java.io.FilterInputStream(fileStream) {
+                            long remaining = regionLength;
+
+                            @Override
+                            public int read() throws IOException {
+                                if (remaining <= 0) return -1;
+                                int b = super.read();
+                                if (b >= 0) remaining--;
+                                return b;
+                            }
+
+                            @Override
+                            public int read(byte[] b, int off, int len) throws IOException {
+                                if (remaining <= 0) return -1;
+                                int n = super.read(b, off, (int) Math.min(len, remaining));
+                                if (n > 0) remaining -= n;
+                                return n;
+                            }
+                        };
+                        Resource rangeResource = new InputStreamResource(bounded);
+                        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                                .contentType(mediaType)
+                                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + length)
+                                .contentLength(regionLength)
+                                .body(rangeResource);
+                    }
+                } catch (Exception ex) {
+                    logger.warn("probe asset range response fallback to full: path={} range={} err={}",
+                            target, rangeHeader, ex.getMessage());
+                }
+            }
+
+            InputStream inputStream = Files.newInputStream(target);
+            Resource resource = new InputStreamResource(inputStream);
+            return ResponseEntity.ok()
+                    .contentType(mediaType)
+                    .contentLength(length)
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .header(HttpHeaders.CACHE_CONTROL, "public, max-age=60")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + target.getFileName() + "\"")
+                    .body(resource);
+        } catch (IOException ex) {
+            logger.warn("read probe asset failed: path={} err={}", target, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read probe asset failed"));
+        }
+    }
+
+    @org.springframework.web.bind.annotation.ExceptionHandler(MultipartException.class)
+    public ResponseEntity<Map<String, Object>> handleMultipartUploadException(MultipartException ex) {
+        Throwable root = ex;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        if (root instanceof EOFException) {
+            logger.warn("multipart upload interrupted by client connection: {}", root.toString());
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "上传连接中断，请重试（已支持断点续传）",
+                    "errorCode", "UPLOAD_STREAM_INTERRUPTED"
+            ));
+        }
+        logger.warn("multipart parse failed: {}", ex.getMessage());
+        return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "上传数据格式异常，请重试",
+                "errorCode", "UPLOAD_MULTIPART_INVALID"
+        ));
+    }
+
+    private ResponseEntity<Map<String, Object>> mapChunkTransferError(
+            Throwable error,
+            String uploadId,
+            int chunkIndex,
+            String logMessage
+    ) {
+        Throwable root = unwrapCompletionError(error);
+        if (root instanceof IllegalArgumentException) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", root.getMessage() != null ? root.getMessage() : "invalid chunk upload request"
+            ));
+        }
+        logger.error("{}: uploadId={} chunkIndex={}", logMessage, uploadId, chunkIndex, root);
+        return ResponseEntity.status(503).body(Map.of(
+                "success", false,
+                "message", UserFacingErrorMapper.busyMessage()
+        ));
+    }
+
+    private Throwable unwrapCompletionError(Throwable error) {
+        Throwable current = error;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current != null ? current : new RuntimeException("unknown transfer error");
+    }
+
+    @GetMapping("/tasks/{taskId}/markdown")
+    public ResponseEntity<?> getTaskMarkdown(
+            @PathVariable String taskId,
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "includePersonalization", defaultValue = "false") boolean includePersonalization
+    ) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+
+        ResolvedMarkdown resolved;
+        try {
+            resolved = resolveMarkdown(task);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.status(404).body(Map.of("message", ex.getMessage()));
+        } catch (IOException ex) {
+            logger.warn("read markdown failed: taskId={} err={}", taskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read markdown failed"));
+        }
+
+        try {
+            Instant openedAt = markTaskOpened(task);
+            String markdown = Files.readString(resolved.markdownPath, StandardCharsets.UTF_8);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("taskId", task.taskId);
+            response.put("title", task.title);
+            response.put("status", task.status);
+            response.put("lastOpenedAt", instantToText(openedAt));
+            response.put("markdown", markdown);
+            response.put("markdownBytes", markdown.getBytes(StandardCharsets.UTF_8).length);
+            response.put("markdownPath", resolved.markdownPath.toString());
+            response.put("baseDir", resolved.baseDir.toString());
+            response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
+            TocMetadata tocMetadata = resolveTaskTocMetadata(task, resolved.markdownPath);
+            response.put("contentType", tocMetadata.contentType);
+            response.put("bookSectionTree", tocMetadata.bookSectionTree);
+            appendDisabledPersonalizationState(response);
+            return ResponseEntity.ok(response);
+        } catch (IOException ex) {
+            logger.warn("read markdown content failed: taskId={} path={} err={}", taskId, resolved.markdownPath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read markdown content failed"));
+        }
+    }
+
+    @GetMapping("/tasks/{taskId}/markdown/by-path")
+    public ResponseEntity<?> getTaskMarkdownByRelativePath(
+            @PathVariable String taskId,
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "includePersonalization", defaultValue = "false") boolean includePersonalization,
+            @RequestParam("path") String rawPath
+    ) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        if (rawPath == null || rawPath.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "missing path parameter"));
+        }
+
+        ResolvedMarkdown resolved;
+        try {
+            resolved = resolveMarkdown(task);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.status(404).body(Map.of("message", ex.getMessage()));
+        } catch (IOException ex) {
+            logger.warn("?? markdown ??: taskId={} err={}", taskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "?? markdown ??"));
+        }
+
+        String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
+        Path target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
+        if (target == null || !target.startsWith(resolved.baseDir)) {
+            return ResponseEntity.status(400).body(Map.of("message", "illegal path"));
+        }
+        if (!Files.exists(target) || !Files.isRegularFile(target)) {
+            return ResponseEntity.status(404).body(Map.of("message", "file not found"));
+        }
+        if (!isMarkdownFile(target.getFileName().toString())) {
+            return ResponseEntity.status(400).body(Map.of("message", "target is not a markdown file"));
+        }
+
+        try {
+            Instant openedAt = markTaskOpened(task);
+            String markdown = Files.readString(target, StandardCharsets.UTF_8);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("taskId", task.taskId);
+            response.put("title", target.getFileName().toString());
+            response.put("status", task.status);
+            response.put("lastOpenedAt", instantToText(openedAt));
+            response.put("markdown", markdown);
+            response.put("markdownBytes", markdown.getBytes(StandardCharsets.UTF_8).length);
+            response.put("markdownPath", target.toString());
+            response.put("baseDir", resolved.baseDir.toString());
+            response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
+            TocMetadata tocMetadata = resolveTaskTocMetadata(task, target);
+            response.put("contentType", tocMetadata.contentType);
+            response.put("bookSectionTree", tocMetadata.bookSectionTree);
+            appendDisabledPersonalizationState(response);
+            return ResponseEntity.ok(response);
+        } catch (IOException ex) {
+            logger.warn("read relative markdown failed: taskId={} path={} err={}", taskId, rawPath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "?? markdown ??"));
+        }
+    }
+
+    @PostMapping("/tasks/{taskId}/opened")
+    public ResponseEntity<?> markTaskOpenedTimestamp(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Instant openedAt = markTaskOpened(task);
+        if (openedAt == null) {
+            return ResponseEntity.status(500).body(Map.of("message", "update task open timestamp failed"));
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("title", task.title != null ? task.title : task.taskId);
+        payload.put("lastOpenedAt", instantToText(openedAt));
+        return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping("/tasks/{taskId}")
+    public ResponseEntity<?> getTaskRuntimeStatus(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        String displayTitle = task.title != null && !task.title.isBlank() ? task.title : task.taskId;
+        response.put("taskId", task.taskId);
+        response.put("title", displayTitle);
+        response.put("status", task.status != null ? task.status : "");
+        response.put("progress", task.progress);
+        response.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        response.put("userMessage", task.userMessage != null ? task.userMessage : "");
+        response.put("errorMessage", task.errorMessage != null ? task.errorMessage : "");
+        response.put("createdAt", instantToText(task.createdAt));
+        response.put("completedAt", instantToText(task.completedAt));
+        response.put("markdownAvailable", task.markdownAvailable);
+        taskStatusPresentationService.appendRecoveryFields(response, task.status, task.recoveryPayload);
+        appendFallbackRepairFields(response, task.runtimeTask);
+        return ResponseEntity.ok(response);
+    }
+
+    @DeleteMapping("/tasks/{taskId}")
+    public ResponseEntity<Map<String, Object>> cancelRuntimeTask(@PathVariable String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "status", "INVALID_ARGUMENT",
+                    "message", "taskId cannot be empty"
+            ));
+        }
+
+        TaskEntry runtimeTask = taskQueueManager.getTask(normalizedTaskId);
+        if (runtimeTask != null) {
+            TaskStatus currentStatus = runtimeTask.status != null ? runtimeTask.status : TaskStatus.QUEUED;
+            if (currentStatus == TaskStatus.QUEUED || currentStatus == TaskStatus.PROCESSING) {
+                boolean cancelled = taskQueueManager.cancelTask(normalizedTaskId);
+                if (!cancelled) {
+                    return ResponseEntity.status(409).body(Map.of(
+                            "success", false,
+                            "status", currentStatus.name(),
+                            "message", "task cannot be cancelled in current state"
+                    ));
+                }
+                return ResponseEntity.ok(Map.of(
+                        "success", true,
+                        "taskId", normalizedTaskId,
+                        "status", TaskStatus.CANCELLED.name(),
+                        "runtimeRemoved", false,
+                        "storageDeleted", false,
+                        "deletedEntries", 0,
+                        "message", "task cancelled and no new steps will be scheduled"
+                ));
+            }
+        }
+
+        boolean runtimeRemoved = taskQueueManager.removeTask(normalizedTaskId);
+        PythonGrpcClient.ReleaseResourcesResult releaseResult = releasePythonTaskResources(normalizedTaskId);
+        StorageDeleteResult storageDelete = deleteStorageTaskByTaskId(normalizedTaskId);
+        boolean persistedStateDeleted;
+        try {
+            persistedStateDeleted = deletePersistedTaskState(normalizedTaskId);
+        } catch (Exception ex) {
+            logger.warn("delete persisted task state failed: taskId={} err={}", normalizedTaskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of(
+                    "success", false,
+                    "status", "DELETE_FAILED",
+                    "message", "delete persisted task state failed"
+            ));
+        }
+        if (!storageDelete.success) {
+            boolean cleanupPending = scheduleDeferredTaskCleanup(normalizedTaskId, storageDelete, runtimeTask);
+            if (cleanupPending && (runtimeRemoved || persistedStateDeleted || storageDelete.found)) {
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("success", true);
+                payload.put("taskId", normalizedTaskId);
+                payload.put("status", "DELETED_PENDING_CLEANUP");
+                payload.put("runtimeRemoved", runtimeRemoved);
+                payload.put("storageDeleted", false);
+                payload.put("persistedStateDeleted", persistedStateDeleted);
+                payload.put("deletedEntries", storageDelete.deletedEntries);
+                payload.put("cleanupPending", true);
+                payload.put("message", "task deleted; storage cleanup pending");
+                if (releaseResult != null && releaseResult.message != null && !releaseResult.message.isBlank()) {
+                    payload.put("resourceReleaseMessage", releaseResult.message);
+                }
+                return ResponseEntity.ok(payload);
+            }
+            return ResponseEntity.status(500).body(Map.of(
+                    "success", false,
+                    "status", "DELETE_FAILED",
+                    "message", storageDelete.message != null ? storageDelete.message : "delete task artifacts failed"
+            ));
+        }
+
+        if (!runtimeRemoved && !storageDelete.found && !persistedStateDeleted) {
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "taskId", normalizedTaskId,
+                    "status", "ALREADY_DELETED",
+                    "runtimeRemoved", false,
+                    "storageDeleted", false,
+                    "persistedStateDeleted", false,
+                    "deletedEntries", 0,
+                    "message", "task already deleted"
+            ));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", normalizedTaskId);
+        payload.put("status", (runtimeRemoved || storageDelete.deleted || persistedStateDeleted) ? "DELETED" : "REMOVED");
+        payload.put("runtimeRemoved", runtimeRemoved);
+        payload.put("storageDeleted", storageDelete.deleted);
+        payload.put("persistedStateDeleted", persistedStateDeleted);
+        payload.put("deletedEntries", storageDelete.deletedEntries);
+        payload.put("cleanupPending", false);
+        payload.put("message", (runtimeRemoved || storageDelete.deleted || persistedStateDeleted) ? "task deleted" : "task removed");
+        clearTaskCleanupIndexQuietly(normalizedTaskId);
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping("/tasks/{taskId}/retry")
+    public ResponseEntity<Map<String, Object>> retryRuntimeTask(@PathVariable String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "status", "INVALID_ARGUMENT",
+                    "message", "taskId cannot be empty"
+            ));
+        }
+        TaskQueueManager.TaskTransitionResult transition = taskQueueManager.retryTaskTransition(normalizedTaskId);
+        if (transition.isRejected()) {
+            int statusCode = transition.reason != null && transition.reason.contains("not found") ? 404 : 409;
+            return ResponseEntity.status(statusCode).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "status", transition.currentStatus != null ? transition.currentStatus.name() : "",
+                    "message", transition.reason != null ? transition.reason : "task cannot retry in current state"
+            ));
+        }
+        TaskEntry refreshedTask = taskQueueManager.getTask(normalizedTaskId);
+        if (refreshedTask != null && taskWebSocketHandler != null) {
+            taskWebSocketHandler.broadcastTaskUpdate(refreshedTask);
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("taskId", normalizedTaskId);
+        response.put("status", transition.currentStatus != null ? transition.currentStatus.name() : "");
+        response.put("previousStatus", transition.previousStatus != null ? transition.previousStatus.name() : "");
+        response.put("message", transition.reason != null ? transition.reason : "task requeued for retry");
+        if (refreshedTask != null) {
+            TaskView taskView = fromRuntimeTask(refreshedTask);
+            taskStatusPresentationService.appendRecoveryFields(response, taskView.status, taskView.recoveryPayload);
+            appendFallbackRepairFields(response, taskView.runtimeTask);
+        }
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/tasks/{taskId}/repair-fallback")
+    public ResponseEntity<Map<String, Object>> repairFallbackTask(@PathVariable String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "status", "INVALID_ARGUMENT",
+                    "message", "taskId cannot be empty"
+            ));
+        }
+        TaskEntry task = taskQueueManager.getTask(normalizedTaskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "message", "task not found"
+            ));
+        }
+        if (taskRuntimeRecoveryService == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "message", "task runtime recovery service unavailable"
+            ));
+        }
+        Optional<TaskRuntimeRecoveryService.FallbackRepairDirective> directiveOpt =
+                taskRuntimeRecoveryService.prepareFallbackRepair(task);
+        if (directiveOpt.isEmpty()) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "status", task.status != null ? task.status.name() : "",
+                    "message", "fallback repair plan is not available for current task"
+            ));
+        }
+        TaskRuntimeRecoveryService.FallbackRepairDirective directive = directiveOpt.get();
+        TaskQueueManager.TaskTransitionResult transition = taskQueueManager.retryTaskTransition(normalizedTaskId);
+        if (transition.isRejected()) {
+            int statusCode = transition.reason != null && transition.reason.contains("not found") ? 404 : 409;
+            return ResponseEntity.status(statusCode).body(Map.of(
+                    "success", false,
+                    "taskId", normalizedTaskId,
+                    "status", transition.currentStatus != null ? transition.currentStatus.name() : "",
+                    "message", transition.reason != null ? transition.reason : "task cannot repair fallback in current state"
+            ));
+        }
+        TaskEntry refreshedTask = taskQueueManager.getTask(normalizedTaskId);
+        if (refreshedTask != null && taskWebSocketHandler != null) {
+            taskWebSocketHandler.broadcastTaskUpdate(refreshedTask);
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("success", true);
+        response.put("taskId", normalizedTaskId);
+        response.put("status", transition.currentStatus != null ? transition.currentStatus.name() : "");
+        response.put("previousStatus", transition.previousStatus != null ? transition.previousStatus.name() : "");
+        response.put("message", "fallback repair plan prepared and task requeued");
+        response.put("fallbackRepair", directive.toPayload());
+        if (refreshedTask != null) {
+            TaskView taskView = fromRuntimeTask(refreshedTask);
+            taskStatusPresentationService.appendRecoveryFields(response, taskView.status, taskView.recoveryPayload);
+            appendFallbackRepairFields(response, taskView.runtimeTask);
+        }
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/tasks/{taskId}/audit-ledgers")
+    public ResponseEntity<?> inspectTaskAuditLedgers(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.status(409).body(Map.of("message", ex.getMessage()));
+        } catch (IOException ex) {
+            logger.warn("resolve task root failed for audit ledgers: taskId={} err={}", taskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "resolve task root failed"));
+        }
+
+        Path auditRoot = taskRoot.resolve(TASK_RUNTIME_AUDIT_DIR).normalize();
+        Map<String, Object> ledgers = new LinkedHashMap<>();
+        ledgers.put("fallback", readRuntimeAuditLedger(taskRoot, "fallback", "Fallback", FALLBACK_RECORDS_FILE_NAME));
+        ledgers.put("error", readRuntimeAuditLedger(taskRoot, "error", "Error", ERROR_RECORDS_FILE_NAME));
+        ledgers.put(
+                "manual_retry_required",
+                readRuntimeAuditLedger(
+                        taskRoot,
+                        "manual_retry_required",
+                        "Manual Retry Required",
+                        MANUAL_RETRY_REQUIRED_RECORDS_FILE_NAME
+                )
+        );
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId != null ? task.taskId : trimToNullSafe(taskId));
+        payload.put("taskTitle", task.title != null ? task.title : "");
+        payload.put("status", task.status != null ? task.status : "");
+        payload.put("auditRoot", auditRoot.toString());
+        payload.put("ledgers", ledgers);
+        return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping("/tasks/{taskId}/personalization/cache")
+    public ResponseEntity<?> inspectTaskPersonalizationCache(
+            @PathVariable String taskId,
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "path", required = false) String rawPath
+    ) {
+        if (personaAwareReadingService == null) {
+            return ResponseEntity.status(503).body(Map.of("message", "persona reading service unavailable"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+
+        ResolvedMarkdown resolved;
+        try {
+            resolved = resolveMarkdown(task);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.status(404).body(Map.of("message", ex.getMessage()));
+        } catch (IOException ex) {
+            logger.warn("inspect personalization cache failed: taskId={} err={}", taskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read markdown failed"));
+        }
+
+        Path target = resolved.markdownPath;
+        if (rawPath != null && !rawPath.isBlank()) {
+            String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
+            target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
+            if (target == null || !target.startsWith(resolved.baseDir)) {
+                return ResponseEntity.status(400).body(Map.of("message", "invalid path"));
+            }
+            if (!Files.exists(target) || !Files.isRegularFile(target)) {
+                return ResponseEntity.status(404).body(Map.of("message", "file not found"));
+            }
+            if (!isMarkdownFile(target.getFileName().toString())) {
+                return ResponseEntity.status(400).body(Map.of("message", "target is not markdown"));
+            }
+        }
+
+        String resolvedUserId = resolveReaderUserId(task, userId);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("taskId", task.taskId);
+        payload.put("resolvedUserId", resolvedUserId != null ? resolvedUserId : "");
+        payload.put("inspectedMarkdownPath", target.toString());
+        payload.putAll(personaAwareReadingService.inspectCache(task.taskId, resolvedUserId, target));
+        return ResponseEntity.ok(payload);
+    }
+
+
+    @PutMapping("/tasks/{taskId}/markdown")
+    public ResponseEntity<?> updateTaskMarkdown(
+            @PathVariable String taskId,
+            @RequestBody MarkdownUpdateRequest request
+    ) {
+        if (request == null || request.markdown == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "?? markdown ??"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+
+        ResolvedMarkdown resolved;
+        try {
+            resolved = resolveMarkdown(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "editable markdown not found"));
+        }
+
+        Path target = resolved.markdownPath;
+        if (request.path != null && !request.path.isBlank()) {
+            String decodedPath = URLDecoder.decode(request.path, StandardCharsets.UTF_8);
+            target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
+            if (target == null || !target.startsWith(resolved.baseDir)) {
+                return ResponseEntity.status(400).body(Map.of("message", "illegal path"));
+            }
+            if (!isMarkdownFile(target.getFileName().toString())) {
+                return ResponseEntity.status(400).body(Map.of("message", "target is not a markdown file"));
+            }
+        }
+
+        try {
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            Files.writeString(target, request.markdown, StandardCharsets.UTF_8);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("taskId", task.taskId);
+            payload.put("markdownPath", target.toString());
+            payload.put("baseDir", target.getParent() != null ? target.getParent().toString() : "");
+            payload.put("size", request.markdown.length());
+            payload.put("updatedAt", Instant.now().toString());
+            return ResponseEntity.ok(payload);
+        } catch (IOException ex) {
+            logger.warn("write markdown failed: taskId={} path={} err={}", taskId, target, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "write markdown failed"));
+        }
+    }
+
+    @GetMapping("/tasks/{taskId}/meta")
+    public ResponseEntity<?> getTaskMeta(
+            @PathVariable String taskId,
+            @RequestParam(value = "path", required = false) String rawPath
+    ) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, rawPath);
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("taskId", task.taskId);
+        payload.put("taskTitle", meta.taskTitle != null ? meta.taskTitle : "");
+        payload.put("lastOpenedAt", meta.lastOpenedAt != null ? meta.lastOpenedAt : "");
+        payload.put("pathKey", noteKey);
+        payload.put("favorites", noteMeta.favorites != null ? noteMeta.favorites : Map.of());
+        payload.put("deleted", noteMeta.deleted != null ? noteMeta.deleted : Map.of());
+        payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
+        payload.put("tokenLike", noteMeta.tokenLike != null ? noteMeta.tokenLike : Map.of());
+        payload.put("tokenAnnotations", noteMeta.tokenAnnotations != null ? sanitizeTokenAnnotations(noteMeta.tokenAnnotations) : Map.of());
+        payload.put("anchors", noteMeta.anchors != null ? sanitizeAnchors(noteMeta.anchors) : Map.of());
+        payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
+        return ResponseEntity.ok(payload);
+    }
+
+    @PutMapping("/tasks/{taskId}/meta")
+    public ResponseEntity<?> updateTaskMeta(
+            @PathVariable String taskId,
+            @RequestBody TaskMetaUpdateRequest request
+    ) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        String normalizedTaskTitle = null;
+        if (request != null && request.taskTitle != null) {
+            String title = request.taskTitle.trim();
+            meta.taskTitle = title.isEmpty() ? null : title;
+            normalizedTaskTitle = meta.taskTitle;
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, request != null ? request.path : null);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        if (request != null && request.favorites != null) {
+            noteMeta.favorites = sanitizeFavorites(request.favorites);
+        }
+        if (request != null && request.deleted != null) {
+            noteMeta.deleted = sanitizeDeleted(request.deleted);
+        }
+        if (request != null && request.comments != null) {
+            noteMeta.comments = new LinkedHashMap<>(sanitizeComments(request.comments));
+        }
+        if (request != null && request.tokenLike != null) {
+            noteMeta.tokenLike = sanitizeTokenLike(request.tokenLike);
+        }
+        if (request != null && request.tokenAnnotations != null) {
+            noteMeta.tokenAnnotations = new LinkedHashMap<>(sanitizeTokenAnnotations(request.tokenAnnotations));
+        }
+        if (request != null && request.anchors != null) {
+            noteMeta.anchors = new LinkedHashMap<>(sanitizeAnchors(request.anchors));
+        }
+        if ((noteMeta.favorites == null || noteMeta.favorites.isEmpty())
+                && (noteMeta.deleted == null || noteMeta.deleted.isEmpty())
+                && (noteMeta.comments == null || noteMeta.comments.isEmpty())
+                && (noteMeta.tokenLike == null || noteMeta.tokenLike.isEmpty())
+                && (noteMeta.tokenAnnotations == null || noteMeta.tokenAnnotations.isEmpty())
+                && (noteMeta.anchors == null || noteMeta.anchors.isEmpty())) {
+            meta.notesByMarkdown.remove(noteKey);
+        } else {
+            meta.notesByMarkdown.put(noteKey, noteMeta);
+        }
+
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
+        }
+        if (request != null && request.taskTitle != null) {
+            if (!syncVideoMetaTitle(taskRoot, normalizedTaskTitle)) {
+                return ResponseEntity.status(500).body(Map.of("message", "write video metadata failed"));
+            }
+        }
+        if (normalizedTaskTitle != null) {
+            task.title = normalizedTaskTitle;
+            task.metaTitle = normalizedTaskTitle;
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("taskTitle", meta.taskTitle != null ? meta.taskTitle : "");
+        payload.put("lastOpenedAt", meta.lastOpenedAt != null ? meta.lastOpenedAt : "");
+        payload.put("pathKey", noteKey);
+        payload.put("favorites", noteMeta.favorites != null ? noteMeta.favorites : Map.of());
+        payload.put("deleted", noteMeta.deleted != null ? noteMeta.deleted : Map.of());
+        payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
+        payload.put("tokenLike", noteMeta.tokenLike != null ? noteMeta.tokenLike : Map.of());
+        payload.put("tokenAnnotations", noteMeta.tokenAnnotations != null ? sanitizeTokenAnnotations(noteMeta.tokenAnnotations) : Map.of());
+        payload.put("anchors", noteMeta.anchors != null ? sanitizeAnchors(noteMeta.anchors) : Map.of());
+        payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
+        payload.put("updatedAt", Instant.now().toString());
+        broadcastMetaSyncEvent(task, noteKey, "meta", "");
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/anchors/{anchorId}/mount", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> mountAnchorResources(
+            @PathVariable String taskId,
+            @PathVariable String anchorId,
+            @RequestParam(value = "path", required = false) String rawPath,
+            @RequestParam(value = "files", required = false) MultipartFile[] files,
+            @RequestParam(value = "relativePaths", required = false) List<String> relativePaths,
+            @RequestParam(value = "mainNotePath", required = false) String rawMainNotePath
+    ) {
+        String normalizedAnchorId = trimToNullSafe(anchorId);
+        if (normalizedAnchorId == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorId cannot be empty"));
+        }
+        if (files == null || files.length == 0) {
+            return ResponseEntity.badRequest().body(Map.of("message", "missing upload files"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String safeAnchorDirName = sanitizeAnchorDirectoryName(normalizedAnchorId);
+        String revisionId = buildAnchorRevisionId();
+        String relativeRevisionDir = "thinking/anchor_" + safeAnchorDirName + "/rev_" + revisionId;
+        Path revisionDir = taskRoot.resolve(relativeRevisionDir).normalize();
+        if (!revisionDir.startsWith(taskRoot)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal anchor mount path"));
+        }
+
+        List<String> savedRelativePaths = new ArrayList<>();
+        List<Map<String, Object>> savedFilePayload = new ArrayList<>();
+        List<FileTransferService.BatchTransferItem> transferBatch = new ArrayList<>();
+        List<MultipartFile> transferSourceFiles = new ArrayList<>();
+        long totalBytes = 0L;
+        try {
+            Files.createDirectories(revisionDir);
+            for (int index = 0; index < files.length; index++) {
+                MultipartFile file = files[index];
+                if (file == null || file.isEmpty()) {
+                    continue;
+                }
+                String requestedRelative = (relativePaths != null && index < relativePaths.size())
+                        ? relativePaths.get(index)
+                        : null;
+                String normalizedRelative = normalizeMountedRelativePath(requestedRelative, file.getOriginalFilename());
+                if (normalizedRelative == null) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "message", "illegal relative path in uploaded files",
+                            "fileIndex", index
+                    ));
+                }
+                Path target = revisionDir.resolve(normalizedRelative).normalize();
+                if (!target.startsWith(revisionDir)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "message", "illegal target path in uploaded files",
+                            "fileIndex", index
+                    ));
+                }
+                if (target.getParent() != null) {
+                    Files.createDirectories(target.getParent());
+                }
+                transferBatch.add(new FileTransferService.BatchTransferItem(target, file));
+                transferSourceFiles.add(file);
+                savedRelativePaths.add(normalizedRelative);
+            }
+            List<Path> persistedPaths = fileTransferService.persistMultipartBatchAsync(taskRoot, transferBatch).join();
+            for (int index = 0; index < persistedPaths.size() && index < savedRelativePaths.size(); index++) {
+                Path target = persistedPaths.get(index);
+                MultipartFile sourceFile = transferSourceFiles.get(index);
+                String normalizedRelative = savedRelativePaths.get(index);
+                long fileSize = Files.size(target);
+                totalBytes += fileSize;
+                Map<String, Object> oneFilePayload = new LinkedHashMap<>();
+                oneFilePayload.put("path", relativeRevisionDir + "/" + normalizedRelative);
+                oneFilePayload.put("name", sourceFile.getOriginalFilename() != null ? sourceFile.getOriginalFilename() : target.getFileName().toString());
+                oneFilePayload.put("size", fileSize);
+                oneFilePayload.put("contentType", sourceFile.getContentType() != null ? sourceFile.getContentType() : "");
+                savedFilePayload.add(oneFilePayload);
+            }
+        } catch (Exception ex) {
+            logger.warn("mount anchor files failed: taskId={} anchorId={} err={}", taskId, normalizedAnchorId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "write anchor files failed"));
+        }
+
+        if (savedRelativePaths.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "all uploaded files are empty"));
+        }
+
+        String selectedNoteRelative = resolveMainNoteRelativePath(rawMainNotePath, savedRelativePaths);
+        String notePath = selectedNoteRelative != null ? relativeRevisionDir + "/" + selectedNoteRelative : "";
+        String noteKey = normalizeMetaNoteKey(taskRoot, rawPath);
+        Instant now = Instant.now();
+
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+        Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(normalizedAnchorId));
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+
+        Map<String, Object> revisionPayload = new LinkedHashMap<>();
+        revisionPayload.put("revisionId", revisionId);
+        revisionPayload.put("createdAt", now.toString());
+        revisionPayload.put("relativeDir", relativeRevisionDir);
+        if (!notePath.isBlank()) {
+            revisionPayload.put("notePath", notePath);
+        }
+        revisionPayload.put("fileCount", savedFilePayload.size());
+        revisionPayload.put("totalBytes", totalBytes);
+        revisionPayload.put("files", savedFilePayload);
+        revisions.add(revisionPayload);
+
+        anchorRecord.put("status", !notePath.isBlank() ? "mounted" : "files_uploaded");
+        if (!notePath.isBlank()) {
+            anchorRecord.put("mountedPath", notePath);
+        }
+        anchorRecord.put("mountedRevisionId", revisionId);
+        anchorRecord.put("updatedAt", now.toString());
+        anchorRecord.put("revisions", revisions);
+        anchors.put(normalizedAnchorId, anchorRecord);
+        noteMeta.anchors = anchors;
+        meta.notesByMarkdown.put(noteKey, noteMeta);
+
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("pathKey", noteKey);
+        payload.put("anchorId", normalizedAnchorId);
+        payload.put("anchor", anchorRecord);
+        payload.put("revision", revisionPayload);
+        payload.put("updatedAt", now.toString());
+        broadcastMetaSyncEvent(task, noteKey, "anchor_mount", normalizedAnchorId);
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/anchors/{anchorId}/sync", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> syncAnchorResources(
+            @PathVariable String taskId,
+            @PathVariable String anchorId,
+            @RequestBody AnchorSyncRequest request
+    ) {
+        String normalizedAnchorId = trimToNullSafe(anchorId);
+        if (normalizedAnchorId == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorId cannot be empty"));
+        }
+        if (request == null || request.operations == null || request.operations.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "missing sync operations"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, request.path);
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+        Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(normalizedAnchorId));
+        if (anchorRecord.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("message", "anchor not found"));
+        }
+
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+        Map<String, Object> latestRevision = revisions.isEmpty() ? Map.of() : revisions.get(revisions.size() - 1);
+        String revisionRelativeDir = stringValueOrNull(latestRevision.get("relativeDir"));
+        if (revisionRelativeDir == null) {
+            String mountedPath = stringValueOrNull(anchorRecord.get("mountedPath"));
+            if (mountedPath != null) {
+                Path mountedParent = Paths.get(mountedPath).normalize().getParent();
+                if (mountedParent != null) {
+                    revisionRelativeDir = normalizeMountedRelativePath(mountedParent.toString().replace('\\', '/'), null);
+                }
+            }
+        }
+        if (revisionRelativeDir == null) {
+            return ResponseEntity.status(400).body(Map.of("message", "anchor has no mounted revision directory"));
+        }
+        String normalizedRevisionRelativeDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+        if (normalizedRevisionRelativeDir == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal revision directory"));
+        }
+        Path revisionDir = taskRoot.resolve(normalizedRevisionRelativeDir).normalize();
+        if (!revisionDir.startsWith(taskRoot)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal revision directory"));
+        }
+        try {
+            Files.createDirectories(revisionDir);
+        } catch (IOException ex) {
+            logger.warn("prepare anchor revision directory failed: taskId={} anchorId={} dir={} err={}",
+                    taskId, normalizedAnchorId, revisionDir, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "prepare anchor revision directory failed"));
+        }
+
+        List<Map<String, Object>> touchedFiles = new ArrayList<>();
+        int upsertCount = 0;
+        int deleteCount = 0;
+        long totalBytes = 0L;
+        for (int index = 0; index < request.operations.size(); index++) {
+            AnchorSyncOperation op = request.operations.get(index);
+            if (op == null) {
+                continue;
+            }
+            String opType = trimToNullSafe(op.op);
+            String normalizedRelativePath = normalizeMountedRelativePath(op.relativePath, null);
+            if (normalizedRelativePath == null) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "message", "illegal relative path in sync operations",
+                        "opIndex", index
+                ));
+            }
+            Path target = revisionDir.resolve(normalizedRelativePath).normalize();
+            if (!target.startsWith(revisionDir)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "message", "sync target path out of revision directory",
+                        "opIndex", index
+                ));
+            }
+
+            String lowerOp = opType == null ? "" : opType.toLowerCase(Locale.ROOT);
+            boolean isDelete = "delete".equals(lowerOp) || "remove".equals(lowerOp);
+            boolean isUpsert = "add".equals(lowerOp)
+                    || "replace".equals(lowerOp)
+                    || "upsert".equals(lowerOp)
+                    || "create".equals(lowerOp)
+                    || "new".equals(lowerOp)
+                    || "update".equals(lowerOp);
+            if (!isDelete && !isUpsert) {
+                continue;
+            }
+
+            try {
+                if (isDelete) {
+                    boolean deleted = Files.deleteIfExists(target);
+                    if (deleted) {
+                        deleteCount += 1;
+                    }
+                    Map<String, Object> one = new LinkedHashMap<>();
+                    one.put("path", normalizedRevisionRelativeDir + "/" + normalizedRelativePath);
+                    one.put("name", target.getFileName().toString());
+                    one.put("size", 0L);
+                    one.put("contentType", "application/x-delete");
+                    touchedFiles.add(one);
+                    continue;
+                }
+
+                if (target.getParent() != null) {
+                    Files.createDirectories(target.getParent());
+                }
+                String content = op.content != null ? op.content : "";
+                Files.writeString(
+                        target,
+                        content,
+                        StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                        StandardOpenOption.WRITE
+                );
+                long fileSize = Files.size(target);
+                totalBytes += fileSize;
+                upsertCount += 1;
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("path", normalizedRevisionRelativeDir + "/" + normalizedRelativePath);
+                one.put("name", target.getFileName().toString());
+                one.put("size", fileSize);
+                one.put("contentType", "text/markdown");
+                touchedFiles.add(one);
+            } catch (Exception ex) {
+                logger.warn("apply anchor sync op failed: taskId={} anchorId={} opIndex={} op={} path={} err={}",
+                        taskId, normalizedAnchorId, index, lowerOp, normalizedRelativePath, ex.getMessage());
+                return ResponseEntity.status(500).body(Map.of(
+                        "message", "apply sync operation failed",
+                        "opIndex", index
+                ));
+            }
+        }
+
+        if (upsertCount == 0 && deleteCount == 0) {
+            return ResponseEntity.badRequest().body(Map.of("message", "no valid sync operations"));
+        }
+
+        String mountedPath = stringValueOrNull(anchorRecord.get("mountedPath"));
+        String selectedMainRelative = normalizeMountedRelativePath(request.mainNotePath, null);
+        String resolvedMainRelative = null;
+        if (selectedMainRelative != null) {
+            Path selectedMainTarget = revisionDir.resolve(selectedMainRelative).normalize();
+            if (!selectedMainTarget.startsWith(revisionDir)) {
+                return ResponseEntity.badRequest().body(Map.of("message", "main note path out of revision directory"));
+            }
+            if (Files.isRegularFile(selectedMainTarget) && isMarkdownFile(selectedMainRelative)) {
+                resolvedMainRelative = selectedMainRelative;
+            }
+        }
+        if (resolvedMainRelative == null) {
+            String normalizedMountedPath = normalizeMountedRelativePath(mountedPath, null);
+            String revisionPrefix = normalizedRevisionRelativeDir + "/";
+            if (normalizedMountedPath != null && normalizedMountedPath.startsWith(revisionPrefix)) {
+                String currentMainRelative = normalizedMountedPath.substring(revisionPrefix.length());
+                Path currentMainTarget = revisionDir.resolve(currentMainRelative).normalize();
+                if (currentMainTarget.startsWith(revisionDir)
+                        && Files.isRegularFile(currentMainTarget)
+                        && isMarkdownFile(currentMainRelative)) {
+                    resolvedMainRelative = currentMainRelative;
+                }
+            }
+        }
+        if (resolvedMainRelative == null) {
+            resolvedMainRelative = findFirstMarkdownRelativePath(revisionDir);
+        }
+        if (resolvedMainRelative != null) {
+            mountedPath = normalizedRevisionRelativeDir + "/" + resolvedMainRelative;
+        } else {
+            mountedPath = null;
+        }
+
+        Instant now = Instant.now();
+        String syncRevisionId = buildAnchorRevisionId();
+        Map<String, Object> revisionPayload = new LinkedHashMap<>();
+        revisionPayload.put("revisionId", syncRevisionId);
+        revisionPayload.put("createdAt", now.toString());
+        revisionPayload.put("relativeDir", normalizedRevisionRelativeDir);
+        if (mountedPath != null && !mountedPath.isBlank()) {
+            revisionPayload.put("notePath", mountedPath);
+        }
+        revisionPayload.put("fileCount", touchedFiles.size());
+        revisionPayload.put("totalBytes", totalBytes);
+        revisionPayload.put("files", touchedFiles);
+        revisions.add(revisionPayload);
+
+        if (mountedPath != null && !mountedPath.isBlank()) {
+            anchorRecord.put("mountedPath", mountedPath);
+            anchorRecord.put("status", "mounted");
+        } else {
+            anchorRecord.put("status", "files_uploaded");
+        }
+        anchorRecord.put("mountedRevisionId", syncRevisionId);
+        anchorRecord.put("updatedAt", now.toString());
+        anchorRecord.put("revisions", revisions);
+        anchors.put(normalizedAnchorId, anchorRecord);
+        noteMeta.anchors = anchors;
+        meta.notesByMarkdown.put(noteKey, noteMeta);
+
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("pathKey", noteKey);
+        payload.put("anchorId", normalizedAnchorId);
+        payload.put("anchor", anchorRecord);
+        payload.put("revision", revisionPayload);
+        payload.put("upsertCount", upsertCount);
+        payload.put("deleteCount", deleteCount);
+        payload.put("updatedAt", now.toString());
+        broadcastMetaSyncEvent(task, noteKey, "anchor_sync", normalizedAnchorId);
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/anchors/delete", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> deleteAnchorsPermanently(
+            @PathVariable String taskId,
+            @RequestBody AnchorBatchDeleteRequest request
+    ) {
+        List<String> requestedAnchorIds = normalizeAnchorIdList(request != null ? request.anchorIds : null);
+        if (requestedAnchorIds.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorIds cannot be empty"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, request != null ? request.path : null);
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+
+        List<String> existingAnchorIds = requestedAnchorIds.stream()
+                .filter(anchors::containsKey)
+                .toList();
+        if (existingAnchorIds.isEmpty()) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("taskId", task.taskId);
+            payload.put("pathKey", noteKey);
+            payload.put("deletedCount", 0);
+            payload.put("deletedAnchorIds", List.of());
+            payload.put("missingAnchorIds", requestedAnchorIds);
+            payload.put("deletedFileEntries", 0);
+            payload.put("updatedAt", Instant.now().toString());
+            return ResponseEntity.ok(payload);
+        }
+
+        boolean removeFiles = request == null || request.removeFiles == null || request.removeFiles;
+        int deletedFileEntries = 0;
+        if (removeFiles) {
+            Set<Path> deleteTargets = collectAnchorDeleteTargets(taskRoot, anchors, existingAnchorIds);
+            List<String> failedDeleteTargets = new ArrayList<>();
+            for (Path target : deleteTargets) {
+                try {
+                    deletedFileEntries += deletePathRecursively(target, taskRoot);
+                } catch (IOException ex) {
+                    failedDeleteTargets.add(taskRoot.toAbsolutePath().normalize().relativize(target.toAbsolutePath().normalize()).toString().replace('\\', '/'));
+                    logger.warn("delete anchor storage failed: taskId={} path={} err={}", taskId, target, ex.getMessage());
+                }
+            }
+            if (!failedDeleteTargets.isEmpty()) {
+                return ResponseEntity.status(500).body(Map.of(
+                        "message", "delete anchor storage failed",
+                        "failedPaths", failedDeleteTargets
+                ));
+            }
+        }
+
+        existingAnchorIds.forEach(anchors::remove);
+        noteMeta.anchors = anchors;
+        if (isNoteMetaEmpty(noteMeta)) {
+            meta.notesByMarkdown.remove(noteKey);
+        } else {
+            meta.notesByMarkdown.put(noteKey, noteMeta);
+        }
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
+        }
+
+        List<String> missingAnchorIds = requestedAnchorIds.stream()
+                .filter(id -> !existingAnchorIds.contains(id))
+                .toList();
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("pathKey", noteKey);
+        payload.put("deletedCount", existingAnchorIds.size());
+        payload.put("deletedAnchorIds", existingAnchorIds);
+        payload.put("missingAnchorIds", missingAnchorIds);
+        payload.put("deletedFileEntries", deletedFileEntries);
+        payload.put("updatedAt", Instant.now().toString());
+        broadcastMetaSyncEvent(task, noteKey, "anchor_delete", existingAnchorIds.isEmpty() ? "" : existingAnchorIds.get(0));
+        return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping("/tasks/{taskId}/anchors/{anchorId}/mounted")
+    public ResponseEntity<?> getMountedAnchorNote(
+            @PathVariable String taskId,
+            @PathVariable String anchorId,
+            @RequestParam(value = "path", required = false) String rawPath,
+            @RequestParam(value = "notePath", required = false) String rawNotePath
+    ) {
+        String normalizedAnchorId = trimToNullSafe(anchorId);
+        if (normalizedAnchorId == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorId cannot be empty"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, rawPath);
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+        Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(normalizedAnchorId));
+        if (anchorRecord.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("message", "anchor not found"));
+        }
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+        Map<String, Object> latestRevision = revisions.isEmpty() ? Map.of() : revisions.get(revisions.size() - 1);
+
+        String entryNotePath = stringValueOrNull(latestRevision.get("notePath"));
+        if (entryNotePath == null) {
+            entryNotePath = stringValueOrNull(anchorRecord.get("mountedPath"));
+        }
+        if (entryNotePath == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "mounted markdown not found"));
+        }
+        String revisionRelativeDir = stringValueOrNull(latestRevision.get("relativeDir"));
+        if (revisionRelativeDir == null) {
+            Path entryPath = Paths.get(entryNotePath).normalize();
+            Path entryParent = entryPath.getParent();
+            if (entryParent != null) {
+                revisionRelativeDir = entryParent.toString().replace('\\', '/');
+            }
+        }
+        String notePath = resolveMountedReadNotePath(rawNotePath, entryNotePath, revisionRelativeDir);
+        if (notePath == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal mounted note path"));
+        }
+        Path target = taskRoot.resolve(notePath).normalize();
+        if (!target.startsWith(taskRoot) || !Files.isRegularFile(target)) {
+            return ResponseEntity.status(404).body(Map.of("message", "mounted markdown file missing"));
+        }
+        if (revisionRelativeDir != null && !revisionRelativeDir.isBlank()) {
+            String normalizedRevisionRelativeDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+            if (normalizedRevisionRelativeDir != null) {
+                Path revisionDir = taskRoot.resolve(normalizedRevisionRelativeDir).normalize();
+                if (revisionDir.startsWith(taskRoot) && !target.startsWith(revisionDir)) {
+                    return ResponseEntity.badRequest().body(Map.of("message", "mounted note path out of revision"));
+                }
+            }
+        }
+
+        try {
+            String rawMarkdown = Files.readString(target, StandardCharsets.UTF_8);
+            String baseRelativeDir = "";
+            if (target.getParent() != null) {
+                baseRelativeDir = taskRoot.relativize(target.getParent()).toString().replace('\\', '/');
+            }
+            String renderedMarkdown = rewriteMountedMarkdownAssetLinks(rawMarkdown, task.taskId, baseRelativeDir);
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("taskId", task.taskId);
+            payload.put("pathKey", noteKey);
+            payload.put("anchorId", normalizedAnchorId);
+            payload.put("anchor", anchorRecord);
+            payload.put("latestRevision", latestRevision);
+            payload.put("entryNotePath", entryNotePath);
+            payload.put("notePath", notePath);
+            payload.put("assetBasePath", baseRelativeDir != null ? baseRelativeDir : "");
+            payload.put("markdown", renderedMarkdown);
+            payload.put("rawMarkdown", rawMarkdown);
+            payload.put("updatedAt", Instant.now().toString());
+            return ResponseEntity.ok(payload);
+        } catch (Exception ex) {
+            logger.warn("read mounted anchor note failed: taskId={} anchorId={} path={} err={}",
+                    taskId, normalizedAnchorId, notePath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read mounted markdown failed"));
+        }
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/telemetry", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> ingestTaskTelemetry(
+            @PathVariable String taskId,
+            @RequestBody TaskTelemetryIngestRequest request
+    ) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+        if (request == null || request.events == null || request.events.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "missing telemetry events"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, request.path);
+        Path telemetryPath = taskRoot.resolve(TELEMETRY_FILE_NAME).normalize();
+        if (!telemetryPath.startsWith(taskRoot)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "telemetry path is illegal"));
+        }
+
+        List<Map<String, Object>> accepted = new ArrayList<>();
+        for (TelemetryEventItem item : request.events) {
+            if (item == null) continue;
+            String eventType = trimToNullSafe(item.eventType);
+            if (eventType == null) continue;
+            String nodeId = trimToNullSafe(item.nodeId);
+
+            Map<String, Object> record = new LinkedHashMap<>();
+            record.put("taskId", task.taskId);
+            record.put("pathKey", noteKey);
+            record.put("nodeId", nodeId != null ? nodeId : "");
+            record.put("eventType", eventType);
+            record.put("relevanceScore", item.relevanceScore != null ? item.relevanceScore : 0.0d);
+            record.put("timestampMs", item.timestampMs != null ? item.timestampMs : System.currentTimeMillis());
+            record.put("ingestedAt", Instant.now().toString());
+            record.put("payload", sanitizeTelemetryPayload(item.payload));
+            accepted.add(record);
+        }
+
+        if (accepted.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "no valid telemetry events"));
+        }
+
+        try {
+            Files.createDirectories(taskRoot);
+            StringBuilder builder = new StringBuilder();
+            for (Map<String, Object> record : accepted) {
+                builder.append(objectMapper.writeValueAsString(record)).append('\n');
+            }
+            Files.writeString(
+                    telemetryPath,
+                    builder.toString(),
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.APPEND
+            );
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("taskId", task.taskId);
+            payload.put("pathKey", noteKey);
+            payload.put("accepted", accepted.size());
+            payload.put("telemetryPath", telemetryPath.toString());
+            payload.put("updatedAt", Instant.now().toString());
+            return ResponseEntity.ok(payload);
+        } catch (Exception ex) {
+            logger.warn("?? telemetry ??: taskId={} path={} err={}", taskId, telemetryPath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "?? telemetry ??"));
+        }
+    }
+
+    @GetMapping("/tasks/{taskId}/asset")
+    public ResponseEntity<?> getTaskAsset(
+            @PathVariable String taskId,
+            @RequestParam("path") String rawPath,
+            @RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader
+    ) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        if (rawPath == null || rawPath.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "?? path ??"));
+        }
+
+        ResolvedMarkdown resolved;
+        try {
+            resolved = resolveMarkdown(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "markdown root directory not found"));
+        }
+
+        String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
+        Path target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
+        if (target == null || !target.startsWith(resolved.baseDir)) {
+            return ResponseEntity.status(400).body(Map.of("message", "illegal path"));
+        }
+        if (!Files.exists(target) || !Files.isRegularFile(target)) {
+            return ResponseEntity.status(404).body(Map.of("message", "file not found"));
+        }
+
+        try {
+            long length = Files.size(target);
+            MediaType mediaType = detectMediaType(target);
+
+            if (rangeHeader != null && !rangeHeader.isBlank()) {
+                try {
+                    List<HttpRange> ranges = HttpRange.parseRanges(rangeHeader);
+                    if (!ranges.isEmpty()) {
+                        HttpRange range = ranges.get(0);
+                        long start = range.getRangeStart(length);
+                        long end = range.getRangeEnd(length);
+                        long regionLength = end - start + 1;
+                        InputStream fileStream = Files.newInputStream(target);
+                        fileStream.skip(start);
+                        InputStream bounded = new java.io.FilterInputStream(fileStream) {
+                            long remaining = regionLength;
+                            @Override public int read() throws IOException {
+                                if (remaining <= 0) return -1;
+                                int b = super.read();
+                                if (b >= 0) remaining--;
+                                return b;
+                            }
+                            @Override public int read(byte[] b, int off, int len) throws IOException {
+                                if (remaining <= 0) return -1;
+                                int n = super.read(b, off, (int) Math.min(len, remaining));
+                                if (n > 0) remaining -= n;
+                                return n;
+                            }
+                        };
+                        Resource rangeResource = new InputStreamResource(bounded);
+                        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                                .contentType(mediaType)
+                                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + length)
+                                .contentLength(regionLength)
+                                .body(rangeResource);
+                    }
+                } catch (Exception ex) {
+                    logger.warn("range request processing failed, falling back to full response: taskId={} path={} range={} err={}",
+                            taskId, target, rangeHeader, ex.getMessage());
+                }
+            }
+
+            InputStream inputStream = Files.newInputStream(target);
+            Resource resource = new InputStreamResource(inputStream);
+            return ResponseEntity.ok()
+                    .contentType(mediaType)
+                    .contentLength(length)
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .header(HttpHeaders.CACHE_CONTROL, "public, max-age=60")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + target.getFileName() + "\"")
+                    .body(resource);
+        } catch (IOException ex) {
+            logger.warn("read resource file failed: taskId={} path={} err={}", taskId, target, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read resource file failed"));
+        }
+    }
+
+    @GetMapping("/tasks/{taskId}/export")
+    public ResponseEntity<StreamingResponseBody> exportTaskBundle(
+            @PathVariable String taskId,
+            @RequestParam(value = "layout", defaultValue = "flat") String rawLayout
+    ) {
+        String layout = normalizeExportLayout(rawLayout);
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task not found");
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task directory not found", ex);
+        }
+        if (!Files.exists(taskRoot) || !Files.isDirectory(taskRoot)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task directory does not exist");
+        }
+
+        String filename = buildSafeExportFilename(task.taskId);
+        if ("raw".equals(layout)) {
+            final List<ExportFileEntry> exportEntries;
+            try {
+                exportEntries = collectExportEntries(taskRoot);
+            } catch (IOException ex) {
+                logger.warn("raw export task failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
+            }
+            if (exportEntries.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "no exportable markdown/video/screenshot assets found");
+            }
+            StreamingResponseBody rawBody = outputStream -> {
+                try (ZipOutputStream zos = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
+                    ExportZipResult zipResult = writeTaskExportZipStreaming(exportEntries, zos);
+                    zos.finish();
+                    logger.info("streaming raw export completed: taskId={} root={} exported={} skipped={}", taskId, taskRoot, zipResult.exportedCount, zipResult.skippedCount);
+                } catch (IOException ex) {
+                    logger.warn("streaming raw export failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+                    throw ex;
+                }
+            };
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType("application/zip"))
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                    .header("X-Export-Layout", layout)
+                    .body(rawBody);
+        }
+
+        final PreparedFlatExport flatExport = prepareFlatTaskExport(task, taskRoot, taskId);
+        final TaskBundleExportService.FlatTaskExportPlan exportPlan = flatExport.exportPlan();
+        final Path markdownPath = flatExport.markdownPath();
+        StreamingResponseBody flatBody = outputStream -> {
+            try (ZipOutputStream zos = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
+                TaskBundleExportService.ExportZipResult zipResult = taskBundleExportService.writeFlatZipStreaming(exportPlan, zos);
+                zos.finish();
+                logger.info("streaming flat export completed: taskId={} root={} markdown={} collectedFiles={} markdownCount={} binaryCount={} zipEntries={} bytes={}",
+                        taskId,
+                        taskRoot,
+                        markdownPath,
+                        exportPlan.collectedFileCount(),
+                        exportPlan.markdownCount(),
+                        exportPlan.binaryCount(),
+                        zipResult.exportedCount(),
+                        zipResult.exportedBytes());
+            } catch (IOException ex) {
+                logger.warn("streaming flat export failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+                throw ex;
+            }
+        };
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType("application/zip"))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                .header("X-Export-Layout", layout)
+                .body(flatBody);
+    }
+
+
+    @GetMapping("/tasks/{taskId}/export/files")
+    public ResponseEntity<Map<String, Object>> exportTaskFlatFilesManifest(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task not found");
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task directory not found", ex);
+        }
+        if (!Files.exists(taskRoot) || !Files.isDirectory(taskRoot)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task directory does not exist");
+        }
+        PreparedFlatExport flatExport = prepareFlatTaskExport(task, taskRoot, taskId);
+        try {
+            return ResponseEntity.ok(buildFlatExportFilesPayload(task.taskId, flatExport.exportPlan()));
+        } catch (IOException ex) {
+            logger.warn("build flat export files manifest failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
+        }
+    }
+
+
+    private PreparedFlatExport prepareFlatTaskExport(TaskView task, Path taskRoot, String taskId) {
+        try {
+            ResolvedMarkdown resolved = resolveMarkdown(task);
+            TaskBundleExportService.FlatTaskExportPlan exportPlan = taskBundleExportService.planFlatExport(task.taskId, taskRoot, resolved.markdownPath);
+            return new PreparedFlatExport(resolved.markdownPath, exportPlan);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, ex.getMessage(), ex);
+        } catch (IOException ex) {
+            logger.warn("flat export task failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
+        }
+    }
+
+    private Map<String, Object> buildFlatExportFilesPayload(String taskId, TaskBundleExportService.FlatTaskExportPlan exportPlan) throws IOException {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", taskId != null ? taskId : "");
+        payload.put("layout", "flat");
+        payload.put("mainMarkdown", exportPlan.mainMarkdownEntryName());
+        List<Map<String, Object>> files = new ArrayList<>();
+        for (TaskBundleExportService.PreparedZipEntry entry : exportPlan.entries()) {
+            files.add(buildFlatExportFileItem(taskId, entry));
+        }
+        payload.put("files", files);
+        return payload;
+    }
+
+    private Map<String, Object> buildFlatExportFileItem(String taskId, TaskBundleExportService.PreparedZipEntry entry) throws IOException {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("entryName", entry.entryName());
+        item.put("kind", entry.kind());
+        item.put("role", entry.role());
+        item.put("originalPath", entry.originalPath());
+        if (entry.anchorId() != null) {
+            item.put("anchorId", entry.anchorId());
+        }
+        if (entry.inlineBytes() != null) {
+            item.put("inlineText", new String(entry.inlineBytes(), StandardCharsets.UTF_8));
+            item.put("size", entry.inlineBytes().length);
+            item.put("encoding", "utf-8");
+        } else if (entry.sourcePath() != null) {
+            item.put("downloadUrl", buildTaskAssetDownloadUrl(taskId, entry.originalPath()));
+            item.put("size", Files.size(entry.sourcePath()));
+        }
+        return item;
+    }
+
+    private String buildTaskAssetDownloadUrl(String taskId, String relativePath) {
+        return "/api/mobile/tasks/"
+                + URLEncoder.encode(taskId != null ? taskId : "", StandardCharsets.UTF_8)
+                + "/asset?path="
+                + URLEncoder.encode(relativePath != null ? relativePath : "", StandardCharsets.UTF_8);
+    }
+
+    private String normalizeExportLayout(String rawLayout) {
+        String normalized = trimToNullSafe(rawLayout);
+        if (normalized == null) {
+            return "flat";
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if ("flat".equals(lower) || "raw".equals(lower)) {
+            return lower;
+        }
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported export layout");
+    }
+
+    private String buildSafeExportFilename(String taskId) {
+        String raw = taskId == null ? "task" : taskId.trim();
+        if (raw.isEmpty()) {
+            raw = "task";
+        }
+        String safe = raw.replace(':', '_').replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.isEmpty()) {
+            safe = "task";
+        }
+        return safe + "_bundle.zip";
+    }
+
+    private TaskViewCollectionSnapshot collectTaskViews(int page, int pageSize) {
+        int normalizedPage = Math.max(0, page);
+        if (normalizedPage == 0 && storageTaskCategoryService != null) {
+            storageTaskCategoryService.triggerBackfillAsync();
+        }
+        List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
+        Set<String> runtimeTaskIds = collectRuntimeTaskIds(runtimeTasks);
+        Set<String> runtimeStorageKeys = collectRuntimeStorageKeys(runtimeTasks);
+        com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult =
+                storageTaskCacheService.getTasks(normalizedPage, pageSize);
+
+        List<TaskView> finalViewList = new ArrayList<>();
+        boolean residualTaskPurged = false;
+        if (normalizedPage == 0) {
+            for (TaskEntry runtimeTask : runtimeTasks) {
+                finalViewList.add(fromRuntimeTask(runtimeTask));
+            }
+        }
+
+        for (com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached : storageResult.tasks) {
+            if (tryPurgeAbnormalResidualStorageTask(cached, runtimeTaskIds, runtimeStorageKeys)) {
+                residualTaskPurged = true;
+                continue;
+            }
+            finalViewList.add(fromCachedTask(cached));
+        }
+        finalViewList = deduplicateTaskViews(finalViewList);
+        finalViewList.sort(Comparator.comparingLong(this::taskCreatedSortTimestamp)
+                .thenComparing(task -> trimToNullSafe(task.title) != null ? trimToNullSafe(task.title) : "")
+                .thenComparing(task -> trimToNullSafe(task.taskId) != null ? trimToNullSafe(task.taskId) : ""));
+
+        Map<String, CollectionRepository.EpisodeTaskBinding> bindingByTaskId = findCollectionBindingByTaskId(finalViewList);
+        Map<String, CategoryClassificationResultsRepository.CategoryAssignment> categoryAssignmentsByTaskPath =
+                findCategoryAssignmentsByTaskPath(finalViewList);
+        for (TaskView task : finalViewList) {
+            task.taskPath = resolveTaskPath(task);
+            attachCollectionBinding(task, bindingByTaskId.get(task.taskId));
+            attachCategoryAssignment(task, categoryAssignmentsByTaskPath.get(task.taskPath));
+            attachTaskCostSummary(task);
+        }
+        return new TaskViewCollectionSnapshot(finalViewList, residualTaskPurged);
+    }
+
+    private Set<String> collectRuntimeTaskIds(List<TaskEntry> runtimeTasks) {
+        Set<String> runtimeTaskIds = new LinkedHashSet<>();
+        if (runtimeTasks == null || runtimeTasks.isEmpty()) {
+            return runtimeTaskIds;
+        }
+        for (TaskEntry runtimeTask : runtimeTasks) {
+            String taskId = trimToNullSafe(runtimeTask != null ? runtimeTask.taskId : null);
+            if (taskId != null) {
+                runtimeTaskIds.add(taskId);
+            }
+        }
+        return runtimeTaskIds;
+    }
+
+    private Set<String> collectRuntimeStorageKeys(List<TaskEntry> runtimeTasks) {
+        Set<String> runtimeStorageKeys = new LinkedHashSet<>();
+        if (runtimeTasks == null || runtimeTasks.isEmpty()) {
+            return runtimeStorageKeys;
+        }
+        for (TaskEntry runtimeTask : runtimeTasks) {
+            String storageKey = trimToNullSafe(resolveRuntimeStorageKey(runtimeTask));
+            if (storageKey != null) {
+                runtimeStorageKeys.add(storageKey);
+            }
+        }
+        return runtimeStorageKeys;
+    }
+
+    // 复用既有删除链路清理孤儿 UNKNOWN 存储任务，避免脏目录在每次列表聚合时反复回流到前端。
+    private boolean tryPurgeAbnormalResidualStorageTask(
+            com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached,
+            Set<String> runtimeTaskIds,
+            Set<String> runtimeStorageKeys
+    ) {
+        if (!isAbnormalResidualStorageTask(cached)) {
+            return false;
+        }
+        String cachedTaskId = trimToNullSafe(cached.taskId);
+        String cachedStorageKey = trimToNullSafe(cached.storageKey);
+        if (cachedTaskId != null && runtimeTaskIds.contains(cachedTaskId)) {
+            return false;
+        }
+        if (cachedStorageKey != null && runtimeStorageKeys.contains(cachedStorageKey)) {
+            return false;
+        }
+
+        String deleteIdentity = cachedTaskId != null ? cachedTaskId : STORAGE_TASK_PREFIX + cachedStorageKey;
+        StorageDeleteResult storageDelete = deleteStorageTaskByTaskId(deleteIdentity);
+        if (!storageDelete.success) {
+            logger.warn(
+                    "purge abnormal residual task skipped: taskId={} storageKey={} message={}",
+                    cachedTaskId,
+                    cachedStorageKey,
+                    storageDelete.message
+            );
+            return false;
+        }
+        if (cachedTaskId != null) {
+            try {
+                deletePersistedTaskState(cachedTaskId);
+            } catch (Exception ex) {
+                logger.warn("purge abnormal residual persisted state failed: taskId={} err={}", cachedTaskId, ex.getMessage());
+            }
+            clearTaskCleanupIndexQuietly(cachedTaskId);
+        }
+        logger.info(
+                "purged abnormal residual task during task listing: taskId={} storageKey={} deleted={} found={}",
+                cachedTaskId,
+                cachedStorageKey,
+                storageDelete.deleted,
+                storageDelete.found
+        );
+        return true;
+    }
+
+    private boolean isAbnormalResidualStorageTask(
+            com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached
+    ) {
+        if (cached == null || cached.markdownAvailable) {
+            return false;
+        }
+        String storageKey = trimToNullSafe(cached.storageKey);
+        if (storageKey == null || !isSafeStorageKey(storageKey)) {
+            return false;
+        }
+        return "UNKNOWN".equals(normalizeTaskStatusToken(cached.status));
+    }
+
+    private List<TaskView> filterTaskViews(List<TaskView> tasks, boolean onlyMultiSegment, Set<String> statusFilter) {
+        if (tasks == null || tasks.isEmpty()) {
+            return List.of();
+        }
+        List<TaskView> filtered = new ArrayList<>(tasks.size());
+        for (TaskView task : tasks) {
+            if (task == null) {
+                continue;
+            }
+            if (!statusFilter.isEmpty()) {
+                String normalizedStatus = normalizeTaskStatusToken(task.status);
+                if (normalizedStatus.isEmpty() || !statusFilter.contains(normalizedStatus)) {
+                    continue;
+                }
+            }
+            if (onlyMultiSegment && !isTaskMultiSegmentReadable(task) && !shouldBypassMultiSegmentFilter(task)) {
+                continue;
+            }
+            filtered.add(task);
+        }
+        return filtered;
+    }
+
+    private boolean shouldBypassMultiSegmentFilter(TaskView task) {
+        if (task == null) {
+            return false;
+        }
+        String normalizedStatus = normalizeTaskStatusToken(task.status);
+        return "FAILED".equals(normalizedStatus)
+                || "MANUAL_RETRY_REQUIRED".equals(normalizedStatus)
+                || "FATAL".equals(normalizedStatus);
+    }
+
+    private Set<String> parseTaskStatusFilter(String rawStatuses) {
+        String normalized = trimToNullSafe(rawStatuses);
+        if (normalized == null) {
+            return Set.of();
+        }
+        Set<String> statuses = new LinkedHashSet<>();
+        for (String token : normalized.split(",")) {
+            String status = normalizeTaskStatusToken(token);
+            if (!status.isEmpty()) {
+                statuses.add(status);
+            }
+        }
+        return statuses;
+    }
+
+    private List<String> normalizeRequestedTaskIds(List<String> rawTaskIds, int limit) {
+        if (rawTaskIds == null || rawTaskIds.isEmpty()) {
+            return List.of();
+        }
+        int normalizedLimit = Math.max(1, Math.min(500, limit));
+        Set<String> deduplicated = new LinkedHashSet<>();
+        for (String rawTaskId : rawTaskIds) {
+            String normalizedTaskId = trimToNullSafe(rawTaskId);
+            if (normalizedTaskId == null) {
+                continue;
+            }
+            deduplicated.add(normalizedTaskId);
+            if (deduplicated.size() >= normalizedLimit) {
+                break;
+            }
+        }
+        return new ArrayList<>(deduplicated);
+    }
+
+    private boolean isTerminalReconcileStatus(String rawStatus) {
+        String normalizedStatus = taskStatusPresentationService.normalizeStatusUpper(rawStatus);
+        return "COMPLETED".equals(normalizedStatus)
+                || "FAILED".equals(normalizedStatus)
+                || "CANCELLED".equals(normalizedStatus);
+    }
+
+    private String normalizeTaskStatusToken(String rawStatus) {
+        String normalized = trimToNullSafe(rawStatus);
+        if (normalized == null) {
+            return "";
+        }
+        return normalized.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private boolean isCompactTaskListView(String rawView) {
+        String normalized = trimToNullSafe(rawView);
+        if (normalized == null) {
+            return false;
+        }
+        return "compact".equalsIgnoreCase(normalized.trim());
+    }
+
+    private long calculateTaskListSyncVersion(List<TaskView> tasks) {
+        long version = 0L;
+        if (tasks == null || tasks.isEmpty()) {
+            return version;
+        }
+        for (TaskView task : tasks) {
+            version = Math.max(version, computeTaskSyncVersion(task));
+        }
+        return version;
+    }
+
+    private long computeTaskSyncVersion(TaskView task) {
+        if (task == null) {
+            return 0L;
+        }
+        long version = 0L;
+        if (task.runtimeUpdatedAt != null) {
+            version = Math.max(version, task.runtimeUpdatedAt.toEpochMilli());
+        }
+        if (task.metaUpdatedAt != null) {
+            version = Math.max(version, task.metaUpdatedAt.toEpochMilli());
+        }
+        if (task.lastOpenedAt != null) {
+            version = Math.max(version, task.lastOpenedAt.toEpochMilli());
+        }
+        if (task.completedAt != null) {
+            version = Math.max(version, task.completedAt.toEpochMilli());
+        }
+        if (task.costUpdatedAt != null) {
+            version = Math.max(version, task.costUpdatedAt.toEpochMilli());
+        }
+        if (task.createdAt != null) {
+            version = Math.max(version, task.createdAt.toEpochMilli());
+        }
+        return version;
+    }
+
+    private Map<String, Object> toListItem(TaskView task, boolean compactView) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        String displayTitle = task.title != null && !task.title.isBlank() ? task.title : task.taskId;
+        item.put("taskId", task.taskId);
+        item.put("title", displayTitle);
+        item.put("metaTitle", task.metaTitle != null ? task.metaTitle : "");
+        item.put("titleSource", resolveTaskTitleSource(task));
+        item.put("videoUrl", task.videoUrl != null ? task.videoUrl : "");
+        item.put("status", task.status != null ? task.status : "");
+        item.put("createdAt", instantToText(task.createdAt));
+        item.put("lastOpenedAt", instantToText(task.lastOpenedAt));
+        item.put("runtimeUpdatedAt", instantToText(task.runtimeUpdatedAt));
+        item.put("markdownAvailable", task.markdownAvailable);
+        item.put("source", task.storageTask ? "storage" : "runtime");
+        item.put("storageKey", task.storageKey != null ? task.storageKey : "");
+        item.put("bookTitle", task.bookTitle != null ? task.bookTitle : "");
+        item.put("bookLeafTitle", task.bookLeafTitle != null ? task.bookLeafTitle : "");
+        item.put("bookLeafOutlineIndex", task.bookLeafOutlineIndex != null ? task.bookLeafOutlineIndex : "");
+        item.put("progress", task.progress);
+        item.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        item.put("userMessage", task.userMessage != null ? task.userMessage : "");
+        item.put("errorMessage", task.errorMessage != null ? task.errorMessage : "");
+        item.put("collectionId", task.collectionId != null ? task.collectionId : "");
+        item.put("collectionTitle", task.collectionTitle != null ? task.collectionTitle : "");
+        item.put("collectionPath", task.collectionPath != null ? task.collectionPath : "");
+        item.put("categoryPath", task.categoryPath != null ? task.categoryPath : "");
+        item.put("taskPath", task.taskPath != null ? task.taskPath : "");
+        item.put("archived", task.archived);
+        item.put("archivedAt", task.archivedAt != null ? instantToText(task.archivedAt) : "");
+        item.put("manualCollection", task.manualCollection);
+        item.put("taskCostSummary", task.taskCostSummary != null ? task.taskCostSummary : "");
+        if (task.taskCost != null && !task.taskCost.isEmpty()) {
+            item.put("taskCost", new LinkedHashMap<>(task.taskCost));
+        }
+        taskStatusPresentationService.appendRecoveryFields(item, task.status, task.recoveryPayload);
+        appendFallbackRepairFields(item, task.runtimeTask);
+        if (!compactView) {
+            item.put("completedAt", instantToText(task.completedAt));
+            item.put("resultPath", task.resultPath != null ? task.resultPath : "");
+            item.put("markdownPath", task.markdownPath != null ? task.markdownPath.toString() : "");
+            item.put("domain", task.domain != null ? task.domain : "");
+            item.put("mainTopic", task.mainTopic != null ? task.mainTopic : "");
+            item.put("episodeNo", task.episodeNo);
+            item.put("episodeTitle", task.episodeTitle != null ? task.episodeTitle : "");
+            item.put("totalEpisodes", task.totalEpisodes);
+        }
+        return item;
+    }
+
+    private void appendFallbackRepairFields(Map<String, Object> response, TaskEntry task) {
+        if (response == null || task == null || taskRuntimeRecoveryService == null) {
+            return;
+        }
+        try {
+            Optional<TaskRuntimeRecoveryService.FallbackRepairDirective> directiveOpt =
+                    taskRuntimeRecoveryService.resolveFallbackRepairDirective(task);
+            if (directiveOpt.isEmpty()) {
+                return;
+            }
+            Map<String, Object> payload = new LinkedHashMap<>(directiveOpt.get().toPayload());
+            response.put("fallbackRepairAvailable", true);
+            response.put("fallbackRepair", payload);
+            response.put("repairMode", String.valueOf(payload.getOrDefault("repairMode", "")));
+            response.put("repairStage", String.valueOf(payload.getOrDefault("repairStage", "")));
+            response.put("repairScopeCount", payload.getOrDefault("repairScopeCount", 0));
+        } catch (Exception error) {
+            logger.debug("Append fallback repair fields skipped: taskId={} err={}", task.taskId, error.getMessage());
+        }
+    }
+
+    private Map<String, CollectionRepository.EpisodeTaskBinding> findCollectionBindingByTaskId(List<TaskView> tasks) {
+        if (collectionRepository == null || tasks == null || tasks.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> taskIds = new LinkedHashSet<>();
+        for (TaskView task : tasks) {
+            if (task == null || task.taskId == null || task.taskId.isBlank()) {
+                continue;
+            }
+            if (task.storageTask || task.taskId.startsWith(STORAGE_TASK_PREFIX)) {
+                continue;
+            }
+            taskIds.add(task.taskId);
+        }
+        if (taskIds.isEmpty()) {
+            return Map.of();
+        }
+        return collectionRepository.findEpisodeBindingsByTaskIds(taskIds);
+    }
+
+    private void attachCollectionBinding(TaskView task, CollectionRepository.EpisodeTaskBinding binding) {
+        if (task == null || binding == null) {
+            return;
+        }
+        task.collectionId = binding.collectionId;
+        task.episodeNo = binding.episodeNo;
+        task.episodeTitle = binding.episodeTitle;
+        task.collectionTitle = binding.collectionTitle;
+        task.totalEpisodes = binding.totalEpisodes;
+    }
+
+    private Map<String, CategoryClassificationResultsRepository.CategoryAssignment> findCategoryAssignmentsByTaskPath(
+            List<TaskView> tasks
+    ) {
+        if (categoryClassificationResultsRepository == null || tasks == null || tasks.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> taskPaths = new LinkedHashSet<>();
+        for (TaskView task : tasks) {
+            String taskPath = resolveTaskPath(task);
+            if (taskPath.isEmpty()) {
+                continue;
+            }
+            taskPaths.add(taskPath);
+        }
+        if (taskPaths.isEmpty()) {
+            return Map.of();
+        }
+        return categoryClassificationResultsRepository.findCategoryAssignmentsByTaskPaths(taskPaths);
+    }
+
+    private void attachCategoryAssignment(
+            TaskView task,
+            CategoryClassificationResultsRepository.CategoryAssignment assignment
+    ) {
+        if (task == null) {
+            return;
+        }
+        String categoryPath = assignment != null
+                ? TaskManualCollectionRepository.normalizeCollectionPath(assignment.categoryPath())
+                : "";
+        task.categoryPath = categoryPath;
+        task.archived = assignment != null && assignment.archived();
+        task.manualCollection = assignment != null && assignment.manualBinding();
+        task.archivedAt = parseInstantQuietly(assignment != null ? assignment.archivedAt() : "");
+
+        if (!task.archived || categoryPath.isEmpty()) {
+            task.collectionPath = "";
+            task.collectionId = "";
+            task.collectionTitle = "";
+            task.episodeNo = null;
+            task.episodeTitle = null;
+            task.totalEpisodes = null;
+            return;
+        }
+        task.collectionPath = categoryPath;
+        String terminal = lastPathSegment(categoryPath);
+        task.collectionId = "manual-path::" + categoryPath;
+        task.collectionTitle = terminal.isEmpty() ? categoryPath : terminal;
+        task.episodeNo = null;
+        task.episodeTitle = null;
+        task.totalEpisodes = null;
+    }
+
+    private Instant parseInstantQuietly(String rawInstant) {
+        String normalized = trimToNullSafe(rawInstant);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(normalized);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String resolveTaskPath(TaskView task) {
+        if (task == null) {
+            return "";
+        }
+        if (task.storageKey != null && !task.storageKey.isBlank()) {
+            return "storage/" + TaskManualCollectionRepository.normalizeTaskPath(task.storageKey);
+        }
+        if (task.taskRootDir != null) {
+            String normalized = TaskManualCollectionRepository.normalizeTaskPath(task.taskRootDir.toString());
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        if (task.markdownPath != null) {
+            String normalized = TaskManualCollectionRepository.normalizeTaskPath(task.markdownPath.toString());
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        if (task.resultPath != null && !task.resultPath.isBlank()) {
+            String normalized = TaskManualCollectionRepository.normalizeTaskPath(task.resultPath);
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        if (task.taskId != null && !task.taskId.isBlank()) {
+            return "task/" + TaskManualCollectionRepository.normalizeTaskPath(task.taskId);
+        }
+        return "";
+    }
+
+    private void attachTaskCostSummary(TaskView task) {
+        if (task == null || task.taskRootDir == null || taskCostSummaryService == null) {
+            return;
+        }
+        taskCostSummaryService.readSummary(task.taskRootDir).ifPresent(summary -> {
+            task.taskCost = new LinkedHashMap<>(summary.toPayload());
+            task.taskCostSummary = summary.displayText();
+            task.costUpdatedAt = summary.updatedAtInstant();
+        });
+    }
+
+    private String lastPathSegment(String normalizedPath) {
+        String source = normalizedPath == null ? "" : normalizedPath.trim();
+        if (source.isEmpty()) {
+            return "";
+        }
+        int slashAt = source.lastIndexOf('/');
+        if (slashAt < 0 || slashAt >= source.length() - 1) {
+            return source;
+        }
+        return source.substring(slashAt + 1).trim();
+    }
+
+    private boolean isCollectionInputValid(String collectionId, Integer episodeNo) {
+        boolean hasCollectionId = collectionId != null && !collectionId.trim().isEmpty();
+        boolean hasEpisodeNo = episodeNo != null;
+        if (hasCollectionId != hasEpisodeNo) {
+            return false;
+        }
+        if (hasEpisodeNo) {
+            return episodeNo > 0;
+        }
+        return true;
+    }
+
+    private void linkCollectionEpisodeIfNecessary(String collectionId, Integer episodeNo, String taskId) {
+        if (!isCollectionInputValid(collectionId, episodeNo) || collectionRepository == null || episodeNo == null) {
+            return;
+        }
+        boolean linked = collectionRepository.linkTaskToEpisode(collectionId.trim(), episodeNo, taskId);
+        if (!linked) {
+            logger.warn("link collection episode failed: collectionId={} episodeNo={} taskId={}",
+                    collectionId, episodeNo, taskId);
+        }
+    }
+
+    private boolean isTaskMultiSegmentReadable(TaskView task) {
+        if (task == null || !task.markdownAvailable) {
+            return false;
+        }
+        Path markdownPath = task.markdownPath;
+        if (markdownPath == null) {
+            try {
+                ResolvedMarkdown resolved = resolveMarkdown(task);
+                markdownPath = resolved.markdownPath;
+            } catch (Exception ex) {
+                return false;
+            }
+        }
+        if (markdownPath == null || !Files.isRegularFile(markdownPath)) {
+            return false;
+        }
+        return countMarkdownSegments(markdownPath, 2) >= 2;
+    }
+
+    private int countMarkdownSegments(Path markdownPath, int maxCount) {
+        int segmentCount = 0;
+        boolean inSegment = false;
+        try (BufferedReader reader = Files.newBufferedReader(markdownPath, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.trim().isEmpty()) {
+                    inSegment = false;
+                    continue;
+                }
+                if (!inSegment) {
+                    segmentCount += 1;
+                    if (segmentCount >= maxCount) {
+                        return segmentCount;
+                    }
+                    inSegment = true;
+                }
+            }
+        } catch (IOException ex) {
+            logger.debug("count markdown segments failed: path={} err={}", markdownPath, ex.getMessage());
+            return 0;
+        }
+        return segmentCount;
+    }
+
+    private String resolveTaskTitleSource(TaskView task) {
+        if (task == null) {
+            return "taskId";
+        }
+        if (task.metaTitle != null && !task.metaTitle.isBlank()) {
+            return "meta";
+        }
+        if (task.videoUrl != null && !task.videoUrl.isBlank()) {
+            return "video";
+        }
+        String normalizedTitle = normalizeTaskTitleToken(task.title);
+        String normalizedTaskId = normalizeTaskTitleToken(task.taskId);
+        if (normalizedTitle != null) {
+            if (normalizedTaskId != null && normalizedTitle.equals(normalizedTaskId)) {
+                return "taskId";
+            }
+            if (isStorageFallbackTitle(task, normalizedTitle)) {
+                return "taskId";
+            }
+            return "title";
+        }
+        return "taskId";
+    }
+
+    private String normalizeTaskTitleToken(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private boolean isStorageFallbackTitle(TaskView task, String normalizedTitle) {
+        if (task == null || !task.storageTask || normalizedTitle == null) {
+            return false;
+        }
+        String storageKey = normalizeTaskTitleToken(task.storageKey);
+        if (storageKey != null && normalizedTitle.equals(storageKey)) {
+            return true;
+        }
+        String taskId = normalizeTaskTitleToken(task.taskId);
+        if (taskId == null) {
+            return false;
+        }
+        if (normalizedTitle.equals(taskId)) {
+            return true;
+        }
+        if (taskId.startsWith(STORAGE_TASK_PREFIX)) {
+            return normalizedTitle.equals(taskId.substring(STORAGE_TASK_PREFIX.length()));
+        }
+        return false;
+    }
+
+    private TaskView resolveTaskView(String taskId) {
+        if (taskId == null || taskId.isBlank()) {
+            return null;
+        }
+
+        TaskEntry runtimeTask = taskQueueManager.getTask(taskId);
+        if (runtimeTask != null) {
+            return fromRuntimeTask(runtimeTask);
+        }
+
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> cachedByTaskIdOpt =
+                storageTaskCacheService.getTaskByTaskId(taskId);
+        if (cachedByTaskIdOpt.isPresent()) {
+            TaskView view = fromCachedTask(cachedByTaskIdOpt.get());
+            view.taskId = taskId;
+            return view;
+        }
+
+        String storageKey = null;
+        if (taskId.startsWith(STORAGE_TASK_PREFIX)) {
+            storageKey = taskId.substring(STORAGE_TASK_PREFIX.length());
+        } else if (isSafeStorageKey(taskId)) {
+            // Backward compatibility: when storage: prefix is missing, fall back to resolving by directory name.
+            storageKey = taskId;
+        }
+        if (storageKey == null || storageKey.isBlank()) {
+            return null;
+        }
+        
+        // Query task from storage cache service
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> cachedOpt = 
+                storageTaskCacheService.getTask(storageKey);
+        return cachedOpt.map(this::fromCachedTask).orElse(null);
+    }
+
+    private String resolveReaderUserId(TaskView task, String requestUserId) {
+        String fromRequest = trimToNullSafe(requestUserId);
+        if (fromRequest != null) {
+            return fromRequest;
+        }
+        if (task != null && task.runtimeTask != null) {
+            String fromRuntime = trimToNullSafe(task.runtimeTask.userId);
+            if (fromRuntime != null) {
+                return fromRuntime;
+            }
+        }
+        return null;
+    }
+
+    private void broadcastMetaSyncEvent(TaskView task, String pathKey, String changeKind, String anchorId) {
+        if (taskWebSocketHandler == null || task == null) {
+            return;
+        }
+        String userId = resolveReaderUserId(task, null);
+        taskWebSocketHandler.broadcastTaskMetaSync(
+                task.taskId,
+                userId,
+                pathKey,
+                changeKind,
+                anchorId
+        );
+    }
+
+    private void appendDisabledPersonalizationState(Map<String, Object> response) {
+        if (response == null) {
+            return;
+        }
+        response.put("personalizationIncluded", false);
+        response.put("personalizationWarmupStatus", "disabled");
+    }
+
+    private TaskView fromRuntimeTask(TaskEntry task) {
+        TaskView view = new TaskView();
+        view.taskId = task.taskId;
+        view.storageKey = resolveRuntimeStorageKey(task);
+        String lockedTitle = trimToNullSafe(task.title);
+        view.title = lockedTitle != null ? lockedTitle : deriveTaskTitle(task.videoUrl, task.taskId);
+        view.videoUrl = task.videoUrl;
+        view.status = task.status != null ? task.status.name() : TaskStatus.QUEUED.name();
+        view.createdAt = task.createdAt;
+        view.completedAt = task.completedAt;
+        view.runtimeUpdatedAt = task.updatedAt;
+        view.resultPath = task.resultPath;
+        view.progress = task.progress;
+        view.statusMessage = task.statusMessage;
+        view.userMessage = trimToNullSafe(task.userMessage);
+        view.errorMessage = trimToNullSafe(task.errorMessage);
+        view.recoveryPayload = taskStatusPresentationService.sanitizeRecoveryPayload(task.recoveryPayload);
+        view.runtimeTask = task;
+        view.taskRootDir = resolveRuntimeTaskRootDir(task);
+        applyRuntimeBookLeafIdentity(view, task);
+
+        try {
+            ResolvedMarkdown resolved = resolveMarkdown(task);
+            view.markdownAvailable = true;
+            view.markdownPath = resolved.markdownPath;
+            view.baseDir = resolved.baseDir;
+            view.taskRootDir = resolved.baseDir;
+            if (view.resultPath == null || view.resultPath.isBlank()) {
+                view.resultPath = resolved.markdownPath.toString();
+            }
+        } catch (Exception ignored) {
+            view.markdownAvailable = false;
+            if (task.resultPath != null && !task.resultPath.isBlank()) {
+                try {
+                    Path path = Paths.get(task.resultPath).toAbsolutePath().normalize();
+                    if (Files.isDirectory(path)) {
+                        view.taskRootDir = path;
+                    } else if (Files.isRegularFile(path) && path.getParent() != null) {
+                        view.taskRootDir = path.getParent();
+                    }
+                } catch (Exception ex) {
+                    // Ignore fallback resolution errors and keep returning runtime task view.
+                }
+            }
+        }
+
+        applyTaskTitleFromMeta(view);
+
+        return view;
+    }
+
+    private TaskView fromCachedTask(com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached) {
+        TaskView view = new TaskView();
+        String cachedTaskId = trimToNullSafe(cached.taskId);
+        if (cachedTaskId != null) {
+            view.taskId = cachedTaskId;
+        } else {
+            view.taskId = STORAGE_TASK_PREFIX + cached.storageKey;
+        }
+        view.storageKey = cached.storageKey;
+        view.storageTask = true;
+        view.title = cached.title;
+        view.videoUrl = cached.videoUrl;
+        view.status = cached.status;
+        view.statusMessage = cached.statusMessage;
+        view.userMessage = trimToNullSafe(cached.userMessage);
+        view.errorMessage = trimToNullSafe(cached.errorMessage);
+        view.createdAt = cached.createdAt;
+        view.completedAt = cached.completedAt;
+        view.resultPath = cached.resultPath;
+        view.markdownAvailable = cached.markdownAvailable;
+        view.markdownPath = cached.markdownPath;
+        view.baseDir = cached.baseDir;
+        view.taskRootDir = cached.taskRootDir;
+        view.progress = cached.progress;
+        view.bookTitle = trimToNullSafe(cached.bookTitle);
+        view.bookLeafTitle = trimToNullSafe(cached.bookLeafTitle);
+        view.bookLeafOutlineIndex = trimToNullSafe(cached.bookLeafOutlineIndex);
+        
+        applyTaskTitleFromMeta(view);
+        return view;
+    }
+
+    private Path resolveRuntimeTaskRootDir(TaskEntry task) {
+        if (task == null) {
+            return null;
+        }
+        Path fromOutputDir = toDirectoryPath(task.outputDir);
+        if (fromOutputDir != null) {
+            return fromOutputDir;
+        }
+        return toDirectoryPath(task.resultPath);
+    }
+
+    private Path toDirectoryPath(String rawPath) {
+        String normalized = trimToNullSafe(rawPath);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            Path path = Paths.get(normalized).toAbsolutePath().normalize();
+            if (Files.isDirectory(path)) {
+                return path;
+            }
+            if (Files.isRegularFile(path)) {
+                return path.getParent();
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private void applyRuntimeBookLeafIdentity(TaskView view, TaskEntry task) {
+        if (view == null || task == null || task.bookOptions == null) {
+            return;
+        }
+        view.bookTitle = trimToNullSafe(task.bookOptions.bookTitle);
+        view.bookLeafTitle = trimToNullSafe(task.bookOptions.leafTitle);
+        view.bookLeafOutlineIndex = trimToNullSafe(task.bookOptions.leafOutlineIndex);
+    }
+
+    private ResolvedMarkdown resolveMarkdown(TaskView task) throws IOException {
+        if (task.markdownAvailable && task.markdownPath != null && task.baseDir != null) {
+            return new ResolvedMarkdown(task.markdownPath, task.baseDir);
+        }
+        if (task.runtimeTask != null) {
+            return resolveMarkdown(task.runtimeTask);
+        }
+        if (task.storageTask && task.storageKey != null) {
+            Path taskDir = resolveStorageRoot().resolve(task.storageKey).normalize();
+            if (Files.isDirectory(taskDir)) {
+                return resolveMarkdownInDirectory(taskDir, task.resultPath);
+            }
+        }
+        throw new IllegalArgumentException("markdown is not generated for this task yet");
+    }
+
+    private ResolvedMarkdown resolveMarkdown(TaskEntry task) throws IOException {
+        if (task == null || task.resultPath == null || task.resultPath.isBlank()) {
+            throw new IllegalArgumentException("markdown is not generated for this task yet");
+        }
+        Path resultPath = Paths.get(task.resultPath).toAbsolutePath().normalize();
+        if (!Files.exists(resultPath)) {
+            throw new IllegalArgumentException("result path does not exist: " + resultPath);
+        }
+        if (Files.isRegularFile(resultPath) && isMarkdownFile(resultPath.getFileName().toString())) {
+            return new ResolvedMarkdown(resultPath, resultPath.getParent());
+        }
+
+        Path searchRoot = Files.isDirectory(resultPath)
+                ? resultPath
+                : Optional.ofNullable(resultPath.getParent()).orElse(resultPath);
+        return resolveMarkdownInDirectory(searchRoot, null);
+    }
+
+    private ResolvedMarkdown resolveMarkdownInDirectory(Path searchRoot, String preferredPath) throws IOException {
+        if (!Files.exists(searchRoot) || !Files.isDirectory(searchRoot)) {
+            throw new IllegalArgumentException("no available markdown directory found");
+        }
+
+        if (preferredPath != null && !preferredPath.isBlank()) {
+            try {
+                Path preferred = Paths.get(preferredPath).toAbsolutePath().normalize();
+                if (Files.isRegularFile(preferred) && preferred.startsWith(searchRoot) && isMarkdownFile(preferred.getFileName().toString())) {
+                    return new ResolvedMarkdown(preferred, preferred.getParent());
+                }
+            } catch (Exception ignored) {
+                // Fallback to directory scan.
+            }
+        }
+
+        Path defaultMarkdown = searchRoot.resolve(DEFAULT_MARKDOWN_NAME);
+        if (Files.isRegularFile(defaultMarkdown)) {
+            Path normalized = defaultMarkdown.toAbsolutePath().normalize();
+            return new ResolvedMarkdown(normalized, normalized.getParent());
+        }
+
+        List<Path> markdownFiles = new ArrayList<>();
+        try (Stream<Path> stream = Files.walk(searchRoot, MARKDOWN_SCAN_DEPTH)) {
+            stream.filter(Files::isRegularFile)
+                    .filter(path -> isMarkdownFile(path.getFileName().toString()))
+                    .filter(path -> !containsHiddenSegment(searchRoot, path))
+                    .forEach(markdownFiles::add);
+        }
+
+        if (markdownFiles.isEmpty()) {
+            throw new IllegalArgumentException("markdown file not found");
+        }
+
+        markdownFiles.sort(
+                Comparator.comparingInt((Path path) -> markdownNamePriority(path.getFileName().toString()))
+                        .thenComparing(Comparator.comparingLong(this::safeLastModifiedMillis).reversed())
+        );
+        Path selected = markdownFiles.get(0).toAbsolutePath().normalize();
+        return new ResolvedMarkdown(selected, selected.getParent());
+    }
+
+    private boolean containsHiddenSegment(Path root, Path candidate) {
+        Path relative;
+        try {
+            relative = root.toAbsolutePath().normalize().relativize(candidate.toAbsolutePath().normalize());
+        } catch (Exception ex) {
+            return false;
+        }
+        for (Path part : relative) {
+            if (part.toString().startsWith(".")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Path resolveAssetTargetPath(Path baseDir, String decodedPath) {
+        String normalized = normalizeRequestedAssetPath(decodedPath);
+        if (normalized == null) {
+            return null;
+        }
+        List<String> segments = splitRequestedAssetPath(normalized);
+        if (segments == null || segments.isEmpty()) {
+            return null;
+        }
+
+        Path directTarget = tryResolveRelativeAssetPath(baseDir, segments);
+        if (directTarget != null && Files.exists(directTarget)) {
+            return directTarget;
+        }
+
+        Path displayNameTarget = tryResolveDisplayNameAssetPath(baseDir, segments);
+        if (displayNameTarget != null && Files.exists(displayNameTarget)) {
+            return displayNameTarget;
+        }
+
+        if (directTarget != null) {
+            return directTarget;
+        }
+        return displayNameTarget;
+    }
+
+    private String normalizeRequestedAssetPath(String decodedPath) {
+        String normalized = decodedPath == null ? "" : decodedPath.trim();
+        while (normalized.startsWith("/") || normalized.startsWith("\\")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private List<String> splitRequestedAssetPath(String normalizedPath) {
+        if (normalizedPath == null || normalizedPath.isBlank()) {
+            return null;
+        }
+        String[] rawSegments = normalizedPath.replace('\\', '/').split("/+");
+        List<String> segments = new ArrayList<>();
+        for (String rawSegment : rawSegments) {
+            if (rawSegment == null || rawSegment.isEmpty()) {
+                continue;
+            }
+            String logicalSegment = rawSegment.trim();
+            if (logicalSegment.isEmpty() || ".".equals(logicalSegment) || "..".equals(logicalSegment)) {
+                return null;
+            }
+            segments.add(rawSegment);
+        }
+        return segments.isEmpty() ? null : segments;
+    }
+
+    private Path tryResolveRelativeAssetPath(Path baseDir, List<String> segments) {
+        if (baseDir == null || segments == null || segments.isEmpty()) {
+            return null;
+        }
+        Path candidate = baseDir;
+        for (String segment : segments) {
+            try {
+                candidate = candidate.resolve(segment);
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+        return candidate.normalize();
+    }
+
+    private Path tryResolveDisplayNameAssetPath(Path baseDir, List<String> segments) {
+        if (baseDir == null || segments == null || segments.isEmpty()) {
+            return null;
+        }
+
+        Path currentDir = baseDir;
+        for (int index = 0; index < segments.size() - 1; index++) {
+            String segment = segments.get(index);
+            Path nextDir;
+            try {
+                nextDir = currentDir.resolve(segment).normalize();
+            } catch (Exception ex) {
+                return resolveSanitizedDisplayTail(currentDir, joinRequestedAssetTail(segments, index));
+            }
+            if (Files.isDirectory(nextDir)) {
+                currentDir = nextDir;
+                continue;
+            }
+            return resolveSanitizedDisplayTail(currentDir, joinRequestedAssetTail(segments, index));
+        }
+
+        String lastSegment = segments.get(segments.size() - 1);
+        try {
+            currentDir.resolve(lastSegment);
+        } catch (Exception ex) {
+            return resolveSanitizedDisplayTail(currentDir, lastSegment);
+        }
+        String sanitizedLastSegment = sanitizeWindowsDisplayFileName(lastSegment);
+        if (sanitizedLastSegment == null || sanitizedLastSegment.equals(lastSegment)) {
+            return null;
+        }
+        return currentDir.resolve(sanitizedLastSegment).normalize();
+    }
+
+    private String joinRequestedAssetTail(List<String> segments, int startIndex) {
+        StringBuilder builder = new StringBuilder();
+        for (int index = startIndex; index < segments.size(); index++) {
+            if (builder.length() > 0) {
+                builder.append('/');
+            }
+            builder.append(segments.get(index));
+        }
+        return builder.toString();
+    }
+
+    private Path resolveSanitizedDisplayTail(Path currentDir, String displayTail) {
+        String sanitizedTail = sanitizeWindowsDisplayFileName(displayTail);
+        if (currentDir == null || sanitizedTail == null) {
+            return null;
+        }
+        return currentDir.resolve(sanitizedTail).normalize();
+    }
+
+    private String sanitizeWindowsDisplayFileName(String rawName) {
+        String candidate = trimToNullSafe(rawName);
+        if (candidate == null) {
+            return null;
+        }
+        StringBuilder safe = new StringBuilder(candidate.length());
+        for (int index = 0; index < candidate.length(); index++) {
+            char current = candidate.charAt(index);
+            if (current == '<' || current == '>' || current == ':' || current == '"' || current == '/'
+                    || current == '\\' || current == '|' || current == '?' || current == '*') {
+                safe.append('_');
+                continue;
+            }
+            if (Character.isISOControl(current)) {
+                continue;
+            }
+            safe.append(current);
+        }
+        String normalized = safe.toString().trim();
+        normalized = normalized.replaceAll("[.\\s]+$", "");
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private Path resolveTaskRootDir(TaskView task) throws IOException {
+        if (task == null) {
+            throw new IllegalArgumentException("task is null");
+        }
+        if (task.taskRootDir != null) {
+            return task.taskRootDir;
+        }
+        if (task.storageTask && task.storageKey != null) {
+            Path root = resolveStorageRoot().resolve(task.storageKey).normalize();
+            if (Files.isDirectory(root)) {
+                task.taskRootDir = root;
+                return root;
+            }
+        }
+        if (task.runtimeTask != null && task.runtimeTask.resultPath != null && !task.runtimeTask.resultPath.isBlank()) {
+            Path result = Paths.get(task.runtimeTask.resultPath).toAbsolutePath().normalize();
+            if (Files.isDirectory(result)) {
+                task.taskRootDir = result;
+                return result;
+            }
+            if (Files.isRegularFile(result) && result.getParent() != null) {
+                task.taskRootDir = result.getParent();
+                return result.getParent();
+            }
+        }
+        ResolvedMarkdown resolved = resolveMarkdown(task);
+        task.taskRootDir = resolved.baseDir;
+        return resolved.baseDir;
+    }
+
+    private TaskMetaFile readTaskMeta(Path taskRoot) {
+        TaskMetaFile fallback = new TaskMetaFile();
+        if (taskRoot == null) {
+            return fallback;
+        }
+        Path metaPath = taskRoot.resolve(META_FILE_NAME).normalize();
+        if (!metaPath.startsWith(taskRoot) || !Files.isRegularFile(metaPath)) {
+            return fallback;
+        }
+        try {
+            if (Files.size(metaPath) == 0L) {
+                // Empty metadata file usually indicates interrupted historical write; treat as corrupt and rebuild.
+                logger.warn("task metadata file is empty; rebuilding from fallback: {}", metaPath);
+                Files.deleteIfExists(metaPath);
+                return fallback;
+            }
+            TaskMetaFile loaded = objectMapper.readValue(metaPath.toFile(), TaskMetaFile.class);
+            if (loaded == null) {
+                return fallback;
+            }
+            if (loaded.notesByMarkdown == null) {
+                loaded.notesByMarkdown = new LinkedHashMap<>();
+            }
+            if (loaded.taskTitle != null && loaded.taskTitle.trim().isEmpty()) {
+                loaded.taskTitle = null;
+            }
+            if (loaded.lastOpenedAt != null) {
+                String normalizedLastOpened = loaded.lastOpenedAt.trim();
+                if (normalizedLastOpened.isEmpty()) {
+                    loaded.lastOpenedAt = null;
+                } else {
+                    Instant parsed = parseInstantSafe(normalizedLastOpened);
+                    loaded.lastOpenedAt = parsed != null ? parsed.toString() : null;
+                }
+            }
+            for (Map.Entry<String, NoteMeta> entry : loaded.notesByMarkdown.entrySet()) {
+                if (entry.getValue() == null) {
+                    entry.setValue(new NoteMeta());
+                    continue;
+                }
+                if (entry.getValue().favorites == null) {
+                    entry.getValue().favorites = new LinkedHashMap<>();
+                }
+                if (entry.getValue().deleted == null) {
+                    entry.getValue().deleted = new LinkedHashMap<>();
+                }
+                if (entry.getValue().comments == null) {
+                    entry.getValue().comments = new LinkedHashMap<>();
+                } else {
+                    entry.getValue().comments = new LinkedHashMap<>(sanitizeComments(entry.getValue().comments));
+                }
+                if (entry.getValue().tokenLike == null) {
+                    entry.getValue().tokenLike = new LinkedHashMap<>();
+                } else {
+                    entry.getValue().tokenLike = sanitizeTokenLike(entry.getValue().tokenLike);
+                }
+                if (entry.getValue().tokenAnnotations == null) {
+                    entry.getValue().tokenAnnotations = new LinkedHashMap<>();
+                } else {
+                    entry.getValue().tokenAnnotations = new LinkedHashMap<>(sanitizeTokenAnnotations(entry.getValue().tokenAnnotations));
+                }
+                if (entry.getValue().anchors == null) {
+                    entry.getValue().anchors = new LinkedHashMap<>();
+                } else {
+                    entry.getValue().anchors = new LinkedHashMap<>(sanitizeAnchors(entry.getValue().anchors));
+                }
+            }
+            return loaded;
+        } catch (Exception ex) {
+            logger.warn("read task metadata failed: {} err={}", metaPath, ex.getMessage());
+            return fallback;
+        }
+    }
+
+    private Map<String, Object> readRuntimeAuditLedger(
+            Path taskRoot,
+            String key,
+            String label,
+            String fileName
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("key", key);
+        payload.put("label", label);
+        payload.put("fileName", fileName);
+        payload.put("exists", false);
+        payload.put("path", "");
+        payload.put("rawText", "");
+        payload.put("lineCount", 0L);
+        payload.put("recordCount", 0L);
+        payload.put("sizeBytes", 0L);
+        payload.put("lastModifiedAt", "");
+        payload.put("message", "");
+        if (taskRoot == null) {
+            payload.put("message", "task root is unavailable");
+            return payload;
+        }
+
+        Path ledgerPath = taskRoot.resolve(TASK_RUNTIME_AUDIT_DIR).resolve(fileName).normalize();
+        payload.put("path", ledgerPath.toString());
+        if (!ledgerPath.startsWith(taskRoot)) {
+            payload.put("message", "runtime audit ledger escaped task root");
+            return payload;
+        }
+        if (!Files.isRegularFile(ledgerPath)) {
+            payload.put("message", "runtime audit ledger not found");
+            return payload;
+        }
+
+        try {
+            String rawText = Files.readString(ledgerPath, StandardCharsets.UTF_8);
+            payload.put("exists", true);
+            payload.put("rawText", rawText);
+            payload.put("lineCount", countTextLines(rawText));
+            payload.put("recordCount", countJsonlRecords(rawText));
+            payload.put("sizeBytes", Files.size(ledgerPath));
+            payload.put("lastModifiedAt", Files.getLastModifiedTime(ledgerPath).toInstant().toString());
+        } catch (IOException ex) {
+            logger.warn("read runtime audit ledger failed: path={} err={}", ledgerPath, ex.getMessage());
+            payload.put("message", "read runtime audit ledger failed: " + ex.getMessage());
+        }
+        return payload;
+    }
+
+    private long countTextLines(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return 0L;
+        }
+        return rawText.lines().count();
+    }
+
+    private long countJsonlRecords(String rawText) {
+        if (!StringUtils.hasText(rawText)) {
+            return 0L;
+        }
+        return rawText.lines().filter(StringUtils::hasText).count();
+    }
+
+    private boolean writeTaskMeta(Path taskRoot, TaskMetaFile meta) {
+        if (taskRoot == null || meta == null) {
+            return false;
+        }
+        Path metaPath = taskRoot.resolve(META_FILE_NAME).normalize();
+        Path tmpPath = taskRoot.resolve(META_FILE_NAME + ".tmp").normalize();
+        if (!metaPath.startsWith(taskRoot)) {
+            return false;
+        }
+        try {
+            Files.createDirectories(taskRoot);
+            meta.version = "1.0";
+            meta.updatedAt = Instant.now().toString();
+            if (meta.notesByMarkdown == null) {
+                meta.notesByMarkdown = new LinkedHashMap<>();
+            }
+            // Write to temp file first, then replace target file to avoid truncation on serialization failures.
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(tmpPath.toFile(), meta);
+            try {
+                Files.move(tmpPath, metaPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(tmpPath, metaPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            return true;
+        } catch (Exception ex) {
+            try {
+                Files.deleteIfExists(tmpPath);
+            } catch (Exception ignored) {
+                // Temp file cleanup failure should not affect main flow.
+            }
+                logger.warn("write task metadata failed: {} err={}", metaPath, ex.getMessage());
+            return false;
+        }
+    }
+
+    private boolean syncVideoMetaTitle(Path taskRoot, String title) {
+        if (taskRoot == null) {
+            return false;
+        }
+        Path videoMetaPath = taskRoot.resolve("video_meta.json").normalize();
+        Path tmpPath = taskRoot.resolve("video_meta.json.tmp").normalize();
+        if (!videoMetaPath.startsWith(taskRoot)) {
+            return false;
+        }
+        try {
+            Files.createDirectories(taskRoot);
+            ObjectNode root = videoMetaService.readOrCreateNode(taskRoot);
+            if (title == null || title.isBlank()) {
+                root.remove("title");
+            } else {
+                root.put("title", title);
+            }
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(tmpPath.toFile(), root);
+            try {
+                Files.move(tmpPath, videoMetaPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(tmpPath, videoMetaPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            return true;
+        } catch (Exception ex) {
+            try {
+                Files.deleteIfExists(tmpPath);
+            } catch (Exception ignored) {
+                // Ignore tmp cleanup failures.
+            }
+            logger.warn("write video metadata title failed: {} err={}", videoMetaPath, ex.getMessage());
+            return false;
+        }
+    }
+
+    private String normalizeMetaNoteKey(Path taskRoot, String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) {
+            return META_DEFAULT_NOTE_KEY;
+        }
+        String decoded = URLDecoder.decode(rawPath, StandardCharsets.UTF_8).trim();
+        if (decoded.isBlank()) {
+            return META_DEFAULT_NOTE_KEY;
+        }
+        try {
+            Path input = Paths.get(decoded);
+            if (input.isAbsolute()) {
+                Path normalizedAbs = input.toAbsolutePath().normalize();
+                if (taskRoot != null) {
+                    Path normalizedRoot = taskRoot.toAbsolutePath().normalize();
+                    if (normalizedAbs.startsWith(normalizedRoot)) {
+                        Path relative = normalizedRoot.relativize(normalizedAbs);
+                        String key = relative.toString().replace('\\', '/');
+                        return key.isBlank() ? META_DEFAULT_NOTE_KEY : key;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Treat illegal path as plain string fallback.
+        }
+        while (decoded.startsWith("/") || decoded.startsWith("\\")) {
+            decoded = decoded.substring(1);
+        }
+        decoded = decoded.replace('\\', '/');
+        return decoded.isBlank() ? META_DEFAULT_NOTE_KEY : decoded;
+    }
+
+    private boolean isNoteMetaEmpty(NoteMeta noteMeta) {
+        if (noteMeta == null) {
+            return true;
+        }
+        return (noteMeta.favorites == null || noteMeta.favorites.isEmpty())
+                && (noteMeta.deleted == null || noteMeta.deleted.isEmpty())
+                && (noteMeta.comments == null || noteMeta.comments.isEmpty())
+                && (noteMeta.tokenLike == null || noteMeta.tokenLike.isEmpty())
+                && (noteMeta.tokenAnnotations == null || noteMeta.tokenAnnotations.isEmpty())
+                && (noteMeta.anchors == null || noteMeta.anchors.isEmpty());
+    }
+
+    private Map<String, Boolean> sanitizeFavorites(Map<String, Boolean> input) {
+        return sanitizeBooleanFlags(input);
+    }
+
+    private Map<String, Boolean> sanitizeDeleted(Map<String, Boolean> input) {
+        return sanitizeBooleanFlags(input);
+    }
+
+    private Map<String, Boolean> sanitizeTokenLike(Map<String, Boolean> input) {
+        return sanitizeBooleanFlags(input);
+    }
+
+    private Map<String, Boolean> sanitizeBooleanFlags(Map<String, Boolean> input) {
+        Map<String, Boolean> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
+        for (Map.Entry<String, Boolean> entry : input.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) continue;
+            if (Boolean.TRUE.equals(entry.getValue())) {
+                output.put(entry.getKey(), true);
+            }
+        }
+        return output;
+    }
+
+    private Map<String, List<String>> sanitizeComments(Map<String, ?> input) {
+        Map<String, List<String>> output = new LinkedHashMap<>();
+        for (Map.Entry<String, ?> entry : input.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) continue;
+            Object raw = entry.getValue();
+            if (raw == null) continue;
+
+            List<String> normalized = new ArrayList<>();
+            if (raw instanceof String) {
+                String trimmed = ((String) raw).trim();
+                if (!trimmed.isEmpty()) {
+                    normalized.add(trimmed);
+                }
+            } else if (raw instanceof List<?> list) {
+                for (Object item : list) {
+                    if (item == null) continue;
+                    String trimmed = String.valueOf(item).trim();
+                    if (!trimmed.isEmpty()) {
+                        normalized.add(trimmed);
+                    }
+                }
+            } else {
+                String trimmed = String.valueOf(raw).trim();
+                if (!trimmed.isEmpty()) {
+                    normalized.add(trimmed);
+                }
+            }
+
+            if (!normalized.isEmpty()) {
+                output.put(entry.getKey(), normalized);
+            }
+        }
+        return output;
+    }
+
+    private Map<String, String> sanitizeTokenAnnotations(Map<String, ?> input) {
+        Map<String, String> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
+        for (Map.Entry<String, ?> entry : input.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) continue;
+            if (entry.getValue() == null) continue;
+            String value = String.valueOf(entry.getValue()).trim();
+            if (!value.isEmpty()) {
+                output.put(entry.getKey().trim(), value);
+            }
+        }
+        return output;
+    }
+
+    private Map<String, Object> sanitizeAnchors(Map<String, ?> input) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
+        for (Map.Entry<String, ?> entry : input.entrySet()) {
+            String anchorId = trimToNullSafe(entry.getKey());
+            if (anchorId == null) {
+                continue;
+            }
+            Map<String, Object> sanitized = sanitizeSingleAnchorData(entry.getValue());
+            if (!sanitized.isEmpty()) {
+                output.put(anchorId, sanitized);
+            }
+        }
+        return output;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> sanitizeSingleAnchorData(Object rawValue) {
+        if (!(rawValue instanceof Map<?, ?> rawMap)) {
+            return new LinkedHashMap<>();
+        }
+        Map<String, Object> value = (Map<String, Object>) rawMap;
+        Map<String, Object> output = new LinkedHashMap<>();
+
+        String blockId = stringValueOrNull(value.get("blockId"));
+        if (blockId != null) {
+            output.put("blockId", blockId);
+        }
+        Integer startIndex = nonNegativeIntOrNull(
+                value.containsKey("startIndex") ? value.get("startIndex") : value.get("start")
+        );
+        Integer endIndex = nonNegativeIntOrNull(
+                value.containsKey("endIndex") ? value.get("endIndex") : value.get("end")
+        );
+        if (startIndex != null) {
+            output.put("startIndex", startIndex);
+        }
+        if (endIndex != null) {
+            output.put("endIndex", endIndex);
+        }
+
+        String quote = stringValueOrNull(value.get("quote"));
+        if (quote == null) {
+            quote = stringValueOrNull(value.get("token"));
+        }
+        if (quote != null) {
+            output.put("quote", quote);
+        }
+        String contextQuote = stringValueOrNull(value.get("contextQuote"));
+        if (contextQuote == null) {
+            contextQuote = stringValueOrNull(value.get("quoteSnapshot"));
+        }
+        if (contextQuote != null) {
+            output.put("contextQuote", contextQuote);
+        }
+        String anchorHint = stringValueOrNull(value.get("anchorHint"));
+        if (anchorHint == null) {
+            anchorHint = stringValueOrNull(value.get("hint"));
+        }
+        if (anchorHint != null) {
+            output.put("anchorHint", anchorHint);
+        }
+
+        String mountedPath = stringValueOrNull(value.get("mountedPath"));
+        if (mountedPath != null) {
+            output.put("mountedPath", mountedPath);
+        }
+        String mountedRevisionId = stringValueOrNull(value.get("mountedRevisionId"));
+        if (mountedRevisionId != null) {
+            output.put("mountedRevisionId", mountedRevisionId);
+        }
+        String updatedAt = normalizeIsoInstant(value.get("updatedAt"));
+        if (updatedAt != null) {
+            output.put("updatedAt", updatedAt);
+        }
+        String mountedAt = normalizeIsoInstant(value.get("mountedAt"));
+        if (mountedAt != null) {
+            output.put("mountedAt", mountedAt);
+        }
+
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(value.get("revisions"));
+        if (!revisions.isEmpty()) {
+            output.put("revisions", revisions);
+            Map<String, Object> latest = revisions.get(revisions.size() - 1);
+            if (!output.containsKey("mountedPath")) {
+                String latestNotePath = stringValueOrNull(latest.get("notePath"));
+                if (latestNotePath != null) {
+                    output.put("mountedPath", latestNotePath);
+                }
+            }
+            if (!output.containsKey("mountedRevisionId")) {
+                String latestRevisionId = stringValueOrNull(latest.get("revisionId"));
+                if (latestRevisionId != null) {
+                    output.put("mountedRevisionId", latestRevisionId);
+                }
+            }
+        }
+
+        boolean hasMountedPath = output.containsKey("mountedPath");
+        String status = normalizeAnchorStatus(value.get("status"), hasMountedPath);
+        output.put("status", status);
+        return output;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeAnchorRevisionList(Object rawValue) {
+        List<Map<String, Object>> output = new ArrayList<>();
+        if (!(rawValue instanceof List<?> rawList)) {
+            return output;
+        }
+        for (Object item : rawList) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            Map<String, Object> one = sanitizeAnchorRevisionEntry((Map<String, Object>) rawMap);
+            if (!one.isEmpty()) {
+                output.add(one);
+            }
+        }
+        return output;
+    }
+
+    private Map<String, Object> sanitizeAnchorRevisionEntry(Map<String, Object> rawMap) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        String revisionId = stringValueOrNull(rawMap.get("revisionId"));
+        if (revisionId == null) {
+            revisionId = stringValueOrNull(rawMap.get("revision"));
+        }
+        if (revisionId != null) {
+            output.put("revisionId", revisionId);
+        }
+        String createdAt = normalizeIsoInstant(rawMap.get("createdAt"));
+        if (createdAt != null) {
+            output.put("createdAt", createdAt);
+        }
+        String relativeDir = stringValueOrNull(rawMap.get("relativeDir"));
+        if (relativeDir != null) {
+            output.put("relativeDir", relativeDir);
+        }
+        String notePath = stringValueOrNull(rawMap.get("notePath"));
+        if (notePath != null) {
+            output.put("notePath", notePath);
+        }
+        Integer fileCount = nonNegativeIntOrNull(rawMap.get("fileCount"));
+        if (fileCount != null) {
+            output.put("fileCount", fileCount);
+        }
+        Long totalBytes = nonNegativeLongOrNull(rawMap.get("totalBytes"));
+        if (totalBytes != null) {
+            output.put("totalBytes", totalBytes);
+        }
+        List<Map<String, Object>> files = sanitizeAnchorRevisionFiles(rawMap.get("files"));
+        if (!files.isEmpty()) {
+            output.put("files", files);
+        }
+        return output;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeAnchorRevisionFiles(Object rawValue) {
+        List<Map<String, Object>> output = new ArrayList<>();
+        if (!(rawValue instanceof List<?> rawList)) {
+            return output;
+        }
+        for (Object item : rawList) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            Map<String, Object> source = (Map<String, Object>) rawMap;
+            String path = stringValueOrNull(source.get("path"));
+            if (path == null) {
+                continue;
+            }
+            Map<String, Object> fileItem = new LinkedHashMap<>();
+            fileItem.put("path", path);
+            String name = stringValueOrNull(source.get("name"));
+            if (name != null) {
+                fileItem.put("name", name);
+            }
+            Long size = nonNegativeLongOrNull(source.get("size"));
+            if (size != null) {
+                fileItem.put("size", size);
+            }
+            String contentType = stringValueOrNull(source.get("contentType"));
+            if (contentType != null) {
+                fileItem.put("contentType", contentType);
+            }
+            output.add(fileItem);
+        }
+        return output;
+    }
+
+    private String normalizeAnchorStatus(Object rawStatus, boolean hasMountedPath) {
+        String normalized = stringValueOrNull(rawStatus);
+        if (normalized == null) {
+            return hasMountedPath ? "mounted" : "pending";
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if ("mounted".equals(lower) || "pending".equals(lower) || "files_uploaded".equals(lower)) {
+            return lower;
+        }
+        return hasMountedPath ? "mounted" : "pending";
+    }
+
+    private String normalizeIsoInstant(Object rawValue) {
+        String value = stringValueOrNull(rawValue);
+        if (value == null) {
+            return null;
+        }
+        Instant parsed = parseInstantSafe(value);
+        return parsed != null ? parsed.toString() : null;
+    }
+
+    private Integer nonNegativeIntOrNull(Object rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        try {
+            Integer parsed;
+            if (rawValue instanceof Number number) {
+                parsed = number.intValue();
+            } else {
+                parsed = Integer.parseInt(String.valueOf(rawValue).trim());
+            }
+            return parsed >= 0 ? parsed : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private Long nonNegativeLongOrNull(Object rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        try {
+            Long parsed;
+            if (rawValue instanceof Number number) {
+                parsed = number.longValue();
+            } else {
+                parsed = Long.parseLong(String.valueOf(rawValue).trim());
+            }
+            return parsed >= 0 ? parsed : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String stringValueOrNull(Object rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        String value = String.valueOf(rawValue).trim();
+        return value.isEmpty() ? null : value;
+    }
+
+    private String sanitizeAnchorDirectoryName(String anchorId) {
+        String normalized = anchorId == null ? "" : anchorId.trim();
+        if (normalized.isEmpty()) {
+            return "unknown";
+        }
+        String replaced = UNSAFE_FILENAME_CHARS.matcher(normalized).replaceAll("_");
+        if (replaced.isBlank()) {
+            return "unknown";
+        }
+        return replaced.length() > 96 ? replaced.substring(0, 96) : replaced;
+    }
+
+    private String buildAnchorRevisionId() {
+        String timePart = String.valueOf(System.currentTimeMillis());
+        String uuidPart = UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        return timePart + "_" + uuidPart;
+    }
+
+    private String normalizeMountedRelativePath(String rawPath, String fallbackName) {
+        String candidate = rawPath != null ? rawPath : fallbackName;
+        if (candidate == null || candidate.isBlank()) {
+            return null;
+        }
+        String decoded = URLDecoder.decode(candidate, StandardCharsets.UTF_8).trim().replace('\\', '/');
+        while (decoded.startsWith("/")) {
+            decoded = decoded.substring(1);
+        }
+        if (decoded.isBlank()) {
+            return null;
+        }
+        Path normalized;
+        try {
+            normalized = Paths.get(decoded).normalize();
+        } catch (Exception ex) {
+            return null;
+        }
+        if (normalized.isAbsolute()) {
+            return null;
+        }
+        String normalizedPath = normalized.toString().replace('\\', '/');
+        if (normalizedPath.isBlank() || normalizedPath.equals(".")
+                || normalizedPath.startsWith("..")
+                || normalizedPath.contains("/../")) {
+            return null;
+        }
+        return normalizedPath;
+    }
+
+    private String resolveMainNoteRelativePath(String rawMainNotePath, List<String> uploadedRelativePaths) {
+        if (uploadedRelativePaths == null || uploadedRelativePaths.isEmpty()) {
+            return null;
+        }
+        if (rawMainNotePath != null && !rawMainNotePath.isBlank()) {
+            String normalized = normalizeMountedRelativePath(rawMainNotePath, null);
+            if (normalized != null && uploadedRelativePaths.contains(normalized) && isMarkdownFile(normalized)) {
+                return normalized;
+            }
+        }
+        for (String onePath : uploadedRelativePaths) {
+            if (isMarkdownFile(onePath)) {
+                return onePath;
+            }
+        }
+        return null;
+    }
+
+    private String findFirstMarkdownRelativePath(Path revisionDir) {
+        if (revisionDir == null || !Files.isDirectory(revisionDir)) {
+            return null;
+        }
+        try (Stream<Path> stream = Files.walk(revisionDir)) {
+            Optional<String> found = stream
+                    .filter(Files::isRegularFile)
+                    .map(path -> revisionDir.relativize(path).toString().replace('\\', '/'))
+                    .filter(this::isMarkdownFile)
+                    .sorted()
+                    .findFirst();
+            return found.orElse(null);
+        } catch (IOException ex) {
+            logger.warn("scan revision markdown failed: dir={} err={}", revisionDir, ex.getMessage());
+            return null;
+        }
+    }
+
+    private String resolveMountedReadNotePath(String rawNotePath, String entryNotePath, String revisionRelativeDir) {
+        String normalizedEntry = normalizeMountedRelativePath(entryNotePath, null);
+        if (rawNotePath == null || rawNotePath.isBlank()) {
+            return normalizedEntry;
+        }
+        String normalizedRequested = normalizeMountedRelativePath(rawNotePath, null);
+        if (normalizedRequested == null) {
+            return null;
+        }
+        String normalizedRevisionDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+        if (normalizedRevisionDir != null && !normalizedRevisionDir.isBlank()) {
+            if (!normalizedRequested.equals(normalizedRevisionDir)
+                    && !normalizedRequested.startsWith(normalizedRevisionDir + "/")) {
+                normalizedRequested = normalizeMountedRelativePath(
+                        normalizedRevisionDir + "/" + normalizedRequested,
+                        null
+                );
+            }
+        }
+        if (normalizedRequested == null || !isMarkdownFile(normalizedRequested)) {
+            return null;
+        }
+        return normalizedRequested;
+    }
+
+    private String rewriteMountedMarkdownAssetLinks(String markdown, String taskId, String baseRelativeDir) {
+        if (markdown == null || markdown.isBlank() || taskId == null || taskId.isBlank()) {
+            return markdown != null ? markdown : "";
+        }
+        String normalizedBase = "";
+        if (baseRelativeDir != null && !baseRelativeDir.isBlank()) {
+            String normalized = normalizeMountedRelativePath(baseRelativeDir, null);
+            if (normalized != null) {
+                normalizedBase = normalized;
+            }
+        }
+        Matcher matcher = MARKDOWN_LINK_PATTERN.matcher(markdown);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String originalUrl = matcher.group(2);
+            String rewrittenUrl = rewriteMountedResourceUrl(taskId, normalizedBase, originalUrl);
+            if (rewrittenUrl == null) {
+                matcher.appendReplacement(buffer, Matcher.quoteReplacement(matcher.group(0)));
+                continue;
+            }
+            String replacement = matcher.group(1) + "(" + rewrittenUrl + matcher.group(3) + ")";
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
+    }
+
+    private String rewriteMountedResourceUrl(String taskId, String baseRelativeDir, String rawUrl) {
+        String url = stringValueOrNull(rawUrl);
+        if (url == null) {
+            return null;
+        }
+        String lower = url.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("http://")
+                || lower.startsWith("https://")
+                || lower.startsWith("data:")
+                || lower.startsWith("blob:")
+                || lower.startsWith("mailto:")
+                || lower.startsWith("tel:")
+                || lower.startsWith("#")
+                || lower.startsWith("/api/mobile/tasks/")) {
+            return null;
+        }
+        String normalizedPath = normalizeMountedRelativePath(url, null);
+        if (normalizedPath == null) {
+            return null;
+        }
+        String fullRelativePath = normalizedPath;
+        if (baseRelativeDir != null && !baseRelativeDir.isBlank()) {
+            fullRelativePath = baseRelativeDir + "/" + normalizedPath;
+        }
+        return "/api/mobile/tasks/"
+                + URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+                + "/asset?path="
+                + URLEncoder.encode(fullRelativePath, StandardCharsets.UTF_8);
+    }
+
+    private Map<String, String> sanitizeTelemetryPayload(Map<String, ?> input) {
+        Map<String, String> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
+        for (Map.Entry<String, ?> entry : input.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) continue;
+            if (entry.getValue() == null) continue;
+            String value = String.valueOf(entry.getValue()).trim();
+            if (!value.isEmpty()) {
+                output.put(entry.getKey(), value);
+            }
+        }
+        return output;
+    }
+
+    private String trimToNullSafe(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private void clearTaskCleanupIndexQuietly(String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null || taskCleanupIndexService == null) {
+            return;
+        }
+        try {
+            taskCleanupIndexService.removeTaskFromCleanupIndex(normalizedTaskId);
+        } catch (Exception ex) {
+            logger.warn("clear task cleanup index skipped: taskId={} err={}", normalizedTaskId, ex.getMessage());
+        }
+    }
+
+    private boolean deletePersistedTaskState(String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null || taskStateRepository == null) {
+            return false;
+        }
+        return taskStateRepository.deleteTask(normalizedTaskId);
+    }
+
+    private PythonGrpcClient.ReleaseResourcesResult releasePythonTaskResources(String taskId) {
+        PythonGrpcClient.ReleaseResourcesResult fallback = new PythonGrpcClient.ReleaseResourcesResult();
+        fallback.success = false;
+        fallback.message = "";
+        if (pythonGrpcClient == null) {
+            return fallback;
+        }
+        try {
+            return pythonGrpcClient.releaseCVResources(taskId);
+        } catch (Exception ex) {
+            logger.warn("release python task resources skipped: taskId={} err={}", taskId, ex.getMessage());
+            fallback.message = ex.getMessage() != null ? ex.getMessage() : "";
+            return fallback;
+        }
+    }
+
+    private boolean scheduleDeferredTaskCleanup(String taskId, StorageDeleteResult storageDelete, TaskEntry runtimeTask) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null || storageDelete == null || taskCleanupIndexService == null || storageDelete.taskRoot == null) {
+            return false;
+        }
+        String taskTypeHint = (runtimeTask != null && runtimeTask.bookOptions != null) ? "BOOK" : "VIDEO";
+        try {
+            boolean scheduled = taskCleanupIndexService.scheduleImmediateCleanupForTask(
+                    normalizedTaskId,
+                    storageDelete.taskRoot.toString(),
+                    taskTypeHint
+            );
+            if (scheduled) {
+                logger.info(
+                        "scheduled deferred storage cleanup: taskId={} taskRoot={} err={}",
+                        normalizedTaskId,
+                        storageDelete.taskRoot,
+                        storageDelete.message
+                );
+            }
+            return scheduled;
+        } catch (Exception ex) {
+            logger.warn(
+                    "schedule deferred storage cleanup failed: taskId={} taskRoot={} err={}",
+                    normalizedTaskId,
+                    storageDelete.taskRoot,
+                    ex.getMessage()
+            );
+            return false;
+        }
+    }
+
+    private StorageDeleteResult deleteStorageTaskByTaskId(String taskId) {
+        StorageDeleteResult result = new StorageDeleteResult();
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return result;
+        }
+
+        Set<String> candidateStorageKeys = new LinkedHashSet<>();
+        boolean foundInCache = false;
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> byTaskId =
+                storageTaskCacheService.getTaskByTaskId(normalizedTaskId);
+        byTaskId.ifPresent(cached -> {
+            String key = trimToNullSafe(cached.storageKey);
+            if (key != null && isSafeStorageKey(key)) {
+                candidateStorageKeys.add(key);
+            }
+        });
+        if (byTaskId.isPresent()) {
+            foundInCache = true;
+        }
+
+        String keyFromTaskId = resolveStorageDeleteKey(normalizedTaskId);
+        if (keyFromTaskId != null) {
+            candidateStorageKeys.add(keyFromTaskId);
+            Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> byStorageKey =
+                    storageTaskCacheService.getTask(keyFromTaskId);
+            byStorageKey.ifPresent(cached -> {
+                String key = trimToNullSafe(cached.storageKey);
+                if (key != null && isSafeStorageKey(key)) {
+                    candidateStorageKeys.add(key);
+                }
+            });
+            if (byStorageKey.isPresent()) {
+                foundInCache = true;
+            }
+        }
+
+        if (candidateStorageKeys.isEmpty()) {
+            return result;
+        }
+
+        Path storageRoot = resolveStorageRoot().toAbsolutePath().normalize();
+        boolean existsOnDisk = false;
+        for (String storageKey : candidateStorageKeys) {
+            Path target = storageRoot.resolve(storageKey).normalize();
+            if (!target.startsWith(storageRoot)) {
+                continue;
+            }
+            result.storageKey = storageKey;
+            result.taskRoot = target;
+            if (!Files.exists(target)) {
+                storageTaskCacheService.evictTaskByStorageKey(storageKey);
+                continue;
+            }
+            existsOnDisk = true;
+            try {
+                result.deletedEntries += deletePathRecursivelyWithRetry(target, storageRoot);
+                result.deleted = true;
+                storageTaskCacheService.evictTaskByStorageKey(storageKey);
+            } catch (IOException ex) {
+                logger.warn(
+                        "delete storage task directory failed: taskId={} storageKey={} err={}",
+                        normalizedTaskId,
+                        storageKey,
+                        ex.getMessage()
+                );
+                result.success = false;
+                result.message = "delete storage task directory failed";
+                result.lastError = ex.getMessage();
+                return result;
+            }
+        }
+
+        result.found = foundInCache || existsOnDisk;
+        storageTaskCacheService.evictTaskByTaskId(normalizedTaskId);
+        return result;
+    }
+
+    private int deletePathRecursivelyWithRetry(Path target, Path taskRoot) throws IOException {
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            try {
+                return deletePathRecursively(target, taskRoot);
+            } catch (IOException ex) {
+                lastError = ex;
+                if (attempt >= 4) {
+                    break;
+                }
+                try {
+                    Thread.sleep(150L * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw ex;
+                }
+            }
+        }
+        throw lastError != null ? lastError : new IOException("delete path recursively failed");
+    }
+
+    private String resolveStorageDeleteKey(String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return null;
+        }
+        if (normalizedTaskId.startsWith(STORAGE_TASK_PREFIX)) {
+            String storageKey = trimToNullSafe(normalizedTaskId.substring(STORAGE_TASK_PREFIX.length()));
+            return isSafeStorageKey(storageKey) ? storageKey : null;
+        }
+        return isSafeStorageKey(normalizedTaskId) ? normalizedTaskId : null;
+    }
+
+    private List<String> normalizeAnchorIdList(List<String> rawAnchorIds) {
+        if (rawAnchorIds == null || rawAnchorIds.isEmpty()) {
+            return List.of();
+        }
+        Set<String> unique = new LinkedHashSet<>();
+        for (String rawAnchorId : rawAnchorIds) {
+            String anchorId = trimToNullSafe(rawAnchorId);
+            if (anchorId != null) {
+                unique.add(anchorId);
+            }
+        }
+        return new ArrayList<>(unique);
+    }
+
+    private Set<Path> collectAnchorDeleteTargets(
+            Path taskRoot,
+            Map<String, Object> anchors,
+            List<String> anchorIds
+    ) {
+        Set<Path> targets = new LinkedHashSet<>();
+        if (taskRoot == null || anchors == null || anchorIds == null || anchorIds.isEmpty()) {
+            return targets;
+        }
+        for (String anchorId : anchorIds) {
+            if (anchorId == null || anchorId.isBlank()) {
+                continue;
+            }
+            String anchorRootRelative = "thinking/anchor_" + sanitizeAnchorDirectoryName(anchorId);
+            String normalizedAnchorRoot = normalizeMountedRelativePath(anchorRootRelative, null);
+            if (normalizedAnchorRoot != null) {
+                Path anchorRoot = taskRoot.resolve(normalizedAnchorRoot).normalize();
+                if (anchorRoot.startsWith(taskRoot)) {
+                    targets.add(anchorRoot);
+                }
+            }
+
+            Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(anchorId));
+            List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+            for (Map<String, Object> revision : revisions) {
+                String revisionRelativeDir = stringValueOrNull(revision.get("relativeDir"));
+                String normalizedRevisionDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+                if (normalizedRevisionDir == null) {
+                    continue;
+                }
+                Path revisionDir = taskRoot.resolve(normalizedRevisionDir).normalize();
+                if (revisionDir.startsWith(taskRoot)) {
+                    targets.add(revisionDir);
+                }
+            }
+
+            String mountedPath = stringValueOrNull(anchorRecord.get("mountedPath"));
+            String normalizedMountedPath = normalizeMountedRelativePath(mountedPath, null);
+            if (normalizedMountedPath != null) {
+                Path mountedFile = taskRoot.resolve(normalizedMountedPath).normalize();
+                if (mountedFile.startsWith(taskRoot)) {
+                    targets.add(mountedFile);
+                }
+            }
+        }
+        return targets;
+    }
+
+    private int deletePathRecursively(Path target, Path taskRoot) throws IOException {
+        if (target == null || taskRoot == null) {
+            return 0;
+        }
+        Path normalizedRoot = taskRoot.toAbsolutePath().normalize();
+        Path normalizedTarget = target.toAbsolutePath().normalize();
+        if (!normalizedTarget.startsWith(normalizedRoot) || !Files.exists(normalizedTarget)) {
+            return 0;
+        }
+        if (Files.isRegularFile(normalizedTarget) || Files.isSymbolicLink(normalizedTarget)) {
+            return Files.deleteIfExists(normalizedTarget) ? 1 : 0;
+        }
+        int deletedCount = 0;
+        try (Stream<Path> pathStream = Files.walk(normalizedTarget)) {
+            List<Path> deleteOrder = pathStream
+                    .sorted(Comparator.reverseOrder())
+                    .toList();
+            for (Path path : deleteOrder) {
+                if (Files.deleteIfExists(path)) {
+                    deletedCount += 1;
+                }
+            }
+        }
+        return deletedCount;
+    }
+
+    private List<ExportFileEntry> collectExportEntries(Path taskRoot) throws IOException {
+        Path normalizedRoot = taskRoot.toAbsolutePath().normalize();
+        List<ExportFileEntry> entries = new ArrayList<>();
+        Set<String> addedEntries = new HashSet<>();
+
+        Files.walkFileTree(normalizedRoot, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                if (normalizedRoot.equals(dir)) {
+                    return FileVisitResult.CONTINUE;
+                }
+                if (shouldExcludeExportPath(normalizedRoot, dir)) {
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                if (!attrs.isRegularFile()) {
+                    return FileVisitResult.CONTINUE;
+                }
+                if (shouldExcludeExportPath(normalizedRoot, file)) {
+                    return FileVisitResult.CONTINUE;
+                }
+                Path normalizedFile = file.toAbsolutePath().normalize();
+                String entryName = normalizedRoot.relativize(normalizedFile).toString().replace('\\', '/');
+                if (entryName.isBlank() || !addedEntries.add(entryName)) {
+                    return FileVisitResult.CONTINUE;
+                }
+                entries.add(new ExportFileEntry(normalizedFile, entryName, isCoreExportFile(normalizedFile)));
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                logger.warn("walk export directory failed; skipped: root={} path={} err={}",
+                        normalizedRoot, file, exc != null ? exc.getMessage() : "unknown");
+                return FileVisitResult.CONTINUE;
+            }
+        });
+
+        return entries;
+    }
+
+    private boolean shouldExcludeExportPath(Path taskRoot, Path candidate) {
+        Path normalizedRoot = taskRoot.toAbsolutePath().normalize();
+        Path normalizedCandidate = candidate.toAbsolutePath().normalize();
+        if (!normalizedCandidate.startsWith(normalizedRoot)) {
+            return true;
+        }
+        Path relative;
+        try {
+            relative = normalizedRoot.relativize(normalizedCandidate);
+        } catch (Exception ex) {
+            return true;
+        }
+        for (Path part : relative) {
+            String segment = part.toString();
+            if (!segment.isBlank() && segment.startsWith(".")) {
+                return true;
+            }
+        }
+        String filename = normalizedCandidate.getFileName() == null ? "" : normalizedCandidate.getFileName().toString();
+        return isTemporaryExportName(filename);
+    }
+
+    private boolean isTemporaryExportName(String filename) {
+        if (filename == null || filename.isBlank()) {
+            return true;
+        }
+        String lower = filename.toLowerCase(Locale.ROOT);
+        if (lower.equals(".ds_store") || lower.equals("thumbs.db") || lower.equals("desktop.ini")) {
+            return true;
+        }
+        if (lower.startsWith("~$") || lower.endsWith("~")) {
+            return true;
+        }
+        return lower.endsWith(".tmp")
+                || lower.endsWith(".temp")
+                || lower.endsWith(".swp")
+                || lower.endsWith(".swo")
+                || lower.endsWith(".part")
+                || lower.endsWith(".partial")
+                || lower.endsWith(".crdownload")
+                || lower.endsWith(".download");
+    }
+
+    private boolean isCoreExportFile(Path path) {
+        String filename = path.getFileName() == null ? "" : path.getFileName().toString();
+        return isMarkdownFile(filename);
+    }
+
+    private ExportZipResult writeTaskExportZipStreaming(List<ExportFileEntry> entries, ZipOutputStream zos) throws IOException {
+        int exportedCount = 0;
+        int skippedCount = 0;
+        for (ExportFileEntry entry : entries) {
+            boolean opened = false;
+            try {
+                zos.putNextEntry(new ZipEntry(entry.entryName));
+                opened = true;
+                Files.copy(entry.path, zos);
+                exportedCount += 1;
+            } catch (IOException ex) {
+                if (entry.core) {
+                    throw new IOException("core file write to ZIP failed: " + entry.entryName, ex);
+                }
+                skippedCount += 1;
+                logger.warn("skip file while exporting ZIP: entry={} path={} err={}",
+                        entry.entryName, entry.path, ex.getMessage());
+            } finally {
+                if (opened) {
+                    zos.closeEntry();
+                }
+            }
+        }
+        return new ExportZipResult(exportedCount, skippedCount);
+    }
+
+    private int markdownNamePriority(String filename) {
+        if (filename == null) {
+            return 100;
+        }
+        String lower = filename.toLowerCase(Locale.ROOT);
+        if ("enhanced_output.md".equals(lower)) return 0;
+        if ("enhanced_output2.md".equals(lower)) return 1;
+        if ("output.md".equals(lower)) return 2;
+        return 10;
+    }
+
+    private List<TaskView> deduplicateTaskViews(List<TaskView> input) {
+        if (input == null || input.isEmpty()) {
+            return new ArrayList<>();
+        }
+        Map<String, TaskView> deduplicated = new LinkedHashMap<>();
+        Map<String, String> dedupKeyByIdentity = new LinkedHashMap<>();
+        int anonymousSeq = 0;
+        for (TaskView candidate : input) {
+            if (candidate == null) {
+                continue;
+            }
+            Set<String> identityKeys = buildTaskIdentityKeys(candidate);
+            String key = null;
+            for (String identityKey : identityKeys) {
+                String existingKey = dedupKeyByIdentity.get(identityKey);
+                if (existingKey != null) {
+                    key = existingKey;
+                    break;
+                }
+            }
+            if (key == null && !identityKeys.isEmpty()) {
+                key = identityKeys.iterator().next();
+            }
+            if (key == null) {
+                String normalizedTaskId = trimToNullSafe(candidate.taskId);
+                key = normalizedTaskId != null ? "taskId:" + normalizedTaskId : "__anonymous__" + (++anonymousSeq);
+            }
+            TaskView existing = deduplicated.get(key);
+            if (existing == null) {
+                deduplicated.put(key, candidate);
+            } else {
+                deduplicated.put(key, choosePreferredTaskView(existing, candidate));
+            }
+            for (String identityKey : identityKeys) {
+                dedupKeyByIdentity.put(identityKey, key);
+            }
+        }
+        return new ArrayList<>(deduplicated.values());
+    }
+
+    private Set<String> buildTaskIdentityKeys(TaskView task) {
+        Set<String> keys = new LinkedHashSet<>();
+        if (task == null) {
+            return keys;
+        }
+        if (isBookLeafTaskView(task)) {
+            addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.storageKey));
+            addTaskIdentityKey(keys, "bookLeaf", buildBookLeafIdentity(task));
+            return keys;
+        }
+        addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.storageKey));
+        addTaskIdentityKey(keys, "videoUrl", trimToNullSafe(task.videoUrl));
+        return keys;
+    }
+
+    private boolean isBookLeafTaskView(TaskView task) {
+        if (task == null) {
+            return false;
+        }
+        return trimToNullSafe(task.bookLeafOutlineIndex) != null
+                || trimToNullSafe(task.bookLeafTitle) != null
+                || trimToNullSafe(task.bookTitle) != null;
+    }
+
+    private String buildBookLeafIdentity(TaskView task) {
+        if (task == null) {
+            return null;
+        }
+        String storageKey = trimToNullSafe(task.storageKey);
+        if (storageKey != null) {
+            return storageKey;
+        }
+        String outlineIndex = trimToNullSafe(task.bookLeafOutlineIndex);
+        String leafTitle = trimToNullSafe(task.bookLeafTitle);
+        String bookTitle = trimToNullSafe(task.bookTitle);
+        if (outlineIndex == null && leafTitle == null && bookTitle == null) {
+            return null;
+        }
+        return String.join("::",
+                bookTitle != null ? bookTitle : "",
+                outlineIndex != null ? outlineIndex : "",
+                leafTitle != null ? leafTitle : "",
+                trimToNullSafe(task.videoUrl) != null ? trimToNullSafe(task.videoUrl) : "");
+    }
+
+    private void addTaskIdentityKey(Set<String> keys, String type, String rawValue) {
+        String normalizedValue = trimToNullSafe(rawValue);
+        if (normalizedValue == null || type == null || type.isBlank()) {
+            return;
+        }
+        keys.add(type + ":" + normalizedValue);
+    }
+
+    private void addStorageIdentityKey(Set<String> keys, Path candidatePath) {
+        String storageKey = resolveStorageKeyFromPath(candidatePath);
+        if (storageKey != null) {
+            addTaskIdentityKey(keys, "storageKey", storageKey);
+        }
+    }
+
+    private Path resolveAbsolutePathSafe(String rawPath) {
+        String normalized = trimToNullSafe(rawPath);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            return Paths.get(normalized).toAbsolutePath().normalize();
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String resolveStorageKeyFromPath(Path candidatePath) {
+        if (candidatePath == null) {
+            return null;
+        }
+        try {
+            Path normalizedPath = candidatePath.toAbsolutePath().normalize();
+            Path storageRoot = resolveStorageRoot().toAbsolutePath().normalize();
+            if (!normalizedPath.startsWith(storageRoot)) {
+                return null;
+            }
+            Path relative = storageRoot.relativize(normalizedPath);
+            if (relative.getNameCount() == 0) {
+                return null;
+            }
+            String storageKey = trimToNullSafe(relative.getName(0).toString());
+            return isSafeStorageKey(storageKey) ? storageKey : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String resolveRuntimeStorageKey(TaskEntry task) {
+        if (task == null) {
+            return null;
+        }
+        String byOutputDir = resolveStorageKeyFromPath(resolveAbsolutePathSafe(task.outputDir));
+        if (byOutputDir != null) {
+            return byOutputDir;
+        }
+        String bySourcePath = resolveStorageKeyFromPath(resolveAbsolutePathSafe(task.videoUrl));
+        if (bySourcePath != null) {
+            return bySourcePath;
+        }
+        if (storageTaskCacheService == null) {
+            return null;
+        }
+        String normalizedTaskId = trimToNullSafe(task.taskId);
+        if (normalizedTaskId != null) {
+            Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> cachedByTaskId =
+                    storageTaskCacheService.getTaskByTaskId(normalizedTaskId);
+            if (cachedByTaskId.isPresent()) {
+                String cachedStorageKey = trimToNullSafe(cachedByTaskId.get().storageKey);
+                if (cachedStorageKey != null) {
+                    return cachedStorageKey;
+                }
+            }
+        }
+        String predictedStorageKey = predictStorageKeyForVideoInput(task.videoUrl);
+        if (predictedStorageKey == null) {
+            return null;
+        }
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> predictedCached =
+                storageTaskCacheService.getTask(predictedStorageKey);
+        if (predictedCached.isPresent() && isRuntimeShadowStorageTask(predictedCached.get(), normalizedTaskId)) {
+            return predictedStorageKey;
+        }
+        return null;
+    }
+
+    private boolean isRuntimeShadowStorageTask(
+            com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached,
+            String runtimeTaskId
+    ) {
+        if (cached == null) {
+            return false;
+        }
+        String cachedTaskId = trimToNullSafe(cached.taskId);
+        if (cachedTaskId != null) {
+            return runtimeTaskId != null && cachedTaskId.equals(runtimeTaskId);
+        }
+        if (cached.markdownAvailable || cached.completedAt != null) {
+            return false;
+        }
+        String status = trimToNullSafe(cached.status);
+        if (status == null) {
+            return true;
+        }
+        String normalizedStatus = status.toUpperCase(Locale.ROOT);
+        return !"COMPLETED".equals(normalizedStatus)
+                && !"FAILED".equals(normalizedStatus)
+                && !"CANCELLED".equals(normalizedStatus)
+                && !"CANCELED".equals(normalizedStatus);
+    }
+
+    private String predictStorageKeyForVideoInput(String videoInput) {
+        String normalizedVideoInput = trimToNullSafe(videoInput);
+        if (normalizedVideoInput == null) {
+            return null;
+        }
+        if (looksLikeHttpUrl(normalizedVideoInput)) {
+            return md5HexSafe(buildPredictedDownloadTaskDirSource(normalizedVideoInput));
+        }
+        Path normalizedPath = resolveAbsolutePathSafe(normalizedVideoInput);
+        if (normalizedPath == null) {
+            return null;
+        }
+        String existingStorageKey = resolveStorageKeyFromPath(normalizedPath);
+        if (existingStorageKey != null) {
+            return existingStorageKey;
+        }
+        return md5HexSafe(normalizePathForStorageHash(normalizedPath.toString()));
+    }
+
+    private boolean looksLikeHttpUrl(String value) {
+        if (value == null) {
+            return false;
+        }
+        String lower = value.trim().toLowerCase(Locale.ROOT);
+        return lower.startsWith("http://") || lower.startsWith("https://");
+    }
+
+    private String buildPredictedDownloadTaskDirSource(String videoUrl) {
+        String bilibiliVideoId = extractStorageIdentityBilibiliVideoId(videoUrl);
+        if (bilibiliVideoId != null && !bilibiliVideoId.isBlank()) {
+            Integer bilibiliEpisodeIndex = extractStorageIdentityBilibiliEpisodeIndex(videoUrl);
+            if (bilibiliEpisodeIndex != null && bilibiliEpisodeIndex > 0) {
+                return bilibiliVideoId + "_" + bilibiliEpisodeIndex;
+            }
+            return bilibiliVideoId;
+        }
+        return videoUrl;
+    }
+
+    private String extractStorageIdentityBilibiliVideoId(String videoUrl) {
+        String normalizedVideoUrl = trimToNullSafe(videoUrl);
+        if (normalizedVideoUrl == null) {
+            return null;
+        }
+        try {
+            URI parsed = URI.create(normalizedVideoUrl);
+            if (!isStorageIdentityBilibiliHost(parsed.getHost())) {
+                return null;
+            }
+            Map<String, String> query = parseStorageIdentityQueryParams(parsed.getRawQuery());
+            String bvid = trimToNullSafe(query.get("bvid"));
+            if (bvid != null) {
+                Matcher bvidMatcher = STORAGE_ID_BV_PATTERN.matcher(bvid);
+                if (bvidMatcher.find()) {
+                    return bvidMatcher.group();
+                }
+            }
+            String aid = trimToNullSafe(query.get("aid"));
+            if (aid != null && aid.chars().allMatch(Character::isDigit)) {
+                return "AV" + aid;
+            }
+            String searchSpace = String.join(
+                    " ",
+                    trimToNullSafe(parsed.getRawPath()) != null ? parsed.getRawPath() : "",
+                    trimToNullSafe(parsed.getRawQuery()) != null ? parsed.getRawQuery() : ""
+            );
+            Matcher bvMatcher = STORAGE_ID_BV_PATTERN.matcher(searchSpace);
+            if (bvMatcher.find()) {
+                return bvMatcher.group();
+            }
+        } catch (Exception ex) {
+            Matcher fallbackMatcher = STORAGE_ID_BV_PATTERN.matcher(normalizedVideoUrl);
+            if (fallbackMatcher.find()) {
+                return fallbackMatcher.group();
+            }
+        }
+        return null;
+    }
+
+    private Integer extractStorageIdentityBilibiliEpisodeIndex(String videoUrl) {
+        String normalizedVideoUrl = trimToNullSafe(videoUrl);
+        if (normalizedVideoUrl == null) {
+            return null;
+        }
+        try {
+            URI parsed = URI.create(normalizedVideoUrl);
+            Map<String, String> query = parseStorageIdentityQueryParams(parsed.getRawQuery());
+            String page = trimToNullSafe(query.get("p"));
+            if (page == null) {
+                page = trimToNullSafe(query.get("page"));
+            }
+            if (page != null && page.chars().allMatch(Character::isDigit)) {
+                return Integer.parseInt(page);
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return null;
+    }
+
+    private boolean isStorageIdentityBilibiliHost(String rawHost) {
+        String host = trimToNullSafe(rawHost);
+        if (host == null) {
+            return false;
+        }
+        String normalized = host.toLowerCase(Locale.ROOT);
+        return "bilibili.com".equals(normalized)
+                || normalized.endsWith(".bilibili.com")
+                || "b23.tv".equals(normalized);
+    }
+
+    private Map<String, String> parseStorageIdentityQueryParams(String rawQuery) {
+        Map<String, String> params = new LinkedHashMap<>();
+        String normalizedQuery = trimToNullSafe(rawQuery);
+        if (normalizedQuery == null) {
+            return params;
+        }
+        String[] pairs = normalizedQuery.split("&");
+        for (String pair : pairs) {
+            if (pair == null || pair.isBlank()) {
+                continue;
+            }
+            int eqIndex = pair.indexOf('=');
+            String rawKey = eqIndex >= 0 ? pair.substring(0, eqIndex) : pair;
+            String rawValue = eqIndex >= 0 ? pair.substring(eqIndex + 1) : "";
+            try {
+                params.put(
+                        URLDecoder.decode(rawKey, StandardCharsets.UTF_8),
+                        URLDecoder.decode(rawValue, StandardCharsets.UTF_8)
+                );
+            } catch (Exception ignored) {
+                params.put(rawKey, rawValue);
+            }
+        }
+        return params;
+    }
+
+    private String normalizePathForStorageHash(String path) {
+        String normalized = path == null ? "" : path.trim().replace('\\', '/');
+        return normalized.toLowerCase(Locale.ROOT);
+    }
+
+    private String md5HexSafe(String value) {
+        String normalizedValue = value != null ? value : "";
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(normalizedValue.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte one : digest) {
+                sb.append(String.format(Locale.ROOT, "%02x", one));
+            }
+            return sb.toString();
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private TaskView choosePreferredTaskView(TaskView existing, TaskView candidate) {
+        int existingPriority = resolveTaskDedupPriority(existing);
+        int candidatePriority = resolveTaskDedupPriority(candidate);
+        if (existingPriority != candidatePriority) {
+            return existingPriority > candidatePriority ? existing : candidate;
+        }
+        if (existing.markdownAvailable != candidate.markdownAvailable) {
+            return existing.markdownAvailable ? existing : candidate;
+        }
+        long existingTs = bestTimestamp(existing);
+        long candidateTs = bestTimestamp(candidate);
+        if (candidateTs > existingTs) {
+            return candidate;
+        }
+        if (existingTs > candidateTs) {
+            return existing;
+        }
+        if (candidate.runtimeTask != null && existing.runtimeTask == null) {
+            return candidate;
+        }
+        return existing;
+    }
+
+    private int resolveTaskDedupPriority(TaskView task) {
+        if (task == null) {
+            return 0;
+        }
+        boolean runtimeTask = task.runtimeTask != null;
+        if (runtimeTask && taskStatusPresentationService.isProcessingStatus(task.status)) {
+            return 6;
+        }
+        if (runtimeTask && taskStatusPresentationService.isBlockedStatus(task.status)) {
+            return 5;
+        }
+        if (runtimeTask && taskStatusPresentationService.isQueuedStatus(task.status)) {
+            return 4;
+        }
+        if (task.markdownAvailable || taskStatusPresentationService.isCompletedStatus(task.status)) {
+            return 3;
+        }
+        if (taskStatusPresentationService.isFailedStatus(task.status)) {
+            return 2;
+        }
+        if (taskStatusPresentationService.isCancelledStatus(task.status)) {
+            return 1;
+        }
+        return runtimeTask ? 1 : 0;
+    }
+
+    private long safeLastModifiedMillis(Path path) {
+        try {
+            return Files.getLastModifiedTime(path).toMillis();
+        } catch (Exception ex) {
+            return 0L;
+        }
+    }
+
+    private long taskCreatedSortTimestamp(TaskView task) {
+        if (task != null && task.createdAt != null) {
+            return task.createdAt.toEpochMilli();
+        }
+        if (task != null && task.completedAt != null) {
+            return task.completedAt.toEpochMilli();
+        }
+        return Long.MAX_VALUE;
+    }
+
+    private long bestTimestamp(TaskView task) {
+        if (task != null && task.lastOpenedAt != null) {
+            return task.lastOpenedAt.toEpochMilli();
+        }
+        if (task != null && task.createdAt != null) {
+            return task.createdAt.toEpochMilli();
+        }
+        if (task != null && task.completedAt != null) {
+            return task.completedAt.toEpochMilli();
+        }
+        return 0L;
+    }
+
+    private Path resolveStorageRoot() {
+        if (StringUtils.hasText(configuredStorageRoot)) {
+            return Paths.get(configuredStorageRoot.trim()).toAbsolutePath().normalize();
+        }
+        Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (int i = 0; i < 8; i++) {
+            Path candidate = current.resolve("var").resolve("storage").resolve("storage");
+            if (Files.isDirectory(candidate)) {
+                return candidate.toAbsolutePath().normalize();
+            }
+            Path parent = current.getParent();
+            if (parent == null) {
+                break;
+            }
+            current = parent;
+        }
+        return Paths.get("var", "storage", "storage").toAbsolutePath().normalize();
+    }
+
+    private boolean isSafeStorageKey(String storageKey) {
+        if (storageKey == null || storageKey.isBlank()) {
+            return false;
+        }
+        return !storageKey.contains("..")
+                && !storageKey.contains("/")
+                && !storageKey.contains("\\");
+    }
+
+    private String deriveStorageTitle(Path taskDir, StorageMetadata metadata) {
+        if (metadata.videoPath != null && !metadata.videoPath.isBlank()) {
+            try {
+                Path fileName = Paths.get(metadata.videoPath).getFileName();
+                if (fileName != null && !fileName.toString().isBlank()) {
+                    return fileName.toString();
+                }
+            } catch (Exception ignored) {
+                // Fallback to directory name.
+            }
+        }
+        return taskDir.getFileName().toString();
+    }
+
+    private void applyTaskTitleFromMeta(TaskView view) {
+        if (view == null) {
+            return;
+        }
+        Path root = view.taskRootDir;
+        if (root == null) {
+            return;
+        }
+        TaskMetaFile meta = readTaskMeta(root);
+        if (meta.taskTitle != null && !meta.taskTitle.isBlank()) {
+            String normalizedTitle = meta.taskTitle.trim();
+            view.title = normalizedTitle;
+            view.metaTitle = normalizedTitle;
+        }
+        if (meta.updatedAt != null && !meta.updatedAt.isBlank()) {
+            view.metaUpdatedAt = parseInstantSafe(meta.updatedAt);
+        }
+        if (meta.lastOpenedAt != null && !meta.lastOpenedAt.isBlank()) {
+            view.lastOpenedAt = parseInstantSafe(meta.lastOpenedAt);
+        }
+        applyTaskDomainAndTopicFromVideoMeta(view, root);
+    }
+
+    private void applyTaskDomainAndTopicFromVideoMeta(TaskView view, Path taskRoot) {
+        if (view == null || taskRoot == null) {
+            return;
+        }
+        VideoMetaService.VideoMetaSnapshot snapshot = videoMetaService.read(taskRoot);
+        if (snapshot.domain != null) {
+            view.domain = snapshot.domain;
+        }
+        if (snapshot.mainTopic != null) {
+            view.mainTopic = snapshot.mainTopic;
+        }
+    }
+
+    private TocMetadata resolveTaskTocMetadata(TaskView task, Path markdownPath) {
+        String contentType = null;
+        List<Map<String, Object>> bookSectionTree = new ArrayList<>();
+        Path taskRoot = resolveTaskRootForToc(task);
+        if (taskRoot != null) {
+            ObjectNode videoMetaRoot = videoMetaService.readOrCreateNode(taskRoot);
+            contentType = normalizeContentTypeToken(readVideoMetaContentType(videoMetaRoot));
+            bookSectionTree = readBookSectionTreeFromVideoMeta(videoMetaRoot);
+            if (bookSectionTree.isEmpty()) {
+                bookSectionTree = readBookSectionTreeFromSemanticUnits(taskRoot);
+            }
+            if ((contentType == null || contentType.isBlank()) && !bookSectionTree.isEmpty()) {
+                contentType = "book";
+            }
+        }
+        if (contentType == null || contentType.isBlank()) {
+            contentType = inferTaskContentType(task, markdownPath);
+        }
+        if (contentType == null || contentType.isBlank()) {
+            contentType = "unknown";
+        }
+        return new TocMetadata(contentType, bookSectionTree);
+    }
+
+    private Path resolveTaskRootForToc(TaskView task) {
+        try {
+            return resolveTaskRootDir(task);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String readVideoMetaContentType(ObjectNode videoMetaRoot) {
+        if (videoMetaRoot == null) {
+            return null;
+        }
+        String contentType = trimToNullSafe(videoMetaRoot.path("contentType").asText(null));
+        if (contentType == null) {
+            contentType = trimToNullSafe(videoMetaRoot.path("content_type").asText(null));
+        }
+        if (contentType == null) {
+            contentType = trimToNullSafe(videoMetaRoot.path("platform").asText(null));
+        }
+        return contentType;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> readBookSectionTreeFromVideoMeta(ObjectNode videoMetaRoot) {
+        if (videoMetaRoot == null) {
+            return new ArrayList<>();
+        }
+        JsonNode treeNode = videoMetaRoot.get("bookSectionTree");
+        if (treeNode == null || !treeNode.isArray()) {
+            treeNode = videoMetaRoot.get("book_section_tree");
+        }
+        if (treeNode == null || !treeNode.isArray()) {
+            return new ArrayList<>();
+        }
+        try {
+            Object converted = objectMapper.convertValue(treeNode, Object.class);
+            if (!(converted instanceof List<?> rawList)) {
+                return new ArrayList<>();
+            }
+            List<Map<String, Object>> output = new ArrayList<>();
+            for (Object one : rawList) {
+                if (one instanceof Map<?, ?> rawMap) {
+                    output.add(new LinkedHashMap<>((Map<String, Object>) rawMap));
+                }
+            }
+            return output;
+        } catch (Exception ex) {
+            logger.debug("parse bookSectionTree from video_meta failed: {}", ex.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    private List<Map<String, Object>> readBookSectionTreeFromSemanticUnits(Path taskRoot) {
+        if (taskRoot == null) {
+            return new ArrayList<>();
+        }
+        Path metadataPath = taskRoot.resolve("book_semantic_units.json").normalize();
+        if (!metadataPath.startsWith(taskRoot) || !Files.isRegularFile(metadataPath)) {
+            return new ArrayList<>();
+        }
+        try {
+            JsonNode rootNode = objectMapper.readTree(metadataPath.toFile());
+            JsonNode unitsNode = rootNode.path("semantic_units");
+            if (!unitsNode.isArray()) {
+                return new ArrayList<>();
+            }
+            List<Map<String, Object>> episodes = new ArrayList<>();
+            for (JsonNode unit : unitsNode) {
+                if (unit == null || !unit.isObject()) {
+                    continue;
+                }
+                int episodeNo = episodes.size() + 1;
+                Integer chapterIndexRaw = parseIntegerNode(unit.get("chapter_index"));
+                Integer sectionIndexRaw = parseIntegerNode(unit.get("section_index"));
+                Integer startPageRaw = parseIntegerNode(unit.get("start_page"));
+                Integer endPageRaw = parseIntegerNode(unit.get("end_page"));
+                String sectionSelector = trimToNullSafe(unit.path("section_selector").asText(null));
+
+                int chapterIndex = chapterIndexRaw != null ? chapterIndexRaw : 0;
+                int sectionIndex = sectionIndexRaw != null ? sectionIndexRaw : 0;
+                int subSectionIndex = parseSubSectionIndexFromSelector(sectionSelector);
+                int startPage = startPageRaw != null ? startPageRaw : -1;
+                int endPage = endPageRaw != null ? endPageRaw : startPage;
+                if (startPage > 0 && endPage > 0 && endPage < startPage) {
+                    endPage = startPage;
+                }
+
+                Map<String, Object> episode = new LinkedHashMap<>();
+                episode.put("index", episodeNo);
+                episode.put("chapterIndex", chapterIndex);
+                episode.put("sectionIndex", sectionIndex);
+                episode.put("subSectionIndex", subSectionIndex > 0 ? subSectionIndex : 1);
+                episode.put("chapterTitle", unit.path("chapter_title").asText(""));
+                episode.put("title", unit.path("section_title").asText(""));
+                episode.put("outlineIndex", buildBookOutlineIndex(chapterIndex, sectionIndex, subSectionIndex, episodeNo));
+                episode.put("startPage", startPage);
+                episode.put("endPage", endPage);
+                if (sectionSelector != null) {
+                    episode.put("sectionSelector", sectionSelector);
+                }
+                episodes.add(episode);
+            }
+            return buildBookSectionTreeFromEpisodes(episodes);
+        } catch (Exception ex) {
+            logger.debug("parse book_semantic_units.json failed: path={} err={}", metadataPath, ex.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    private List<Map<String, Object>> buildBookSectionTreeFromEpisodes(List<Map<String, Object>> episodes) {
+        Map<String, Map<String, Object>> chapterMap = new LinkedHashMap<>();
+        Map<String, Map<String, Object>> sectionMap = new LinkedHashMap<>();
+        List<Map<String, Object>> tree = new ArrayList<>();
+        if (episodes == null) {
+            return tree;
+        }
+        for (Map<String, Object> episode : episodes) {
+            if (episode == null) {
+                continue;
+            }
+            int episodeNo = intValueOrFallback(episode.get("index"), tree.size() + 1);
+            int chapterIndex = intValueOrFallback(episode.get("chapterIndex"), 0);
+            int sectionIndex = intValueOrFallback(episode.get("sectionIndex"), 0);
+            int subSectionIndex = Math.max(1, intValueOrFallback(episode.get("subSectionIndex"), 1));
+            int startPage = intValueOrFallback(episode.get("startPage"), -1);
+            int endPage = intValueOrFallback(episode.get("endPage"), startPage);
+            if (startPage > 0 && endPage > 0 && endPage < startPage) {
+                endPage = startPage;
+            }
+            String chapterTitle = stringValueOrNull(episode.get("chapterTitle"));
+            if (chapterTitle == null) {
+                chapterTitle = chapterIndex > 0 ? ("Chapter " + chapterIndex) : "Chapter";
+            }
+            String sectionTitle = stringValueOrNull(episode.get("title"));
+            if (sectionTitle == null) {
+                sectionTitle = sectionIndex > 0 ? ("Section " + sectionIndex) : ("Section " + episodeNo);
+            }
+            String chapterKey = chapterIndex > 0 ? ("c" + chapterIndex) : ("c_fallback_" + episodeNo);
+            String sectionKey = chapterKey + "_s" + Math.max(1, sectionIndex);
+
+            Map<String, Object> chapterNode = chapterMap.get(chapterKey);
+            if (chapterNode == null) {
+                chapterNode = new LinkedHashMap<>();
+                chapterNode.put("nodeType", "chapter");
+                chapterNode.put("chapterIndex", chapterIndex);
+                chapterNode.put("title", chapterTitle);
+                chapterNode.put("children", new ArrayList<Map<String, Object>>());
+                chapterMap.put(chapterKey, chapterNode);
+                tree.add(chapterNode);
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> chapterChildren = (List<Map<String, Object>>) chapterNode.get("children");
+            Map<String, Object> sectionNode = sectionMap.get(sectionKey);
+            if (sectionNode == null) {
+                sectionNode = new LinkedHashMap<>();
+                sectionNode.put("nodeType", "section");
+                sectionNode.put("chapterIndex", chapterIndex);
+                sectionNode.put("sectionIndex", sectionIndex);
+                sectionNode.put("title", sectionTitle);
+                sectionNode.put("children", new ArrayList<Map<String, Object>>());
+                sectionMap.put(sectionKey, sectionNode);
+                chapterChildren.add(sectionNode);
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> sectionChildren = (List<Map<String, Object>>) sectionNode.get("children");
+            Map<String, Object> leafNode = new LinkedHashMap<>();
+            leafNode.put("nodeType", "leaf");
+            leafNode.put("episodeNo", Math.max(1, episodeNo));
+            leafNode.put("chapterIndex", chapterIndex);
+            leafNode.put("sectionIndex", sectionIndex);
+            leafNode.put("subSectionIndex", subSectionIndex);
+            String outlineIndex = stringValueOrNull(episode.get("outlineIndex"));
+            leafNode.put("outlineIndex", outlineIndex != null ? outlineIndex : buildBookOutlineIndex(chapterIndex, sectionIndex, subSectionIndex, episodeNo));
+            leafNode.put("title", sectionTitle);
+            leafNode.put("startPage", startPage);
+            leafNode.put("endPage", endPage);
+            String sectionSelector = stringValueOrNull(episode.get("sectionSelector"));
+            if (sectionSelector != null) {
+                leafNode.put("sectionSelector", sectionSelector);
+            }
+            sectionChildren.add(leafNode);
+        }
+        return tree;
+    }
+
+    private String inferTaskContentType(TaskView task, Path markdownPath) {
+        List<String> candidates = new ArrayList<>();
+        if (task != null) {
+            candidates.add(task.videoUrl);
+            candidates.add(task.resultPath);
+            if (task.markdownPath != null) {
+                candidates.add(task.markdownPath.toString());
+            }
+            candidates.add(task.title);
+        }
+        if (markdownPath != null) {
+            candidates.add(markdownPath.toString());
+        }
+        for (String candidate : candidates) {
+            String inferred = inferContentTypeFromTextCandidate(candidate);
+            if (inferred != null) {
+                return inferred;
+            }
+        }
+        return null;
+    }
+
+    private String inferContentTypeFromTextCandidate(String rawCandidate) {
+        String text = trimToNullSafe(rawCandidate);
+        if (text == null) {
+            return null;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (lower.matches(".*\\.pdf(?:$|[?#\\s]).*")) {
+            return "pdf";
+        }
+        if (lower.matches(".*\\.epub(?:$|[?#\\s]).*")) {
+            return "epub";
+        }
+        if (lower.matches(".*\\.(md|markdown|txt)(?:$|[?#\\s]).*")) {
+            return "document";
+        }
+        if (lower.matches(".*\\.(mp4|mov|mkv|avi|webm|m4v)(?:$|[?#\\s]).*")) {
+            return "video";
+        }
+        if (lower.contains("ebook") || lower.contains(" book ")) {
+            return "book";
+        }
+        return null;
+    }
+
+    private String normalizeContentTypeToken(String rawContentType) {
+        String normalized = trimToNullSafe(rawContentType);
+        if (normalized == null) {
+            return null;
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if (lower.contains("pdf")) {
+            return "pdf";
+        }
+        if (lower.contains("epub")) {
+            return "epub";
+        }
+        if (lower.contains("book")) {
+            return "book";
+        }
+        if (lower.contains("markdown") || lower.contains("text") || lower.contains("document")) {
+            return "document";
+        }
+        if (lower.contains("video")) {
+            return "video";
+        }
+        return lower;
+    }
+
+    private Integer parseIntegerNode(JsonNode valueNode) {
+        if (valueNode == null || valueNode.isNull()) {
+            return null;
+        }
+        try {
+            if (valueNode.isNumber()) {
+                return valueNode.intValue();
+            }
+            String text = trimToNullSafe(valueNode.asText(null));
+            if (text == null) {
+                return null;
+            }
+            return Integer.parseInt(text);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private int parseSubSectionIndexFromSelector(String selector) {
+        String normalized = trimToNullSafe(selector);
+        if (normalized == null) {
+            return -1;
+        }
+        Matcher matcher = BOOK_SELECTOR_PATTERN.matcher(normalized);
+        if (!matcher.find()) {
+            return -1;
+        }
+        String subSectionText = trimToNullSafe(matcher.group(3));
+        if (subSectionText == null) {
+            return 1;
+        }
+        try {
+            int parsed = Integer.parseInt(subSectionText);
+            return parsed > 0 ? parsed : -1;
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+    private String buildBookOutlineIndex(int chapterIndex, int sectionIndex, int subSectionIndex, int fallbackIndex) {
+        if (chapterIndex > 0 && sectionIndex > 0 && subSectionIndex > 0) {
+            return chapterIndex + "." + sectionIndex + "." + subSectionIndex;
+        }
+        if (chapterIndex > 0 && sectionIndex > 0) {
+            return chapterIndex + "." + sectionIndex;
+        }
+        return String.valueOf(Math.max(1, fallbackIndex));
+    }
+
+    private int intValueOrFallback(Object rawValue, int fallback) {
+        if (rawValue == null) {
+            return fallback;
+        }
+        try {
+            if (rawValue instanceof Number number) {
+                return number.intValue();
+            }
+            return Integer.parseInt(String.valueOf(rawValue).trim());
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private Instant markTaskOpened(TaskView task) {
+        if (task == null) {
+            return null;
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return null;
+        }
+
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        String normalizedTitle = trimToNullSafe(task.title);
+        String normalizedTaskId = trimToNullSafe(task.taskId);
+        if ((meta.taskTitle == null || meta.taskTitle.isBlank())
+                && normalizedTitle != null
+                && (normalizedTaskId == null || !normalizedTitle.equals(normalizedTaskId))) {
+            meta.taskTitle = normalizedTitle;
+            task.title = normalizedTitle;
+            task.metaTitle = normalizedTitle;
+        }
+
+        Instant openedAt = Instant.now();
+        meta.lastOpenedAt = openedAt.toString();
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return null;
+        }
+        task.lastOpenedAt = openedAt;
+        return openedAt;
+    }
+
+    private Instant parseInstantSafe(String rawValue) {
+        String normalized = trimToNullSafe(rawValue);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(normalized);
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String deriveTaskTitle(String videoUrl, String fallbackTaskId) {
+        return TaskDisplayNameResolver.resolveTaskDisplayTitle(videoUrl, fallbackTaskId);
+    }
+
+    private String resolveSubmissionTaskTitle(String rawVideoInput, String normalizedVideoInput, String leafTitle) {
+        String normalizedLeafTitle = trimToNullSafe(leafTitle);
+        if (normalizedLeafTitle != null) {
+            return normalizedLeafTitle;
+        }
+        return deriveTaskTitle(normalizedVideoInput, normalizedVideoInput);
+    }
+
+    private String instantToText(Instant instant) {
+        return instant == null ? "" : instant.toString();
+    }
+
+
+
+
+    private String normalizeVideoInput(String rawVideoInput) {
+        return VideoInputNormalizerBridge.normalizeVideoInput(rawVideoInput);
+    }
+
+    private TaskQueueManager.Priority resolvePriority(String normalizedUserId, String rawPriority) {
+        if (StringUtils.hasText(rawPriority)) {
+            logger.info("ignore client priority parameter: user={} priority={}", normalizedUserId, rawPriority);
+        }
+        return TaskQueueManager.Priority.NORMAL;
+    }
+
+    private String normalizeUserId(String rawUserId) {
+        String trimmed = rawUserId != null ? rawUserId.trim() : "";
+        if (!trimmed.isEmpty()) {
+            return trimmed;
+        }
+        return "mobile_user_" + System.currentTimeMillis();
+    }
+
+    private String normalizeOutputDir(String rawOutputDir) {
+        if (rawOutputDir == null) {
+            return null;
+        }
+        String trimmed = rawOutputDir.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String resolveSubmissionOutputDir(String rawOutputDir, TaskQueueManager.BookProcessingOptions bookOptions) {
+        if (bookOptions != null && bookOptions.storageKey != null) {
+            return resolveStorageRoot().resolve(bookOptions.storageKey).toString();
+        }
+        return normalizeOutputDir(rawOutputDir);
+    }
+
+    private ResponseEntity<Map<String, Object>> buildUploadSubmissionResponse(
+            Path savedVideoPath,
+            String safeFileName,
+            String normalizedUserId,
+            String outputDir,
+            TaskQueueManager.Priority taskPriority,
+            String chapterSelector,
+            String sectionSelector,
+            Boolean splitByChapter,
+            Boolean splitBySection,
+            Integer pageOffset,
+            Boolean probeOnly,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt,
+            boolean reusedUpload
+    ) {
+        if (Boolean.TRUE.equals(probeOnly)) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("probeOnly", true);
+            payload.put("reused", reusedUpload);
+            payload.put("normalizedVideoUrl", savedVideoPath.toString());
+            payload.put("uploadedFileName", safeFileName);
+            payload.put("message", reusedUpload ? "file reused for probe" : "file uploaded for probe");
+            appendFingerprintPayload(payload, fingerprintOpt);
+            appendProbeCachePayload(payload, fingerprintOpt);
+            return ResponseEntity.ok(payload);
+        }
+
+        TaskQueueManager.BookProcessingOptions bookOptions = buildBookProcessingOptions(
+                chapterSelector,
+                sectionSelector,
+                splitByChapter,
+                splitBySection,
+                pageOffset
+        );
+        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+                normalizedUserId,
+                savedVideoPath.toString(),
+                normalizeOutputDir(outputDir),
+                taskPriority,
+                null,
+                bookOptions
+        );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("reused", reusedUpload);
+        payload.put("taskId", task.taskId);
+        payload.put("status", task.status.name());
+        payload.put("normalizedVideoUrl", savedVideoPath.toString());
+        payload.put("uploadedFileName", safeFileName);
+        payload.put("deduped", false);
+        payload.put("message", reusedUpload
+                ? "file reused; task submitted and queued"
+                : "video uploaded; task submitted and queued");
+        appendFingerprintPayload(payload, fingerprintOpt);
+        return ResponseEntity.ok(payload);
+    }
+
+    private Optional<FileReuseService.FileFingerprint> resolveFileFingerprint(
+            String rawMd5,
+            String rawExt,
+            String fallbackFileName
+    ) {
+        if (fileReuseService == null) {
+            return Optional.empty();
+        }
+        return fileReuseService.normalizeFingerprint(rawMd5, rawExt, fallbackFileName);
+    }
+
+    private Optional<Path> findReusableUploadPath(Optional<FileReuseService.FileFingerprint> fingerprintOpt) {
+        if (fileReuseService == null || fingerprintOpt == null || fingerprintOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        return fileReuseService.findReusablePath(fingerprintOpt.get());
+    }
+
+    private void recordUploadedFileMetadata(
+            Path filePath,
+            String safeFileName,
+            long fileSize,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt
+    ) {
+        if (fileReuseService == null || filePath == null) {
+            return;
+        }
+        Long normalizedSize = fileSize >= 0 ? fileSize : null;
+        if (fingerprintOpt != null && fingerprintOpt.isPresent()) {
+            fileReuseService.recordUploadedFile(fingerprintOpt.get(), filePath, normalizedSize, safeFileName);
+            return;
+        }
+        fileReuseService.recordUploadedFileAsync(filePath, safeFileName, normalizedSize);
+    }
+
+    private void appendFingerprintPayload(
+            Map<String, Object> payload,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt
+    ) {
+        if (payload == null || fingerprintOpt == null || fingerprintOpt.isEmpty()) {
+            return;
+        }
+        payload.put("fileMd5", fingerprintOpt.get().md5());
+        payload.put("fileExt", fingerprintOpt.get().fileExt());
+    }
+
+    private void appendProbeCachePayload(
+            Map<String, Object> payload,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt
+    ) {
+        if (payload == null || fileReuseService == null || fingerprintOpt == null || fingerprintOpt.isEmpty()) {
+            return;
+        }
+        Optional<Map<String, Object>> probePayloadOpt = fileReuseService.findProbePayload(fingerprintOpt.get());
+        if (probePayloadOpt.isEmpty()) {
+            payload.put("probeCacheHit", false);
+            return;
+        }
+        payload.put("probeCacheHit", true);
+        payload.put("probePayload", probePayloadOpt.get());
+    }
+
+    private TaskQueueManager.BookProcessingOptions buildBookProcessingOptions(
+            String chapterSelector,
+            String sectionSelector,
+            Boolean splitByChapter,
+            Boolean splitBySection,
+            Integer pageOffset
+    ) {
+        return buildBookProcessingOptions(
+                chapterSelector,
+                sectionSelector,
+                splitByChapter,
+                splitBySection,
+                pageOffset,
+                null,
+                null,
+                null
+        );
+    }
+
+    private TaskQueueManager.BookProcessingOptions buildBookProcessingOptions(
+            String chapterSelector,
+            String sectionSelector,
+            Boolean splitByChapter,
+            Boolean splitBySection,
+            Integer pageOffset,
+            String bookTitle,
+            String leafTitle,
+            String leafOutlineIndex
+    ) {
+        String normalizedChapterSelector = trimToNullSafe(chapterSelector);
+        String normalizedSectionSelector = trimToNullSafe(sectionSelector);
+        String normalizedBookTitle = trimToNullSafe(bookTitle);
+        String normalizedLeafTitle = trimToNullSafe(leafTitle);
+        String normalizedLeafOutlineIndex = trimToNullSafe(leafOutlineIndex);
+        if (normalizedChapterSelector == null && normalizedSectionSelector == null
+                && splitByChapter == null && splitBySection == null
+                && pageOffset == null
+                && normalizedBookTitle == null
+                && normalizedLeafTitle == null
+                && normalizedLeafOutlineIndex == null) {
+            return null;
+        }
+        TaskQueueManager.BookProcessingOptions options = new TaskQueueManager.BookProcessingOptions();
+        options.chapterSelector = normalizedChapterSelector;
+        options.sectionSelector = normalizedSectionSelector;
+        options.splitByChapter = splitByChapter;
+        options.splitBySection = splitBySection;
+        options.pageOffset = pageOffset;
+        options.bookTitle = normalizedBookTitle;
+        options.leafTitle = normalizedLeafTitle;
+        options.leafOutlineIndex = normalizedLeafOutlineIndex;
+        options.storageKey = buildBookLeafStorageKey(normalizedBookTitle, normalizedLeafOutlineIndex, normalizedLeafTitle);
+        return options;
+    }
+
+    private String buildBookLeafStorageKey(String bookTitle, String leafOutlineIndex, String leafTitle) {
+        if (bookTitle == null || leafOutlineIndex == null || leafTitle == null) {
+            return null;
+        }
+        return md5HexSafe(leafTitle + "_" + leafOutlineIndex + "_" + bookTitle);
+    }
+
+    private String sanitizeUploadFileName(String rawFileName) {
+        String baseName = "uploaded_video.mp4";
+        if (StringUtils.hasText(rawFileName)) {
+            try {
+                baseName = Paths.get(rawFileName).getFileName().toString();
+            } catch (Exception ignored) {
+                baseName = rawFileName;
+            }
+        }
+        String sanitized = UNSAFE_FILENAME_CHARS.matcher(baseName).replaceAll("_");
+        sanitized = sanitized.replaceAll("_+", "_");
+        if (!StringUtils.hasText(sanitized)) {
+            sanitized = "uploaded_video.mp4";
+        }
+        if (sanitized.startsWith(".")) {
+            sanitized = "video" + sanitized;
+        }
+        if (!sanitized.contains(".")) {
+            sanitized = sanitized + ".mp4";
+        }
+        return sanitized;
+    }
+
+    private boolean hasSupportedUploadExtension(String fileName) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        for (String ext : ALLOWED_UPLOAD_EXTENSIONS) {
+            if (lower.endsWith(ext)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String normalizeUploadId(String rawUploadId) {
+        String normalized = rawUploadId == null ? "" : rawUploadId.trim();
+        if (!SAFE_UPLOAD_ID_PATTERN.matcher(normalized).matches()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid uploadId");
+        }
+        return normalized;
+    }
+
+    private Path resolveUploadRoot() throws IOException {
+        Path uploadRootPath = Paths.get(uploadDir).toAbsolutePath().normalize();
+        Files.createDirectories(uploadRootPath);
+        return uploadRootPath;
+    }
+
+    private boolean isMarkdownFile(String filename) {
+        if (filename == null) {
+            return false;
+        }
+        String lower = filename.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".md") || lower.endsWith(".markdown");
+    }
+
+    private MediaType detectMediaType(Path path) {
+        try {
+            String probed = Files.probeContentType(path);
+            if (probed != null && !probed.isBlank()) {
+                return MediaType.parseMediaType(probed);
+            }
+        } catch (Exception ignored) {
+            // Keep extension fallback checks.
+        }
+        String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (name.endsWith(".md") || name.endsWith(".markdown")) {
+            return MediaType.parseMediaType("text/markdown;charset=UTF-8");
+        }
+        if (name.endsWith(".png")) return MediaType.IMAGE_PNG;
+        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return MediaType.IMAGE_JPEG;
+        if (name.endsWith(".gif")) return MediaType.IMAGE_GIF;
+        if (name.endsWith(".webp")) return MediaType.parseMediaType("image/webp");
+        if (name.endsWith(".svg")) return MediaType.parseMediaType("image/svg+xml");
+        if (name.endsWith(".pdf")) return MediaType.APPLICATION_PDF;
+        if (name.endsWith(".txt")) return MediaType.TEXT_PLAIN;
+        if (name.endsWith(".epub")) return MediaType.parseMediaType("application/epub+zip");
+        if (name.endsWith(".mp4")) return MediaType.parseMediaType("video/mp4");
+        if (name.endsWith(".webm")) return MediaType.parseMediaType("video/webm");
+        if (name.endsWith(".mov")) return MediaType.parseMediaType("video/quicktime");
+        return MediaType.APPLICATION_OCTET_STREAM;
+    }
+
+    private record PreparedFlatExport(Path markdownPath, TaskBundleExportService.FlatTaskExportPlan exportPlan) {}
+
+    private static class ExportFileEntry {
+        private final Path path;
+        private final String entryName;
+        private final boolean core;
+
+        private ExportFileEntry(Path path, String entryName, boolean core) {
+            this.path = path;
+            this.entryName = entryName;
+            this.core = core;
+        }
+    }
+
+    private static class ExportZipResult {
+        private final int exportedCount;
+        private final int skippedCount;
+
+        private ExportZipResult(int exportedCount, int skippedCount) {
+            this.exportedCount = exportedCount;
+            this.skippedCount = skippedCount;
+        }
+    }
+
+    private static class ResolvedMarkdown {
+        private final Path markdownPath;
+        private final Path baseDir;
+
+        private ResolvedMarkdown(Path markdownPath, Path baseDir) {
+            this.markdownPath = markdownPath;
+            this.baseDir = baseDir;
+        }
+    }
+
+    private static class TocMetadata {
+        private final String contentType;
+        private final List<Map<String, Object>> bookSectionTree;
+
+        private TocMetadata(String contentType, List<Map<String, Object>> bookSectionTree) {
+            this.contentType = contentType != null ? contentType : "unknown";
+            this.bookSectionTree = bookSectionTree != null ? bookSectionTree : List.of();
+        }
+    }
+
+    private static class StorageMetadata {
+        private boolean hasSuccessFlag;
+        private boolean success;
+        private Instant generatedAt;
+        private String errorMessage;
+        private String videoPath;
+        private String resultMarkdownPath;
+    }
+
+    private static class TaskMetaFile {
+        public String version = "1.0";
+        public String updatedAt = "";
+        public String taskTitle = null;
+        public String lastOpenedAt = null;
+        public Map<String, NoteMeta> notesByMarkdown = new LinkedHashMap<>();
+    }
+
+    private static class NoteMeta {
+        public Map<String, Boolean> favorites = new LinkedHashMap<>();
+        public Map<String, Boolean> deleted = new LinkedHashMap<>();
+        public Map<String, Object> comments = new LinkedHashMap<>();
+        public Map<String, Boolean> tokenLike = new LinkedHashMap<>();
+        public Map<String, Object> tokenAnnotations = new LinkedHashMap<>();
+        public Map<String, Object> anchors = new LinkedHashMap<>();
+    }
+
+    public static class MarkdownUpdateRequest {
+        public String path;
+        public String markdown;
+    }
+
+    public static class TaskMetaUpdateRequest {
+        public String path;
+        public String taskTitle;
+        public Map<String, Boolean> favorites;
+        public Map<String, Boolean> deleted;
+        public Map<String, Object> comments;
+        public Map<String, Boolean> tokenLike;
+        public Map<String, Object> tokenAnnotations;
+        public Map<String, Object> anchors;
+    }
+
+    public static class TaskTerminalReconcileRequest {
+        public List<String> taskIds;
+    }
+
+    public static class AnchorSyncRequest {
+        public String path;
+        public String mainNotePath;
+        public List<AnchorSyncOperation> operations;
+    }
+
+    public static class AnchorBatchDeleteRequest {
+        public String path;
+        public List<String> anchorIds;
+        public Boolean removeFiles;
+    }
+
+    public static class AnchorSyncOperation {
+        public String op;
+        public String relativePath;
+        public String content;
+    }
+
+    public static class TaskTelemetryIngestRequest {
+        public String path;
+        public List<TelemetryEventItem> events;
+    }
+
+    public static class TelemetryEventItem {
+        public String nodeId;
+        public String eventType;
+        public Double relevanceScore;
+        public Long timestampMs;
+        public Map<String, Object> payload;
+    }
+
+    public static class TaskSubmitRequest {
+        public String userId;
+        public String videoUrl;
+        public String outputDir;
+        public String priority;
+        public String collectionId;
+        public Integer episodeNo;
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+        public String bookTitle;
+        public String leafTitle;
+        public String leafOutlineIndex;
+    }
+
+    public static class ChunkUploadCompleteRequest {
+        public String uploadId;
+        public String userId;
+        public String outputDir;
+        public String priority;
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+        public Boolean probeOnly;
+        public String fileMd5;
+        public String fileExt;
+    }
+
+    public static class UploadReuseCheckRequest {
+        public String userId;
+        public String outputDir;
+        public String priority;
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+        public Boolean probeOnly;
+        public String fileName;
+        public Long fileSize;
+        public String fileMd5;
+        public String fileExt;
+        public Boolean autoSubmit;
+    }
+
+    public static class CollectionBatchSubmitRequest {
+        public List<Integer> episodeNos;
+        public String userId;
+        public String outputDir;
+        public String priority;
+    }
+
+    public static class ManualTaskCollectionBindingItem {
+        public String taskPath;
+        public String collectionPath;
+    }
+
+    public static class ManualTaskCollectionsUpsertRequest {
+        public List<ManualTaskCollectionBindingItem> bindings;
+    }
+
+    private static class StorageDeleteResult {
+        private boolean success = true;
+        private boolean found;
+        private boolean deleted;
+        private int deletedEntries;
+        private String message;
+        private String storageKey;
+        private String lastError;
+        private Path taskRoot;
+    }
+
+    private record TaskViewCollectionSnapshot(List<TaskView> tasks, boolean resyncRequired) {}
+
+    private static class TaskView {
+        private String taskId;
+        private String title;
+        private String metaTitle;
+        private String videoUrl;
+        private String status;
+        private Instant createdAt;
+        private Instant lastOpenedAt;
+        private Instant completedAt;
+        private Instant runtimeUpdatedAt;
+        private Instant metaUpdatedAt;
+        private String resultPath;
+        private boolean markdownAvailable;
+        private Path markdownPath;
+        private Path baseDir;
+        private boolean storageTask;
+        private String storageKey;
+        private Path taskRootDir;
+        private String statusMessage;
+        private String userMessage;
+        private String errorMessage;
+        private String domain;
+        private String mainTopic;
+        private double progress;
+        private Map<String, Object> recoveryPayload;
+        private TaskEntry runtimeTask;
+        private String collectionId;
+        private Integer episodeNo;
+        private String episodeTitle;
+        private String collectionTitle;
+        private String collectionPath;
+        private String categoryPath;
+        private String taskPath;
+        private Map<String, Object> taskCost;
+        private String taskCostSummary;
+        private Instant costUpdatedAt;
+        private boolean archived;
+        private Instant archivedAt;
+        private boolean manualCollection;
+        private Integer totalEpisodes;
+        private String bookTitle;
+        private String bookLeafTitle;
+        private String bookLeafOutlineIndex;
+    }
+}

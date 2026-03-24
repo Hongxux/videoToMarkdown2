@@ -1,0 +1,7 @@
+# Python gRPC 服务统一依赖入口（本地 / CI / 手工排障优先使用本文件）。
+# 设计原则：
+# 1) 真实依赖集中在 requirements/grpc-server-base.txt，避免多处复制；
+# 2) 本文件补齐本地与宿主机常规运行需要的视觉依赖；
+# 3) Docker 镜像可改用 requirements.docker.txt，再按镜像策略单独安装 mediapipe。
+-r requirements/grpc-server-base.txt
+mediapipe==0.10.14

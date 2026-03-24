@@ -1,0 +1,11 @@
+.env
+.env.*
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.log
+target/
+
+var/*
+!var/README.md

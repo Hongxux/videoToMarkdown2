@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.log
+
+var/storage
+var/cache
+var/artifacts
+var/models

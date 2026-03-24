@@ -1,0 +1,785 @@
+/* [COMP-TASK-LIST] 任务列表反馈层
+ * 做什么：承载任务列表状态提示、骨架加载、卡片状态、进度条与徽章样式。
+ * 为什么：将反馈视觉从主页面内联样式中拆出，降低单文件复杂度，便于独立迭代。 */
+.status-tip {
+    display: none;
+    color: var(--muted);
+    font-size: 13px;
+    padding: 0 12px 10px;
+    min-height: 0;
+    transition: color var(--motion-duration-fast) var(--motion-ease-out), transform var(--motion-duration-fast) var(--motion-ease-out), filter var(--motion-duration-fast) var(--motion-ease-out);
+}
+
+.status-tip:not(:empty) {
+    display: block;
+}
+
+.status-tip.loading {
+    display: flex;
+    align-items: center;
+    min-height: 24px;
+}
+
+.status-tip.loading .status-loading-visual {
+    width: min(220px, 62vw);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.status-tip.loading .status-loading-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: linear-gradient(145deg, #60a5fa, #3b82f6);
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.12);
+    animation: statusDotPulse 0.95s ease-in-out infinite;
+    flex: 0 0 auto;
+}
+
+.status-tip.loading .status-loading-track {
+    flex: 1;
+    height: 8px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #dbe5f0;
+    position: relative;
+}
+
+.status-tip.loading .status-loading-track::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, rgba(255, 255, 255, 0) 8%, rgba(255, 255, 255, 0.86) 48%, rgba(255, 255, 255, 0) 92%);
+    transform: translateX(-120%);
+    animation: skeletonSweep 1.2s ease-in-out infinite;
+}
+
+.status-tip.error {
+    color: var(--danger);
+}
+
+.task-list {
+    padding: 8px 14px calc(90px + var(--bottom-nav-active-h));
+    display: grid;
+    gap: 0;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior-y: contain;
+}
+
+.task-list.task-list-crossfading > .task-list-loading,
+.task-list.task-list-crossfading > .task-list-crossfade-next {
+    grid-area: 1 / 1;
+}
+
+.task-list-loading {
+    margin: 0;
+    min-height: 56px;
+    display: grid;
+    gap: 8px;
+    align-content: start;
+    pointer-events: none;
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 220ms ease, transform 220ms ease;
+}
+
+.task-list-loading-text {
+    border: 0;
+    border-radius: 8px;
+    background: rgba(248, 250, 252, 0.9);
+    box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.24);
+    color: #475569;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px;
+}
+
+.task-list-loading.is-fade-out {
+    opacity: 0;
+    transform: translateY(-4px);
+}
+
+.task-list-crossfade-next {
+    display: grid;
+    gap: 0;
+    align-content: start;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 220ms ease, transform 220ms ease;
+}
+
+.task-list-crossfade-next.is-fade-in {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.task-list-error {
+    border: 0;
+    background: #fff1f2;
+    border-radius: 10px;
+    box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.45), 0 8px 18px rgba(248, 113, 113, 0.16);
+    padding: 12px;
+    display: grid;
+    gap: 10px;
+}
+
+.task-list-error .message {
+    color: #991b1b;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.task-item {
+    width: 100%;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    border-radius: 0;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+    padding: 14px 2px 12px;
+    cursor: pointer;
+    display: grid;
+    gap: 6px;
+    min-height: 68px;
+    content-visibility: auto;
+    contain-intrinsic-size: 76px;
+    overflow: hidden;
+    isolation: isolate;
+    position: relative;
+    transition:
+        background-color var(--motion-duration-fast) var(--motion-ease-out),
+        box-shadow var(--motion-duration-fast) var(--motion-ease-out),
+        transform var(--motion-duration-fast) var(--motion-ease-out),
+        filter var(--motion-duration-fast) var(--motion-ease-out);
+}
+
+.task-skeleton-card {
+    cursor: default;
+    background: linear-gradient(180deg, var(--card) 0%, var(--bg) 100%);
+}
+
+.task-skeleton-card::before {
+    content: "";
+    position: absolute;
+    inset: -20% 0;
+    background: linear-gradient(100deg, rgba(255, 255, 255, 0) 8%, rgba(255, 255, 255, 0.86) 48%, rgba(255, 255, 255, 0) 92%);
+    transform: translateX(-120%);
+    animation: skeletonSweep 1.4s ease-in-out infinite;
+    pointer-events: none;
+}
+
+.task-skeleton-card.is-failed {
+    background: rgba(254, 242, 242, 0.86);
+    border-bottom-color: rgba(248, 113, 113, 0.4);
+}
+
+.task-skeleton-card.is-failed::before {
+    opacity: 0.6;
+    animation-duration: 2s;
+}
+
+.task-skeleton-line,
+.task-skeleton-pill,
+.task-skeleton-chip {
+    background: rgba(148, 163, 184, 0.38);
+    border-radius: 999px;
+    display: block;
+}
+
+.task-skeleton-line {
+    height: 10px;
+}
+
+.task-skeleton-line.w-72 { width: 72%; }
+.task-skeleton-line.w-56 { width: 56%; }
+.task-skeleton-line.w-46 { width: 46%; }
+
+.task-skeleton-pill {
+    width: 58px;
+    height: 18px;
+}
+
+.task-skeleton-chip {
+    width: 34px;
+    height: 18px;
+}
+
+.task-skeleton-meta {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.task-skeleton-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.task-skeleton-message {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.task-skeleton-card.is-failed .task-skeleton-message {
+    color: #b91c1c;
+}
+
+.task-skeleton-action-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 999px;
+}
+
+.task-list > .task-item:last-child {
+    border-bottom: 0;
+}
+
+.task-item > * {
+    position: relative;
+    z-index: 1;
+}
+
+.task-item .task-title {
+    position: relative;
+}
+
+.task-item.fx-complete .task-title {
+    color: #475569;
+}
+
+.task-item.fx-title-highlight .task-title {
+    animation: highlightPulse 380ms var(--motion-ease-out) 1;
+    color: #0f172a;
+    text-shadow: 0 0 0 rgba(37, 99, 235, 0);
+}
+
+.task-item.fx-start-processing {
+    animation: taskStartProcessingPulse 620ms var(--motion-ease-snappy);
+}
+
+.task-item.fx-enter {
+    animation: taskItemEnterInPlace 360ms var(--motion-ease-out) 1;
+}
+
+.task-item.task-submit-highlight {
+    background: rgba(219, 234, 254, 0.82);
+    box-shadow: inset 3px 0 0 #2563eb, 0 0 0 1px rgba(37, 99, 235, 0.18);
+    animation: taskSubmitHighlightPulse 1.28s ease-out 1;
+}
+
+.task-item.task-submit-highlight .task-title {
+    color: #0f172a;
+}
+
+.task-item.fx-enter::before {
+    content: "";
+    position: absolute;
+    inset: 8px 0;
+    border-radius: inherit;
+    pointer-events: none;
+    z-index: 0;
+    background: linear-gradient(120deg, rgba(59, 130, 246, 0.1) 0%, rgba(59, 130, 246, 0) 68%);
+    opacity: 0;
+    animation: taskItemEnterGlow 400ms ease-out 1;
+}
+
+.task-item.fx-complete .task-title::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 2px;
+    border-radius: 999px;
+    background: var(--task-strike-color);
+    transform: scaleX(0);
+    transform-origin: left center;
+    animation: taskStrikeDraw 360ms ease-out forwards;
+}
+
+.task-item.fx-exit {
+    pointer-events: none;
+    animation: taskCompleteSlideOut 420ms cubic-bezier(0.22, 1, 0.36, 1) 100ms forwards;
+}
+
+.task-item.active {
+    background: rgba(15, 23, 42, 0.02);
+    box-shadow: inset 2px 0 0 #2563eb;
+    transform: translateY(0);
+}
+
+.task-item.status-processing {
+    background: rgba(37, 99, 235, 0.04);
+}
+
+.task-item.status-completed {
+    opacity: 0.95;
+}
+
+.task-item.status-failed,
+.task-item.status-cancelled {
+    background: rgba(220, 38, 38, 0.04);
+}
+
+.task-title {
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.34;
+    word-break: break-word;
+    flex: 1;
+    min-width: 0;
+    letter-spacing: 0.004em;
+}
+
+.task-main-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.task-title-stack {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 4px;
+}
+
+.task-state-pill {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #475569;
+}
+
+.task-state-pill::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #94a3b8;
+    box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.26);
+}
+
+.task-state-pill.status-queued {
+    color: #92400e;
+}
+
+.task-state-pill.status-queued::before {
+    background: #d97706;
+}
+
+.task-state-pill.status-unknown {
+    color: #475569;
+}
+
+.task-state-pill.status-unknown::before {
+    background: #64748b;
+}
+
+.task-state-pill.status-processing {
+    color: #1d4ed8;
+}
+
+.task-state-pill.status-processing::before {
+    background: #2563eb;
+    animation:
+        statusDotPulse 0.95s ease-in-out infinite,
+        taskProcessingDotKick 720ms var(--motion-ease-snappy) 1;
+}
+
+.task-state-pill.status-completed {
+    color: #047857;
+}
+
+.task-state-pill.status-completed::before {
+    background: #059669;
+}
+
+.task-state-pill.status-failed,
+.task-state-pill.status-cancelled {
+    color: #b91c1c;
+}
+
+.task-state-pill.status-failed::before,
+.task-state-pill.status-cancelled::before {
+    background: #dc2626;
+}
+
+.task-foot-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 20px;
+}
+
+.task-source-chip {
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 7px 1px 1px;
+    border: 0;
+    background: rgba(148, 163, 184, 0.12);
+    color: #334155;
+    flex: 0 0 auto;
+}
+
+.task-source-chip.source-bilibili {
+    background: rgba(236, 72, 153, 0.12);
+    color: #9d174d;
+}
+
+.task-source-chip.source-link {
+    background: rgba(14, 165, 233, 0.12);
+    color: #0c4a6e;
+}
+
+.task-source-chip.source-file {
+    background: rgba(245, 158, 11, 0.14);
+    color: #92400e;
+}
+
+.task-source-glyph {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 700;
+    color: #ffffff;
+    background: currentColor;
+    filter: saturate(0.86);
+}
+
+.task-source-text {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 1;
+}
+
+.task-progress-hint {
+    color: #64748b;
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.015em;
+    margin-left: auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 56%;
+}
+
+.task-meta-quiet {
+    color: #64748b;
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.badge-queued { background: var(--warning); }
+.badge-unknown { background: var(--text-secondary); }
+.badge-processing { background: var(--primary); }
+.badge-completed { background: var(--success); }
+.badge-failed,
+.badge-cancelled { background: var(--danger); }
+
+@keyframes taskStrikeDraw {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+}
+
+@keyframes taskCompleteSlideOut {
+    0% {
+        opacity: 1;
+        transform: translateX(0) scale(1);
+        filter: saturate(1);
+    }
+    100% {
+        opacity: 0;
+        transform: translateX(42px) scale(0.96);
+        filter: saturate(0.82);
+    }
+}
+
+@keyframes taskItemEnterInPlace {
+    0% {
+        opacity: 0;
+        transform: translateY(10px) scale(0.987);
+    }
+    70% {
+        opacity: 1;
+        transform: translateY(-1px) scale(1);
+    }
+    100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes taskItemEnterGlow {
+    0% {
+        opacity: 0;
+    }
+    35% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 0;
+    }
+}
+
+@keyframes taskSubmitHighlightPulse {
+    0% {
+        background: rgba(191, 219, 254, 0.96);
+        box-shadow: inset 3px 0 0 #2563eb, 0 0 0 0 rgba(37, 99, 235, 0.28);
+        transform: translateY(0) scale(0.996);
+    }
+    38% {
+        background: rgba(219, 234, 254, 0.9);
+        box-shadow: inset 3px 0 0 #2563eb, 0 0 0 8px rgba(37, 99, 235, 0);
+        transform: translateY(-1px) scale(1.002);
+    }
+    100% {
+        background: rgba(219, 234, 254, 0.82);
+        box-shadow: inset 3px 0 0 #2563eb, 0 0 0 1px rgba(37, 99, 235, 0.18);
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes taskItemRipple {
+    0% {
+        opacity: 0.62;
+        transform: translate(-50%, -50%) scale(0.12);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(1);
+    }
+}
+
+@keyframes statusDotPulse {
+    0%, 100% {
+        transform: scale(0.84);
+        opacity: 0.58;
+    }
+    50% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+@keyframes taskStartProcessingPulse {
+    0% {
+        background: rgba(37, 99, 235, 0.02);
+        transform: translateY(0) scale(1);
+    }
+    40% {
+        background: rgba(37, 99, 235, 0.1);
+        transform: translateY(-1px) scale(1.002);
+    }
+    100% {
+        background: rgba(37, 99, 235, 0.04);
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes taskProcessingDotKick {
+    0% {
+        transform: scale(0.84);
+        filter: saturate(1);
+    }
+    38% {
+        transform: scale(1.3);
+        filter: saturate(1.24);
+    }
+    100% {
+        transform: scale(1);
+        filter: saturate(1);
+    }
+}
+
+@keyframes taskProgressLiquidFlow {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 150% 50%; }
+}
+
+@keyframes taskProgressLiquidShine {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(140%); }
+}
+
+@keyframes taskProgressCompleteSpark {
+    0% { filter: brightness(1.2) saturate(1.14); }
+    100% { filter: brightness(1) saturate(1); }
+}
+
+@keyframes taskProgressCompleteBreathe {
+    0%, 100% { filter: saturate(1); }
+    50% { filter: saturate(1.14); }
+}
+
+@keyframes skeletonSweep {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(120%); }
+}
+
+/* [A11Y-MOTION] 低动效场景：任务反馈模块自管过渡与动画降级
+ * 做什么：关闭任务反馈里的高频过渡与强调动画。
+ * 为什么：减少系统“降低动态效果”模式下的视觉干扰与晕动风险。 */
+@media (prefers-reduced-motion: reduce) {
+    .task-item,
+    .task-list-loading,
+    .task-list-crossfade-next,
+    .task-progress-hint,
+    .status-tip {
+        transition: none !important;
+    }
+
+    .task-item.fx-enter,
+    .task-item.fx-start-processing,
+    .task-item.fx-complete,
+    .task-item.fx-title-highlight .task-title,
+    .task-state-pill::before {
+        animation: none !important;
+    }
+}
+
+@media (prefers-color-scheme: dark) {
+    .task-item {
+        border-bottom-color: rgba(71, 85, 105, 0.62);
+    }
+
+    .task-item.active {
+        background: rgba(148, 163, 184, 0.12);
+        box-shadow: inset 2px 0 0 #93c5fd;
+    }
+
+    .task-item.status-processing {
+        background: rgba(96, 165, 250, 0.12);
+    }
+
+    .task-item.status-failed,
+    .task-item.status-cancelled {
+        background: rgba(248, 113, 113, 0.1);
+    }
+
+    .task-source-chip {
+        background: rgba(71, 85, 105, 0.3);
+        color: #d8e4fb;
+    }
+
+    .task-source-chip.source-bilibili {
+        background: rgba(236, 72, 153, 0.2);
+        color: #f9a8d4;
+    }
+
+    .task-source-chip.source-link {
+        background: rgba(14, 165, 233, 0.2);
+        color: #93c5fd;
+    }
+
+    .task-source-chip.source-file {
+        background: rgba(245, 158, 11, 0.2);
+        color: #fcd34d;
+    }
+
+    .task-meta-quiet {
+        color: #9aa7bd;
+    }
+
+    .task-progress-hint {
+        color: #a9b8cf;
+    }
+
+    .status-tip.loading .status-loading-dot {
+        background: linear-gradient(145deg, #8bb8ff, #6d7ff3);
+        box-shadow: none;
+    }
+
+    .status-tip.loading .status-loading-track {
+        background: #3a495f;
+    }
+
+    .task-list-loading-text {
+        background: linear-gradient(180deg, #1f2734 0%, #1b2432 100%);
+        box-shadow: inset 0 0 0 1px var(--ring-strong), 0 12px 22px rgba(0, 0, 0, 0.28);
+        color: #9fb0c6;
+    }
+}
+
+/* [COMP-COPY-FEEDBACK] 复制交互反馈
+ * 做什么：极简的“已复制”提示与卡片微动效。
+ * 为什么：替代原生 alert，提供更优雅、不打断心流的确认感 (Steve Jobs style)。 */
+.copy-tooltip {
+    position: fixed;
+    z-index: 9999;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 20px;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -100%);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    animation: copyTooltipFloat 1.2s cubic-bezier(0.19, 1, 0.22, 1) forwards;
+}
+
+@keyframes copyTooltipFloat {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.9);
+    }
+    15% {
+        opacity: 1;
+        transform: translate(-50%, -120%) scale(1);
+    }
+    75% {
+        opacity: 1;
+        transform: translate(-50%, -120%) scale(1);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(-50%, -140%) scale(0.95);
+    }
+}
+
+/* 复制反馈在内容页可能落到 markdown 行节点，需与卡片节点共用同一微动效。 */
+.paragraph-card.copy-active,
+.markdown-body :is(p, li, blockquote, h1, h2, h3, h4, h5, h6, pre).copy-active {
+    transition: transform 0.1s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transform: scale(0.98);
+}

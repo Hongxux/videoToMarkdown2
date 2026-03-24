@@ -1,0 +1,15 @@
+基于用户动态演进的最新双层精神画像，请接管以下阅读材料，对这些 Semantic Chunk 进行具有深度与灵魂映射的评分附魔。
+
+=== 用户的双层立体现状 (Dual-Tier Persona) ===
+{persona_json}
+
+=== 待附魔的合并语义块阵列 (Text Chunks) ===
+{nodes_json}
+
+=== 严格限制 ===
+1. 必须对输入的【每一个】 `chunk_id` 都进行计算与输出，保持原数组长度与顺序，不可遗漏！
+2. 为了保证打分的抗辩性和合理性，必须在 JSON 元素内部【先输出 reason，再输出 relevance_score】。这也构成了你在长上下文中打分的思维链。
+3. 请严格按照：`chunk_id`, `reason`, `relevance_score`, `insights_tags` 的输出顺序。
+4. 极其严格地遵循纯 JSON 数组格式，不输出多余的Markdown解释。
+5. `insights_tags` 必须逐项来自当前 `text_chunk` 的原文字符串，重点提取【理解文章核心内容必须的名词】，以及用户绝对会感兴趣或引起探究欲的词汇，禁止生造词。
+6. 若当前 `text_chunk` 既没有明确的核心业务术语又无高能概念（比如只是普通的口语或通俗文字串联），必须毫无顾忌地输出 `insights_tags: []`，禁止降档凑数。

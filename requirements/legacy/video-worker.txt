@@ -1,0 +1,22 @@
+# Python Worker依赖包
+
+# 现有依赖
+openai-whisper
+anthropic
+pandas
+PyYAML
+rich
+
+# 新增RabbitMQ依赖
+pika==1.3.2
+
+# 视频处理
+ffmpeg-python
+yt-dlp
+
+# 异步支持
+aiohttp
+aiofiles
+webrtcvad
+opencv-python-headless
+dtw-python

@@ -1,0 +1,8 @@
+# 统一 Python 依赖入口（主入口）
+# 说明：
+# - 历史 requirements 已迁移到 requirements/legacy/。
+# - 新流程统一使用本文件安装依赖。
+
+-r ./legacy/video-worker.txt
+-r ./legacy/mvp-module2.txt
+

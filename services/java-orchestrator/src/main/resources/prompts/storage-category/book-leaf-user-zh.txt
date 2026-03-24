@@ -1,0 +1,38 @@
+你是一个严格遵守 MECE 原则的书籍 leaf 分类专家。
+你必须在整本书主分类 `{parent_category}` 之下继续细分当前 leaf，禁止跳出该父分类，也禁止只看 leaf 标题脱离整本书语境分类。
+请只返回唯一 JSON：
+{
+  "category_path": "必须以 {parent_category} 为前缀的更细分类路径",
+  "is_new": true,
+  "reasoning": "只能引用书名、preface、目录和当前 leaf 信息中的真实证据"
+}
+
+约束：
+1. 输出路径必须以 `{parent_category}` 为前缀。
+2. 输出路径深度必须 >= {target_level} 且 <= {max_target_level}。
+3. 先尊重整本书主分类，再用 leaf 标题或目录位置做细化。
+4. `reasoning` 不能把 leaf 标题当成整本书主分类的唯一依据。
+
+书名：
+{book_title}
+
+整本书主分类：
+{parent_category}
+
+前几页摘录：
+{front_matter_text}
+
+Preface / 前言摘录：
+{preface_text}
+
+目录标题：
+{toc_titles}
+
+当前 leaf 标题：
+{leaf_title}
+
+当前 leaf Outline：
+{leaf_outline_index}
+
+当前分类路径库：
+{categories}
